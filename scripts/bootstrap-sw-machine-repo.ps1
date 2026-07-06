@@ -40,11 +40,21 @@ function Invoke-Native {
 
 New-Item -ItemType Directory -Force -Path $repoParent | Out-Null
 
-if ((Test-Path -LiteralPath $repoPath) -and !(Test-Path -LiteralPath (Join-Path $repoPath ".git"))) {
-  if ((Split-Path -Leaf $repoPath) -ne "bowlus-hawley") {
-    throw "Refusing to remove unexpected repo path: $repoPath"
+if (Test-Path -LiteralPath $repoPath) {
+  $validRepo = $false
+  if (Test-Path -LiteralPath (Join-Path $repoPath ".git")) {
+    Push-Location $repoPath
+    & $git rev-parse --is-inside-work-tree | Out-Null
+    $validRepo = $LASTEXITCODE -eq 0
+    Pop-Location
   }
-  Remove-Item -LiteralPath $repoPath -Recurse -Force
+
+  if (!$validRepo) {
+    if ((Split-Path -Leaf $repoPath) -ne "bowlus-hawley") {
+      throw "Refusing to remove unexpected repo path: $repoPath"
+    }
+    Remove-Item -LiteralPath $repoPath -Recurse -Force
+  }
 }
 
 if (!(Test-Path -LiteralPath $repoPath)) {
