@@ -13,6 +13,11 @@ const COUNT_QUERIES = Object.freeze([
   ["raw.airtable_worker_cycle_bank", "select count(*)::int as count from raw.airtable_worker_cycle_bank"],
   ["raw.airtable_phases", "select count(*)::int as count from raw.airtable_phases"],
   ["raw.airtable_worker_phase_allocation", "select count(*)::int as count from raw.airtable_worker_phase_allocation"],
+  ["raw.asana_portfolios", "select count(*)::int as count from raw.asana_portfolios"],
+  ["raw.asana_portfolio_projects", "select count(*)::int as count from raw.asana_portfolio_projects"],
+  ["raw.asana_projects", "select count(*)::int as count from raw.asana_projects"],
+  ["raw.asana_tasks", "select count(*)::int as count from raw.asana_tasks"],
+  ["raw.asana_task_project_memberships", "select count(*)::int as count from raw.asana_task_project_memberships"],
   ["core.task_instances", "select count(*)::int as count from core.task_instances"],
   [
     "reporting.daily_worker_assignments",
@@ -34,7 +39,7 @@ async function main() {
     const run = await client.query(`
       select id, job_name, status, records_read, records_written, error_count, ended_at
       from sync.run_log
-      where job_name = 'pull_airtable'
+      where job_name in ('pull_airtable', 'pull_asana')
       order by id desc
       limit 1
     `);

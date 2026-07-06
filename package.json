@@ -8,7 +8,7 @@
     "pg:health": "node ./apps/postgres-sync/src/health.js",
     "pg:migrate": "node ./apps/postgres-sync/src/migrate.js",
     "pg:pull:airtable": "node ./apps/postgres-sync/src/pull-airtable.js",
-    "pg:pull:asana": "node ./apps/postgres-sync/src/not-implemented.js pg:pull:asana",
+    "pg:pull:asana": "node ./apps/postgres-sync/src/pull-asana.js",
     "pg:normalize": "node ./apps/postgres-sync/src/normalize-airtable.js",
     "pg:sync:dry": "npm run pg:pull:airtable && npm run pg:normalize",
     "pg:summary": "node ./apps/postgres-sync/src/import-summary.js"

@@ -51,10 +51,16 @@ scripts/              Local setup and health helpers
 npm install
 npm run pg:health
 npm run pg:migrate
+npm run pg:pull:asana
 ```
 
 `pg:health` only checks the database connection. It does not contact Asana or
 Airtable.
+
+`pg:pull:asana` reads the `Fabrication - 2026` and `VINs - 2026` portfolios
+from Asana and mirrors portfolios, portfolio-project membership, projects,
+tasks, subtasks, custom fields, and task project/section memberships into the
+local Postgres `raw` schema.
 
 ## Secret Rules
 
