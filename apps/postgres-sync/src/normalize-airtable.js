@@ -61,12 +61,10 @@ async function main() {
   try {
     await client.query("begin");
 
-    const [taskRows, workerRows, cycleRows, phaseRows] = await Promise.all([
-      client.query("select record_id, fields_json from raw.airtable_task_instances"),
-      client.query("select record_id, fields_json from raw.airtable_work_force"),
-      client.query("select record_id, fields_json from raw.airtable_cycles"),
-      client.query("select record_id, fields_json from raw.airtable_phases")
-    ]);
+    const taskRows = await client.query("select record_id, fields_json from raw.airtable_task_instances");
+    const workerRows = await client.query("select record_id, fields_json from raw.airtable_work_force");
+    const cycleRows = await client.query("select record_id, fields_json from raw.airtable_cycles");
+    const phaseRows = await client.query("select record_id, fields_json from raw.airtable_phases");
 
     const workerLookup = mapByRecordId(workerRows.rows);
     const cycleLookup = mapByRecordId(cycleRows.rows);

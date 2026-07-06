@@ -1,0 +1,60 @@
+import pg from "pg";
+import { getDatabaseConfig } from "./config.js";
+
+const { Client } = pg;
+
+const COUNT_QUERIES = Object.freeze([
+  ["raw.airtable_task_instances", "select count(*)::int as count from raw.airtable_task_instances"],
+  ["raw.airtable_cycles", "select count(*)::int as count from raw.airtable_cycles"],
+  ["raw.airtable_work_force", "select count(*)::int as count from raw.airtable_work_force"],
+  ["raw.airtable_phase_cycle_load", "select count(*)::int as count from raw.airtable_phase_cycle_load"],
+  ["raw.airtable_worker_cycle_bank", "select count(*)::int as count from raw.airtable_worker_cycle_bank"],
+  ["raw.airtable_phases", "select count(*)::int as count from raw.airtable_phases"],
+  ["raw.airtable_worker_phase_allocation", "select count(*)::int as count from raw.airtable_worker_phase_allocation"],
+  ["core.task_instances", "select count(*)::int as count from core.task_instances"],
+  [
+    "reporting.daily_worker_assignments",
+    "select count(*)::int as count from reporting.daily_worker_assignments"
+  ]
+]);
+
+async function main() {
+  const client = new Client(getDatabaseConfig());
+  await client.connect();
+
+  try {
+    const counts = {};
+    for (const [name, sql] of COUNT_QUERIES) {
+      const result = await client.query(sql);
+      counts[name] = result.rows[0].count;
+    }
+
+    const run = await client.query(`
+      select id, job_name, status, records_read, records_written, error_count, ended_at
+      from sync.run_log
+      where job_name = 'pull_airtable'
+      order by id desc
+      limit 1
+    `);
+
+    const fieldSummary = await client.query(`
+      select
+        count(distinct key)::int as distinct_task_instance_field_count
+      from raw.airtable_task_instances,
+      lateral jsonb_object_keys(fields_json) as key
+    `);
+
+    console.log(JSON.stringify({
+      latestAirtableRun: run.rows[0] || null,
+      counts,
+      taskInstanceFieldCount: fieldSummary.rows[0]?.distinct_task_instance_field_count || 0
+    }, null, 2));
+  } finally {
+    await client.end();
+  }
+}
+
+main().catch(error => {
+  console.error(error.message);
+  process.exitCode = 1;
+});
