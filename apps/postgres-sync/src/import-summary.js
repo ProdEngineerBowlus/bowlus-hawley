@@ -4,6 +4,8 @@ import { getDatabaseConfig } from "./config.js";
 const { Client } = pg;
 
 const COUNT_QUERIES = Object.freeze([
+  ["raw.airtable_schema_tables", "select count(*)::int as count from raw.airtable_schema_tables"],
+  ["raw.airtable_schema_fields", "select count(*)::int as count from raw.airtable_schema_fields"],
   ["raw.airtable_task_instances", "select count(*)::int as count from raw.airtable_task_instances"],
   ["raw.airtable_cycles", "select count(*)::int as count from raw.airtable_cycles"],
   ["raw.airtable_work_force", "select count(*)::int as count from raw.airtable_work_force"],
@@ -38,16 +40,30 @@ async function main() {
     `);
 
     const fieldSummary = await client.query(`
+      with payload_fields as (
+        select distinct key as field_name
+        from raw.airtable_task_instances,
+        lateral jsonb_object_keys(fields_json) as key
+      ),
+      schema_fields as (
+        select field_name
+        from raw.airtable_schema_fields
+        where table_name = 'Task Instances Rev1'
+      )
       select
-        count(distinct key)::int as distinct_task_instance_field_count
-      from raw.airtable_task_instances,
-      lateral jsonb_object_keys(fields_json) as key
+        (select count(*) from payload_fields)::int as distinct_task_instance_field_count,
+        (select count(*) from schema_fields)::int as task_instance_schema_field_count,
+        (select count(*) from schema_fields sf where not exists (
+          select 1 from payload_fields pf where pf.field_name = sf.field_name
+        ))::int as task_instance_schema_fields_absent_from_payload
     `);
 
     console.log(JSON.stringify({
       latestAirtableRun: run.rows[0] || null,
       counts,
-      taskInstanceFieldCount: fieldSummary.rows[0]?.distinct_task_instance_field_count || 0
+      taskInstanceFieldCount: fieldSummary.rows[0]?.distinct_task_instance_field_count || 0,
+      taskInstanceSchemaFieldCount: fieldSummary.rows[0]?.task_instance_schema_field_count || 0,
+      taskInstanceSchemaFieldsAbsentFromPayload: fieldSummary.rows[0]?.task_instance_schema_fields_absent_from_payload || 0
     }, null, 2));
   } finally {
     await client.end();

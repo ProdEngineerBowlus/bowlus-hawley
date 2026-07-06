@@ -82,6 +82,11 @@ async function fetchAllAirtableRecords({ baseId, token, tableName }) {
   return records;
 }
 
+async function fetchAirtableSchema({ baseId, token }) {
+  const url = `${AIRTABLE_API_BASE}/meta/bases/${encodeURIComponent(baseId)}/tables`;
+  return airtableRequest(url, token);
+}
+
 function modifiedAtFromFields(fields) {
   for (const key of ["Last Modified", "Last Modified Time", "Last Modified At", "Updated At", "Modified At"]) {
     if (fields[key]) return fields[key];
@@ -121,6 +126,72 @@ async function upsertRawRecords(client, table, records, sourceTableName) {
   if (ids.length) {
     await client.query(`delete from ${fullTable} where not (record_id = any($1::text[]))`, [ids]);
   }
+}
+
+async function upsertSchemaCatalog(client, schema, tableNames) {
+  const wanted = new Set(tableNames);
+  const tables = (schema.tables || []).filter(table => wanted.has(table.name));
+
+  for (const table of tables) {
+    await client.query(
+      `
+        insert into raw.airtable_schema_tables
+          (table_id, table_name, primary_field_id, raw_json, synced_at)
+        values
+          ($1, $2, $3, $4::jsonb, now())
+        on conflict (table_id) do update set
+          table_name = excluded.table_name,
+          primary_field_id = excluded.primary_field_id,
+          raw_json = excluded.raw_json,
+          synced_at = now()
+      `,
+      [
+        table.id,
+        table.name,
+        table.primaryFieldId || null,
+        JSON.stringify(table)
+      ]
+    );
+
+    for (const field of table.fields || []) {
+      await client.query(
+        `
+          insert into raw.airtable_schema_fields
+            (table_id, field_id, table_name, field_name, field_type, field_description, raw_json, synced_at)
+          values
+            ($1, $2, $3, $4, $5, $6, $7::jsonb, now())
+          on conflict (table_id, field_id) do update set
+            table_name = excluded.table_name,
+            field_name = excluded.field_name,
+            field_type = excluded.field_type,
+            field_description = excluded.field_description,
+            raw_json = excluded.raw_json,
+            synced_at = now()
+        `,
+        [
+          table.id,
+          field.id,
+          table.name,
+          field.name,
+          field.type || null,
+          field.description || null,
+          JSON.stringify(field)
+        ]
+      );
+    }
+
+    await client.query(
+      "delete from raw.airtable_schema_fields where table_id = $1 and not (field_id = any($2::text[]))",
+      [table.id, (table.fields || []).map(field => field.id)]
+    );
+  }
+
+  await client.query(
+    "delete from raw.airtable_schema_tables where table_name = any($1::text[]) and not (table_name = any($2::text[]))",
+    [Array.from(wanted), tables.map(table => table.name)]
+  );
+
+  return tables;
 }
 
 async function startRun(client) {
@@ -172,6 +243,13 @@ async function main() {
   };
 
   try {
+    const sourceTableNames = TABLES.map(tableConfig => process.env[tableConfig.envKey] || tableConfig.sourceName);
+    const schema = await fetchAirtableSchema({ baseId, token });
+    const schemaTables = await upsertSchemaCatalog(client, schema, sourceTableNames);
+    summary.schemaTables = Object.fromEntries(
+      schemaTables.map(table => [table.name, { fields: (table.fields || []).length }])
+    );
+
     for (const tableConfig of TABLES) {
       const sourceName = process.env[tableConfig.envKey] || tableConfig.sourceName;
       const records = await fetchAllAirtableRecords({ baseId, token, tableName: sourceName });

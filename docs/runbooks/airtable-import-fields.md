@@ -1,9 +1,16 @@
 # Airtable Import Fields
 
-Hawley imports Airtable without a `fields[]` filter. That is intentional: the
-API should return every populated field visible to the token, including hidden
-formula/helper fields. Empty fields may be omitted by Airtable, so downstream
-logic must tolerate missing keys.
+Hawley imports Airtable in two layers:
+
+1. Schema metadata into `raw.airtable_schema_tables` and
+   `raw.airtable_schema_fields`, which captures every defined field visible to
+   the token.
+2. Record payloads into `raw.airtable_*` tables without a `fields[]` filter.
+   This captures every populated field value Airtable returns, including
+   hidden/formula/helper fields visible through the API.
+
+Empty-everywhere fields may be absent from Airtable record payloads, but they
+remain represented in the schema catalog.
 
 ## Imported Tables
 
@@ -81,7 +88,7 @@ Imported counts:
 - `core.task_instances`: 8,324
 - `reporting.daily_worker_assignments`: 5,161
 
-The `Task Instances Rev1` mirror saw 67 distinct populated field names. This is
-the expected sign that Hawley imported the broad Airtable record payload,
-including helper/formula/hidden fields visible through the API, rather than only
-the smaller worker-page field list above.
+The `Task Instances Rev1` schema catalog saw 90 defined fields. The record
+payload mirror saw 67 distinct populated field names. The 23-field difference is
+expected for fields that are defined in the table but absent from the current
+record payload because Airtable omits empty values.
