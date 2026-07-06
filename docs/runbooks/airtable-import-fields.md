@@ -64,3 +64,24 @@ The first reporting view, `reporting.daily_worker_assignments`, reads from
 `core.task_instances`. It is not yet a replacement for the live worker page; it
 is the comparison surface for proving Hawley can answer the same question from
 Postgres.
+
+## First Import Baseline
+
+First SW_Machine import run: 2026-07-06.
+
+Imported counts:
+
+- `raw.airtable_task_instances`: 8,324
+- `raw.airtable_cycles`: 25
+- `raw.airtable_work_force`: 22
+- `raw.airtable_phase_cycle_load`: 163
+- `raw.airtable_worker_cycle_bank`: 186
+- `raw.airtable_phases`: 20
+- `raw.airtable_worker_phase_allocation`: 264
+- `core.task_instances`: 8,324
+- `reporting.daily_worker_assignments`: 5,161
+
+The `Task Instances Rev1` mirror saw 67 distinct populated field names. This is
+the expected sign that Hawley imported the broad Airtable record payload,
+including helper/formula/hidden fields visible through the API, rather than only
+the smaller worker-page field list above.
