@@ -23,6 +23,17 @@ Recommended defaults:
 - local-only listening at first
 - database name: `bowlus_ops`
 
+If the EDB installer fails from an SSH/non-desktop session with an
+`Invalid account WORKGROUP\...` installer log entry, use the repo script instead:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-sw-machine-postgres.ps1
+```
+
+The script downloads the official EDB Windows binary zip, initializes the
+cluster, registers `HawleyPostgres17`, and creates the first Hawley roles and
+database.
+
 ## Bootstrap Database
 
 Create roles:
