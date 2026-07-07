@@ -13,6 +13,7 @@ const COUNT_QUERIES = Object.freeze([
   ["raw.airtable_worker_cycle_bank", "select count(*)::int as count from raw.airtable_worker_cycle_bank"],
   ["raw.airtable_phases", "select count(*)::int as count from raw.airtable_phases"],
   ["raw.airtable_worker_phase_allocation", "select count(*)::int as count from raw.airtable_worker_phase_allocation"],
+  ["raw.airtable_worker_daily_actuals", "select count(*)::int as count from raw.airtable_worker_daily_actuals"],
   ["raw.asana_portfolios", "select count(*)::int as count from raw.asana_portfolios"],
   ["raw.asana_portfolio_projects", "select count(*)::int as count from raw.asana_portfolio_projects"],
   ["raw.asana_projects", "select count(*)::int as count from raw.asana_projects"],

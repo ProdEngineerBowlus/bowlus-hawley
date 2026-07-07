@@ -824,6 +824,22 @@
 
   function workerDailyEfficiency(worker, availableMinutes = elapsedScheduledWorkMinutesForDate(state.date)) {
     const loggedMinutes = workerActualLoggedMinutes(worker);
+    const summary = worker.dailyEfficiency || {};
+    const summaryLoggedMinutes = Number(summary.loggedMinutes || 0);
+    const summaryAvailableMinutes = Number(summary.availableMinutes || 0);
+    if (summaryLoggedMinutes > 0 && summaryAvailableMinutes > 0) {
+      const summaryPercent = Number(summary.percent || 0) || Math.round((summaryLoggedMinutes / summaryAvailableMinutes) * 100);
+      return {
+        id: worker.id,
+        name: worker.name,
+        loggedMinutes: Math.max(loggedMinutes, summaryLoggedMinutes),
+        availableMinutes: summaryAvailableMinutes,
+        hasWork: true,
+        percent: summaryPercent,
+        level: efficiencyLevel(summaryPercent, summaryAvailableMinutes),
+      };
+    }
+
     const hasWork = Number(worker.assignedHours || 0) > 0 || openTasks(worker.tasks).length || Number(worker.completedTaskCount || 0) > 0;
     const percent = availableMinutes ? Math.round((loggedMinutes / availableMinutes) * 100) : 0;
     return {
@@ -1751,9 +1767,9 @@
       const timerActual = task.completed ? 0 : timerElapsedMinutes(getTaskTimer(task));
       return sum + (task.completed ? sourceActual : Math.max(sourceActual, timerActual));
     }, 0);
+    const workerMinutes = Math.round(Number(worker.actualTimeLoggedMinutes || Number(worker.actualTimeLoggedHours || worker.actualHours || 0) * 60 || 0));
 
-    if (taskMinutes) return taskMinutes;
-    return Math.round(Number(worker.actualTimeLoggedMinutes || Number(worker.actualTimeLoggedHours || worker.actualHours || 0) * 60 || 0));
+    return Math.max(taskMinutes, workerMinutes);
   }
 
   function getWorkerActiveTask(worker) {

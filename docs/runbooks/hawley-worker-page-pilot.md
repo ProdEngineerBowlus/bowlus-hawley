@@ -25,6 +25,17 @@ where `project_gid` is the Daily Assignment Tracker project
 including tasks whose Airtable `Assigned On` value is blank but whose DAT
 snapshot includes them for the selected date.
 
+Daily efficiency also depends on mirrored worker actuals from:
+
+```sql
+raw.airtable_worker_daily_actuals
+```
+
+Those rows come from Airtable `Worker Daily Task Actuals`. Hawley overlays task
+actuals and daily summary logged minutes from that table so the worker detail
+page does not under-report a person who has same-day WIP or recovered timer
+minutes outside completed source-task time.
+
 If no DAT snapshot exists for the selected date, the app falls back to:
 
 ```sql
@@ -139,3 +150,9 @@ npm run pg:pull:daily-tracker
 If the DAT project has no snapshot for the selected date, the page falls back to
 mirrored `Task Instances Rev1`. In that fallback mode, a fresh assignment in
 Airtable will not show until `pg:pull:airtable` and `pg:normalize` have run.
+
+If task lists match but daily efficiency is low, check that
+`raw.airtable_worker_daily_actuals` has current rows for the selected `Work Date`.
+The current Daily Worker App can show higher efficiency than task-only Asana
+minutes because it recovers work from local worker logs/timers and writes those
+summaries into `Worker Daily Task Actuals`.

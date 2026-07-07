@@ -40,6 +40,11 @@ const TABLES = Object.freeze([
     envKey: "HAWLEY_AIRTABLE_WORKER_PHASE_ALLOCATION_TABLE",
     sourceName: "Worker Phase Allocation Rev1",
     targetTable: "raw.airtable_worker_phase_allocation"
+  },
+  {
+    envKey: "HAWLEY_AIRTABLE_WORKER_DAILY_ACTUALS_TABLE",
+    sourceName: "Worker Daily Task Actuals",
+    targetTable: "raw.airtable_worker_daily_actuals"
   }
 ]);
 

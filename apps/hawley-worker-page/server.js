@@ -44,7 +44,7 @@ function sendError(res, status, message, details = {}) {
 
 function publicErrorMessage(error) {
   const message = error.message || "";
-  if (/hawley_worker_page_assignments|task_work_area_inference|work_force_capability_levels|jsonb_display_text/.test(message)) {
+  if (/hawley_worker_page_assignments|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|jsonb_display_text/.test(message)) {
     return {
       status: 503,
       message: "Hawley worker read model is not migrated yet. Run npm run pg:migrate."
@@ -390,6 +390,19 @@ function dateValue(field) {
   if (!field) return "";
   if (field.date_value?.date) return field.date_value.date;
   return field.display_value ? String(field.display_value).slice(0, 10) : "";
+}
+
+function numberFromField(value) {
+  if (value === null || value === undefined || value === "") return 0;
+  if (typeof value === "number") return value;
+  const cleaned = String(value).replace(/[^0-9.\-]+/g, "");
+  return cleaned ? Number(cleaned) : 0;
+}
+
+function booleanFromField(value) {
+  if (value === true) return true;
+  if (value === false || value === null || value === undefined) return false;
+  return /^(true|1|yes|y|checked)$/i.test(String(value).trim());
 }
 
 function displayPhaseLabel(phaseLabel, phaseBucket) {
@@ -775,6 +788,124 @@ async function enrichSnapshotWorkersFromRaw(workers) {
   }
 }
 
+function normalizeWorkerDailyActual(row) {
+  const fields = row.fields_json || {};
+  const actualMinutes = numberFromField(fields["Actual Minutes"]);
+  const timerMinutes = numberFromField(fields["Timer Minutes"]);
+  const asanaPostedMinutes = numberFromField(fields["Asana Posted Minutes"]);
+
+  return {
+    id: row.record_id,
+    date: fields["Work Date"] || "",
+    workerId: fields["Worker Key"] || "",
+    workerName: fields["Worker Name"] || "",
+    workerEmail: fields["Worker Email"] || "",
+    taskId: fields["Asana Task GID"] || "",
+    taskName: fields["Task Name"] || "",
+    taskUrl: publicLink(fields["Task URL"]),
+    vin: fields.VIN || "",
+    cycle: formatCycleName(fields.Cycle),
+    phase: formatPhaseName(fields.Phase),
+    assignedHours: numberFromField(fields["Assigned Hours"]),
+    allocatedHours: numberFromField(fields["Allocated Hours"]),
+    actualMinutes,
+    timerMinutes,
+    asanaPostedMinutes,
+    loggedMinutes: Math.max(actualMinutes, timerMinutes, asanaPostedMinutes),
+    dailyLoggedMinutes: numberFromField(fields["Daily Logged Minutes"]),
+    dailyAvailableMinutes: numberFromField(fields["Daily Available Minutes"]),
+    dailyEfficiencyPercent: numberFromField(fields["Daily Efficiency Percent"]),
+    completed: booleanFromField(fields["Completed?"]),
+    dailySummary: booleanFromField(fields["Daily Summary?"]),
+    source: fields.Source || ""
+  };
+}
+
+function workerIdForDailyActual(row) {
+  if (row.workerId) return row.workerId;
+  return slugifyWorker({
+    workerEmail: row.workerEmail,
+    workerName: row.workerName
+  });
+}
+
+function applyWorkerDailyActualRows(workers, actualRows) {
+  const workerById = new Map((workers || []).map(worker => [worker.id, worker]));
+  const workerByName = new Map((workers || []).map(worker => [slugify(worker.name), worker]));
+  const summaryMinutesByWorker = new Map();
+
+  for (const row of actualRows || []) {
+    const workerId = workerIdForDailyActual(row);
+    const worker = workerById.get(workerId) || workerByName.get(slugify(row.workerName));
+    if (!worker) continue;
+
+    if (row.dailySummary || row.taskId === "__daily__") {
+      if (row.dailyLoggedMinutes > 0) {
+        summaryMinutesByWorker.set(worker.id, Math.max(summaryMinutesByWorker.get(worker.id) || 0, row.dailyLoggedMinutes));
+      }
+      worker.dailyEfficiency = {
+        loggedMinutes: row.dailyLoggedMinutes,
+        availableMinutes: row.dailyAvailableMinutes,
+        percent: row.dailyEfficiencyPercent,
+        source: row.source || "Worker Daily Task Actuals"
+      };
+      continue;
+    }
+
+    const taskIdValue = String(row.taskId || "");
+    if (!taskIdValue || row.loggedMinutes <= 0) continue;
+
+    const existingTask = (worker.tasks || []).find(task => String(task.id || "") === taskIdValue);
+    if (existingTask) {
+      existingTask.actualTimeOnDateMinutes = Math.max(Number(existingTask.actualTimeOnDateMinutes || 0), row.loggedMinutes);
+      existingTask.actualTimeMinutes = Math.max(Number(existingTask.actualTimeMinutes || 0), row.asanaPostedMinutes);
+      existingTask.timerAccumulatedMinutes = Math.max(Number(existingTask.timerAccumulatedMinutes || 0), row.timerMinutes);
+      existingTask.ledgerBackfilled = true;
+      existingTask.ledgerSource = row.source || "Worker Daily Task Actuals";
+      if (!existingTask.title && row.taskName) existingTask.title = row.taskName;
+      if (!existingTask.vin && row.vin) existingTask.vin = row.vin;
+      if (!existingTask.cycle && row.cycle) existingTask.cycle = row.cycle;
+      if (!existingTask.phase && row.phase) existingTask.phase = row.phase;
+      continue;
+    }
+
+    worker.tasks.push({
+      id: taskIdValue,
+      title: row.taskName || `Source task ${taskIdValue}`,
+      sourceUrl: row.taskUrl || (taskIdValue ? sourceTaskUrl(taskIdValue) : ""),
+      trackerUrl: "",
+      assignedHours: row.assignedHours,
+      targetHours: row.allocatedHours || row.assignedHours,
+      actualTimeMinutes: row.asanaPostedMinutes,
+      actualTimeOnDateMinutes: row.loggedMinutes,
+      timerStartedAt: "",
+      timerAccumulatedMinutes: row.timerMinutes,
+      timerElapsedMinutes: 0,
+      estimatedMinutes: minutesFromHours(row.allocatedHours || row.assignedHours),
+      sopUrl: "",
+      completed: row.completed,
+      cycle: row.cycle,
+      phase: row.phase,
+      phaseBucket: "",
+      vin: row.vin,
+      workedTimeRecovered: true,
+      ledgerBackfilled: true,
+      recoveredSource: row.source || "Worker Daily Task Actuals",
+      ledgerSource: row.source || "Worker Daily Task Actuals"
+    });
+  }
+
+  for (const worker of workers || []) {
+    recalculateSnapshotWorkerCompletion(worker);
+    const summaryMinutes = summaryMinutesByWorker.get(worker.id) || 0;
+    if (summaryMinutes > 0) {
+      worker.actualTimeLoggedMinutes = Math.max(Number(worker.actualTimeLoggedMinutes || 0), summaryMinutes);
+      worker.actualTimeLoggedHours = round(worker.actualTimeLoggedMinutes / 60);
+      worker.actualHours = worker.actualTimeLoggedHours;
+    }
+  }
+}
+
 function snapshotToLineOverview(snapshot) {
   return {
     cycle: snapshot.cycle,
@@ -1035,6 +1166,24 @@ async function dailyTrackerSnapshots() {
     .filter(snapshot => !snapshot.archivedSection);
 }
 
+async function workerDailyActualRows(date) {
+  const result = await pool.query(
+    `
+      select
+        record_id,
+        fields_json
+      from raw.airtable_worker_daily_actuals
+      where fields_json->>'Work Date' = $1
+      order by
+        fields_json->>'Worker Name' nulls last,
+        fields_json->>'Task Name' nulls last
+    `,
+    [date]
+  );
+
+  return result.rows.map(normalizeWorkerDailyActual);
+}
+
 async function dailyAssignmentsPayload(url) {
   const date = url.searchParams.get("date") || todayIso();
   const employee = url.searchParams.get("employee") || "";
@@ -1044,12 +1193,13 @@ async function dailyAssignmentsPayload(url) {
     throw error;
   }
 
-  const [rows, configuredRows, latestRuns, latestDate, trackerSnapshots] = await Promise.all([
+  const [rows, configuredRows, latestRuns, latestDate, trackerSnapshots, actualRows] = await Promise.all([
     workerAssignments(date),
     configuredWorkers(),
     latestImportRuns(),
     latestAssignmentDate(),
-    dailyTrackerSnapshots()
+    dailyTrackerSnapshots(),
+    workerDailyActualRows(date)
   ]);
   const selectedTrackerSnapshots = trackerSnapshots.filter(snapshot => snapshot.trackerDate === date);
   const hasTrackerSnapshot = selectedTrackerSnapshots.some(snapshot => snapshot.trackerType === "Worker" || snapshot.trackerType === "Line Overview");
@@ -1068,10 +1218,12 @@ async function dailyAssignmentsPayload(url) {
       configuredRows
     );
     await enrichSnapshotWorkersFromRaw(allWorkers);
+    applyWorkerDailyActualRows(allWorkers, actualRows);
     cycleDayPayload = employee ? null : buildCycleDaysFromTrackerSnapshots(trackerSnapshots, date);
     lineOverview = selectedTrackerSnapshots.find(snapshot => snapshot.trackerType === "Line Overview");
   } else {
     allWorkers = mergeConfiguredWorkers(buildWorkers(rows), configuredRows);
+    applyWorkerDailyActualRows(allWorkers, actualRows);
     cycleDayPayload = employee ? null : await cycleDays(date);
   }
 
@@ -1106,6 +1258,7 @@ async function healthPayload() {
         (select count(*)::int from reporting.hawley_worker_page_assignments) as assignment_rows,
         (select count(distinct worker_email)::int from reporting.hawley_worker_page_assignments where worker_email is not null) as assigned_worker_count,
         (select count(*)::int from raw.asana_tasks where project_gid = $1) as daily_tracker_rows,
+        (select count(*)::int from raw.airtable_worker_daily_actuals) as worker_daily_actual_rows,
         (
           select count(*)::int
           from raw.airtable_work_force
