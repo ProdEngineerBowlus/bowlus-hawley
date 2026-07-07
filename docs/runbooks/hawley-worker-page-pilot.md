@@ -18,6 +18,7 @@ The app reads:
 
 ```sql
 reporting.hawley_worker_page_assignments
+reporting.work_force_capability_levels
 ```
 
 That view enriches `reporting.daily_worker_assignments` with:
@@ -27,6 +28,16 @@ That view enriches `reporting.daily_worker_assignments` with:
 - Asana completion state
 - inferred work area from the operational capability map
 - source sync timestamp
+
+Manager mode merges active `Work Force` rows from
+`reporting.work_force_capability_levels` with the dated assignment rows. This
+matches the current Daily Worker App behavior: the root page shows the active
+roster even when only one worker has tasks with `Assigned On` equal to the
+selected date.
+
+The browser assets in `apps/hawley-worker-page/public` are intentionally copied
+from the current Shop Ops `apps/daily-worker-app` UI so the pilot looks and
+behaves like the existing worker page while the backend reads Hawley/Postgres.
 
 ## Commands
 
@@ -60,10 +71,14 @@ http://127.0.0.1:5273?employee=<worker-slug>
 GET /api/health
 GET /api/daily-assignments?date=YYYY-MM-DD
 GET /api/daily-assignments?date=YYYY-MM-DD&employee=<worker-slug>
+GET /api/auth-status
+GET /api/alert-status
+GET /api/refresh-daily-tracker
+POST /api/refresh-daily-tracker
 POST /api/worker-task-action
 ```
 
-`POST /api/worker-task-action` intentionally returns a read-only pilot error.
+The `POST` endpoints intentionally return read-only pilot errors.
 
 ## Configuration
 
