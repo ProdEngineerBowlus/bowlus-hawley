@@ -73,7 +73,7 @@ select
   ti.vin,
   ti.estimated_hours,
   ti.actual_time_minutes,
-  coalesce(matched_area.work_area_key, lower(regexp_replace(coalesce(nullif(ti.phase_name, ''), membership.section_name, 'unspecified'), '[^a-z0-9]+', '_', 'g'))) as inferred_work_area_key,
+  coalesce(matched_area.work_area_key, regexp_replace(lower(coalesce(nullif(ti.phase_name, ''), membership.section_name, 'unspecified')), '[^a-z0-9]+', '_', 'g')) as inferred_work_area_key,
   coalesce(matched_area.display_name, nullif(ti.phase_name, ''), membership.section_name, 'Unspecified') as inferred_work_area_name,
   case
     when matched_area.work_area_key is not null and nullif(ti.phase_name, '') is not null then 'airtable_phase_alias'

@@ -88,7 +88,8 @@ function isIsoDate(value) {
 
 function slugifyWorker({ workerEmail, workerName }) {
   const email = String(workerEmail || "").trim().toLowerCase();
-  if (email) return `asana-${email.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`;
+  const emailForSlug = email.replace(/^asana\+/, "");
+  if (emailForSlug) return `asana-${emailForSlug.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`;
   return `worker-${String(workerName || "unknown").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`;
 }
 
@@ -141,7 +142,10 @@ function buildWorkers(rows) {
   const byWorker = new Map();
 
   for (const row of rows) {
-    const id = slugifyWorker(row);
+    const id = slugifyWorker({
+      workerEmail: row.worker_email,
+      workerName: row.worker_name
+    });
     if (!byWorker.has(id)) {
       byWorker.set(id, {
         id,
@@ -244,26 +248,14 @@ async function latestImportRuns() {
   return Object.fromEntries(result.rows.map(row => [row.job_name, row]));
 }
 
-async function workerAssignments(date, employee = "") {
+async function workerAssignments(date) {
   const params = [date];
-  let employeeSql = "";
-
-  if (employee) {
-    params.push(employee);
-    employeeSql = `
-      and (
-        lower('asana-' || regexp_replace(coalesce(worker_email, ''), '[^a-zA-Z0-9]+', '-', 'g')) = lower($2)
-        or lower('worker-' || regexp_replace(coalesce(worker_name, ''), '[^a-zA-Z0-9]+', '-', 'g')) = lower($2)
-      )
-    `;
-  }
 
   const result = await pool.query(
     `
       select *
       from reporting.hawley_worker_page_assignments
       where assigned_on = $1::date
-      ${employeeSql}
       order by
         worker_name nulls last,
         completed,
@@ -286,10 +278,10 @@ async function dailyAssignmentsPayload(url) {
   }
 
   const [rows, latestRuns] = await Promise.all([
-    workerAssignments(date, employee),
+    workerAssignments(date),
     latestImportRuns()
   ]);
-  const workers = buildWorkers(rows);
+  const workers = buildWorkers(rows).filter(worker => !employee || worker.id === employee);
 
   return {
     ok: true,

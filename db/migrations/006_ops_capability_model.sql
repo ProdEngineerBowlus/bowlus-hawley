@@ -58,14 +58,14 @@ values
   ('inventory', 'Inventory', 'QC / Inventory SL', array[]::text[], array['Inventory','QC / Inventory'], array['inventory','parts','stock'], 'Inventory and QC/inventory support scope.'),
   ('cnc', 'CNC', 'CNC SL', array['CNC'], array['CNC'], array['cnc','router','machine'], 'CNC work center.'),
   ('management', 'Management', null, array[]::text[], array['Management'], array['management','review','approve','escalate'], 'Management and scheduling/escalation ownership.'),
-  ('phase_a', 'Phase A', 'Phase A SL', array['Phase A'], array['Phase A','Phase A Lower','Phase A Upper'], array[]::text[], 'Declared Work Force capability for Phase A.'),
-  ('phase_b', 'Phase B', 'Phase B SL', array['Phase B'], array['Phase B'], array[]::text[], 'Declared Work Force capability for Phase B.'),
-  ('phase_c', 'Phase C', 'Phase C SL', array['Phase C'], array['Phase C'], array[]::text[], 'Declared Work Force capability for Phase C.'),
-  ('phase_d', 'Phase D', 'Phase D SL', array['Phase D'], array['Phase D'], array[]::text[], 'Declared Work Force capability for Phase D.'),
-  ('phase_e', 'Phase E', 'Phase E SL', array['Phase E'], array['Phase E'], array[]::text[], 'Declared Work Force capability for Phase E.'),
-  ('phase_f', 'Phase F', 'Phase F SL', array['Phase F'], array['Phase F'], array[]::text[], 'Declared Work Force capability for Phase F.'),
-  ('phase_g', 'Phase G', 'Phase G SL', array['Phase G'], array['Phase G'], array[]::text[], 'Declared Work Force capability for Phase G.'),
-  ('phase_h', 'Phase H', 'Phase H SL', array['Phase H'], array['Phase H'], array[]::text[], 'Declared Work Force capability for Phase H.')
+  ('phase_a', 'Phase A', 'Phase A SL', array['Phase A','A'], array['Phase A','Phase A Lower','Phase A Upper','A'], array[]::text[], 'Declared Work Force capability for Phase A.'),
+  ('phase_b', 'Phase B', 'Phase B SL', array['Phase B','B'], array['Phase B','B'], array[]::text[], 'Declared Work Force capability for Phase B.'),
+  ('phase_c', 'Phase C', 'Phase C SL', array['Phase C','C'], array['Phase C','C'], array[]::text[], 'Declared Work Force capability for Phase C.'),
+  ('phase_d', 'Phase D', 'Phase D SL', array['Phase D','D'], array['Phase D','D'], array[]::text[], 'Declared Work Force capability for Phase D.'),
+  ('phase_e', 'Phase E', 'Phase E SL', array['Phase E','E'], array['Phase E','E'], array[]::text[], 'Declared Work Force capability for Phase E.'),
+  ('phase_f', 'Phase F', 'Phase F SL', array['Phase F','F'], array['Phase F','F'], array[]::text[], 'Declared Work Force capability for Phase F.'),
+  ('phase_g', 'Phase G', 'Phase G SL', array['Phase G','G'], array['Phase G','G'], array[]::text[], 'Declared Work Force capability for Phase G.'),
+  ('phase_h', 'Phase H', 'Phase H SL', array['Phase H','H'], array['Phase H','H'], array[]::text[], 'Declared Work Force capability for Phase H.')
 on conflict (work_area_key) do update set
   display_name = excluded.display_name,
   skill_level_field = excluded.skill_level_field,
