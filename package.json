@@ -12,7 +12,10 @@
     "pg:pull:daily-tracker": "node ./apps/postgres-sync/src/pull-daily-tracker.js",
     "pg:normalize": "node ./apps/postgres-sync/src/normalize-airtable.js",
     "pg:load:ops-hints": "node ./apps/postgres-sync/src/load-ops-owner-hints.js",
+    "pg:refresh-worker-read-model": "npm run pg:pull:airtable && npm run pg:normalize && npm run pg:pull:daily-tracker",
+    "pg:refresh-all": "npm run pg:pull:airtable && npm run pg:normalize && npm run pg:pull:asana && npm run pg:pull:daily-tracker",
     "pg:sync:dry": "npm run pg:pull:airtable && npm run pg:normalize",
+    "pg:source-health": "node ./apps/postgres-sync/src/source-health.js",
     "pg:summary": "node ./apps/postgres-sync/src/import-summary.js",
     "worker:hawley": "node ./apps/hawley-worker-page/server.js"
   },

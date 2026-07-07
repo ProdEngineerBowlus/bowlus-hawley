@@ -86,6 +86,20 @@ npm run pg:pull:daily-tracker
 snapshot payload so worker-page completion status can match the current app
 without a full portfolio pull.
 
+For the DB-only worker page pilot, the repeatable freshness command is:
+
+```powershell
+npm run pg:refresh-worker-read-model
+```
+
+That updates Airtable support tables, normalizes Hawley task rows, then mirrors
+the Daily Assignment Tracker snapshot and referenced source tasks. Use the
+broader command when the full Asana portfolio mirror also needs to be refreshed:
+
+```powershell
+npm run pg:refresh-all
+```
+
 Start the pilot:
 
 ```powershell
@@ -137,6 +151,24 @@ PGUSER
 PGPASSWORD
 DATABASE_URL
 ```
+
+## Source Health
+
+The worker page must stay DB-only. Do not add live Airtable or Asana fallback
+reads to the page itself, because that would hide stale Hawley data during the
+pilot.
+
+Use the read-only source health check to compare Hawley's mirror against live
+Airtable and Asana counts:
+
+```powershell
+npm run pg:source-health
+```
+
+The check reads source systems and Hawley/Postgres, but does not write to
+Airtable, Asana, or Postgres. It exits with code `2` when Hawley counts differ
+from the source counts. Use `-- --no-fail` when a human-readable JSON report is
+needed without failing a scheduled monitor.
 
 ## Blank Task Triage
 
