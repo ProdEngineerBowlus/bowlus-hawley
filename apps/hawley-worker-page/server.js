@@ -15,6 +15,7 @@ const HOST = process.env.HAWLEY_WORKER_HOST || "127.0.0.1";
 const PORT = Number(process.env.HAWLEY_WORKER_PORT || 5273);
 const DAILY_TRACKER_PROJECT_ID = process.env.HAWLEY_DAILY_TRACKER_PROJECT_GID || "1214157321063250";
 const USE_DAT_SNAPSHOTS = process.env.HAWLEY_WORKER_USE_DAT_SNAPSHOTS === "true";
+const INCLUDE_NO_WORK_WORKERS = process.env.HAWLEY_WORKER_INCLUDE_NO_WORK === "true";
 
 const pool = new Pool(getDatabaseConfig());
 
@@ -86,6 +87,10 @@ function todayIso() {
 
 function isIsoDate(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+}
+
+function booleanQuery(value) {
+  return ["1", "true", "yes", "y"].includes(String(value || "").trim().toLowerCase());
 }
 
 function dateFromIso(value) {
@@ -394,6 +399,26 @@ function mergeConfiguredWorkers(workers, configuredRows) {
     const workDelta = Number(b.taskCount > 0) - Number(a.taskCount > 0);
     if (workDelta) return workDelta;
     return a.name.localeCompare(b.name);
+  });
+}
+
+function workerHasVisibleWork(worker) {
+  return Boolean(
+    Number(worker.assignedHours || 0) > 0 ||
+    Number(worker.remainingHours || 0) > 0 ||
+    Number(worker.completedHours || 0) > 0 ||
+    Number(worker.taskCount || 0) > 0 ||
+    (worker.tasks || []).length > 0 ||
+    Number(worker.actualTimeLoggedMinutes || worker.actualTimeMinutes || 0) > 0 ||
+    (worker.dailyEfficiency && Number(worker.dailyEfficiency.loggedMinutes || 0) > 0)
+  );
+}
+
+function visibleWorkersForRequest(workers, employee, includeNoWork) {
+  return (workers || []).filter(worker => {
+    if (employee) return worker.id === employee;
+    if (includeNoWork) return true;
+    return workerHasVisibleWork(worker);
   });
 }
 
@@ -1347,6 +1372,7 @@ async function workerDailyActualRows(date) {
 async function dailyAssignmentsPayload(url) {
   const date = url.searchParams.get("date") || todayIso();
   const employee = url.searchParams.get("employee") || "";
+  const includeNoWork = INCLUDE_NO_WORK_WORKERS || booleanQuery(url.searchParams.get("includeNoWork"));
   if (!isIsoDate(date)) {
     const error = new Error("Date must be YYYY-MM-DD.");
     error.statusCode = 400;
@@ -1391,7 +1417,7 @@ async function dailyAssignmentsPayload(url) {
     cycleDayPayload = employee ? null : await cycleDays(date);
   }
 
-  const workers = allWorkers.filter(worker => !employee || worker.id === employee);
+  const workers = visibleWorkersForRequest(allWorkers, employee, includeNoWork);
 
   return {
     ok: true,
@@ -1399,6 +1425,7 @@ async function dailyAssignmentsPayload(url) {
     mode: useTrackerSnapshot ? "hawley-dat-snapshot-fallback" : "hawley-read-model",
     date,
     employee: employee || null,
+    includeNoWork,
     project: {
       id: DAILY_TRACKER_PROJECT_ID,
       name: "Daily Assignment Tracker",

@@ -14,19 +14,28 @@ worker session ledger and an approved Asana push path.
 
 ## Read Model
 
-The app prefers mirrored Daily Assignment Tracker snapshots from:
+The app prefers Hawley's HB worker-page read model:
+
+```sql
+reporting.hawley_worker_page_assignments
+```
+
+That view is built from HB-owned Rev1 task rows with fresh Asana portfolio
+overlays for assignment, completion, source-task estimates, actual time, cycle,
+phase, VIN, and source links. This keeps the cloned worker page DB-only while
+making Hawley the fast source of truth instead of Airtable or the legacy Daily
+Assignment Tracker snapshot.
+
+Mirrored Daily Assignment Tracker rows still exist in Hawley/Postgres:
 
 ```sql
 raw.asana_tasks
 ```
 
-These are Hawley/Postgres rows. The worker page must not call the Asana API at
-runtime.
-
 where `project_gid` is the Daily Assignment Tracker project
-`1214157321063250`. This mirrors the current worker page's snapshot behavior,
-including tasks whose Airtable `Assigned On` value is blank but whose DAT
-snapshot includes them for the selected date.
+`1214157321063250`. Those rows are used as a fallback when HB has no dated
+assignment rows, for cycle/day comparison, and for parity debugging against the
+current worker app. The worker page must not call the Asana API at runtime.
 
 Daily efficiency also depends on mirrored worker actuals from:
 
@@ -66,8 +75,16 @@ That view enriches `reporting.daily_worker_assignments` with:
 
 Manager mode uses active records from Hawley's mirrored `Work Force` data in
 `raw.airtable_work_force`, as the strict employee roster. Dated assignment
-rows are attached only to those Work Force workers. This keeps old assignment
-history or capability-map rows from adding stale people to the employee rail.
+rows are attached only to those Work Force workers. By default, the API returns
+only workers with visible work for the selected day so manager output matches
+the current worker app. Add `includeNoWork=true`, or set
+`HAWLEY_WORKER_INCLUDE_NO_WORK=true`, when a full active-roster health check is
+needed.
+
+Hawley source-task hours can intentionally differ from the legacy worker app
+when the Daily Assignment Tracker snapshot is stale. In that case, task IDs and
+completion state should be compared first; DAT-only assigned-hour differences
+mean the legacy snapshot needs a rebuild or should be treated as stale.
 
 The browser assets in `apps/hawley-worker-page/public` are intentionally copied
 from the current Shop Ops `apps/daily-worker-app` UI so the pilot looks and
@@ -136,6 +153,7 @@ http://127.0.0.1:5273?employee=<worker-slug>
 ```text
 GET /api/health
 GET /api/daily-assignments?date=YYYY-MM-DD
+GET /api/daily-assignments?date=YYYY-MM-DD&includeNoWork=true
 GET /api/daily-assignments?date=YYYY-MM-DD&employee=<worker-slug>
 GET /api/auth-status
 GET /api/alert-status
@@ -152,6 +170,7 @@ The `POST` endpoints intentionally return read-only pilot errors.
 HAWLEY_WORKER_HOST=127.0.0.1
 HAWLEY_WORKER_PORT=5273
 HAWLEY_DAILY_TRACKER_PROJECT_GID=1214157321063250
+HAWLEY_WORKER_INCLUDE_NO_WORK=false
 ```
 
 The app uses the same Postgres environment variables as the Hawley sync scripts:
