@@ -67,6 +67,11 @@ local Postgres `raw` schema.
 rebuilds HB tables, then pulls Daily Assignment Tracker snapshots read-only for
 comparison/fallback. It does not pull or write Airtable.
 
+`pg:watch:asana-events` is the one-minute pilot updater. It reads Asana project
+events for the VINs/Fabrication portfolio projects, fetches changed task rows,
+updates HB/Postgres, and rebuilds HB only when changed tasks are found. It does
+not write to Asana or Airtable.
+
 Hawley's operational capability map lives in the `ops` schema and reporting
 views. It combines Airtable `Work Force` skill levels, observed Rev1/Asana task
 assignment history, and local-only owner hints for scheduling/routing support.

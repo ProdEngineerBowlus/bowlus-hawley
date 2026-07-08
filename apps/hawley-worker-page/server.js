@@ -1149,7 +1149,7 @@ async function latestImportRuns() {
       records_written,
       error_count
     from sync.run_log
-    where job_name in ('pull_airtable', 'pull_asana', 'pull_daily_tracker')
+    where job_name in ('pull_airtable', 'pull_asana', 'pull_asana_events', 'pull_daily_tracker')
     order by job_name, id desc
   `);
 

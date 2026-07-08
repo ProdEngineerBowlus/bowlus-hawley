@@ -9,6 +9,8 @@
     "pg:migrate": "node ./apps/postgres-sync/src/migrate.js",
     "pg:pull:airtable": "node ./apps/postgres-sync/src/pull-airtable.js",
     "pg:pull:asana": "node ./apps/postgres-sync/src/pull-asana.js",
+    "pg:pull:asana-events": "node ./apps/postgres-sync/src/pull-asana-events.js",
+    "pg:watch:asana-events": "node ./apps/postgres-sync/src/pull-asana-events.js --loop --interval-ms 60000",
     "pg:pull:daily-tracker": "node ./apps/postgres-sync/src/pull-daily-tracker.js",
     "pg:normalize": "node ./apps/postgres-sync/src/normalize-airtable.js",
     "pg:build:hb": "node ./apps/postgres-sync/src/build-hb.js",

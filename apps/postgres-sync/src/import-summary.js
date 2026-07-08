@@ -19,6 +19,7 @@ const COUNT_QUERIES = Object.freeze([
   ["raw.asana_projects", "select count(*)::int as count from raw.asana_projects"],
   ["raw.asana_tasks", "select count(*)::int as count from raw.asana_tasks"],
   ["raw.asana_task_project_memberships", "select count(*)::int as count from raw.asana_task_project_memberships"],
+  ["sync.asana_project_event_cursors", "select count(*)::int as count from sync.asana_project_event_cursors"],
   ["hb.work_force", "select count(*)::int as count from hb.work_force"],
   ["hb.cycles", "select count(*)::int as count from hb.cycles"],
   ["hb.phases", "select count(*)::int as count from hb.phases"],
@@ -48,7 +49,7 @@ async function main() {
     const run = await client.query(`
       select id, job_name, status, records_read, records_written, error_count, ended_at
       from sync.run_log
-      where job_name in ('pull_airtable', 'pull_asana')
+      where job_name in ('pull_airtable', 'pull_asana', 'pull_asana_events')
       order by id desc
       limit 1
     `);

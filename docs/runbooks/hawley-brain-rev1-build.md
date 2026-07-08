@@ -55,6 +55,31 @@ This runs:
 
 The Daily Tracker pull is read-only and is kept for comparison/fallback. The cloned worker app defaults to the HB read model, not DAT snapshots.
 
+One-minute incremental Asana refresh:
+
+```powershell
+npm run pg:watch:asana-events
+```
+
+This uses Asana project event sync tokens for the 30 VIN/Fabrication portfolio projects. Each poll reads Asana events, fetches changed task rows, updates Hawley Postgres raw Asana tables, and rebuilds HB only when changed task rows are found.
+
+Safety boundary:
+
+- Asana writes: no
+- Airtable reads/writes: no
+- Hawley Postgres writes: yes
+
+The first event call for a project establishes its sync token. Use this sequence for a clean baseline:
+
+```powershell
+npm run pg:pull:asana-events -- --init-only
+npm run pg:pull:asana
+npm run pg:build:hb
+npm run pg:pull:asana-events
+```
+
+The active local pilot process logs to `runtime-output/hawley-asana-events.out.log`. It is a local background process, not a persistent Windows scheduled task yet.
+
 HB local rebuild only:
 
 ```powershell
@@ -88,9 +113,16 @@ Build detail from the same run:
 - Airtable-backed Task Instances: 8324
 - Airtable-backed rows overlaid with Asana truth: 8267
 - Asana-only Task Instances: 2567
-- Reporting worker assignment rows: 4510
+- Reporting worker assignment rows: 4515
 
 The full read refresh is dominated by the Asana network pull. On 2026-07-08 it fetched 10,830 distinct source tasks across 30 VIN/Fabrication projects.
+
+Asana event baseline verified on 2026-07-08:
+
+- Event cursor projects: 30
+- Initialized cursor projects: 30
+- First post-baseline event poll: 0 changes
+- One-minute watcher: running locally with 60000 ms interval
 
 ## Worker App Wiring
 
@@ -111,4 +143,4 @@ Verified on 2026-07-08:
 
 ## Next Step
 
-Move the Airtable pull to an overnight/legacy cadence and add an incremental Asana pull mode so the day-time worker page refresh does not need a full portfolio scan every time.
+Move the Airtable pull to an overnight/legacy cadence and, after the pilot is trusted, move the Asana event watcher from this local session into the official host/service plan.
