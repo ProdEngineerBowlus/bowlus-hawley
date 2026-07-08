@@ -87,6 +87,89 @@ function isIsoDate(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
 }
 
+function dateFromIso(value) {
+  if (!isIsoDate(value)) return null;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function isoDateFromDate(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function addUtcDays(date, days) {
+  const next = new Date(date.getTime());
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+function cycleNumberFromName(value) {
+  const match = String(value || "").match(/\d+/);
+  return match ? Number(match[0]) : null;
+}
+
+function normalizedIsoDate(year, month, day) {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return "";
+  return isoDateFromDate(date);
+}
+
+function holidayDatesFromField(value, fallbackYear) {
+  const holidays = new Set();
+  const year = Number(String(fallbackYear || "").slice(0, 4)) || new Date().getFullYear();
+
+  const addFromText = (text) => {
+    const source = String(text || "");
+    for (const match of source.matchAll(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/g)) {
+      const iso = normalizedIsoDate(Number(match[1]), Number(match[2]), Number(match[3]));
+      if (iso) holidays.add(iso);
+    }
+    for (const match of source.matchAll(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/g)) {
+      const parsedYear = match[3]
+        ? Number(match[3].length === 2 ? `20${match[3]}` : match[3])
+        : year;
+      const iso = normalizedIsoDate(parsedYear, Number(match[1]), Number(match[2]));
+      if (iso) holidays.add(iso);
+    }
+  };
+
+  const visit = (item) => {
+    if (Array.isArray(item)) {
+      item.forEach(visit);
+    } else if (item && typeof item === "object") {
+      Object.values(item).forEach(visit);
+    } else {
+      addFromText(item);
+    }
+  };
+
+  visit(value);
+  return holidays;
+}
+
+function cycleWorkdays(startDate, endDate, holidays, daysInCycle) {
+  const start = dateFromIso(startDate);
+  if (!start) return [];
+
+  const end = dateFromIso(endDate);
+  const limit = Number(daysInCycle || 0);
+  const dates = [];
+  let cursor = start;
+  let guard = 0;
+
+  while (guard < 400 && (end ? cursor <= end : !limit || dates.length < limit)) {
+    const iso = isoDateFromDate(cursor);
+    const day = cursor.getUTCDay();
+    if (day !== 0 && day !== 6 && !holidays.has(iso)) {
+      dates.push(iso);
+    }
+    cursor = addUtcDays(cursor, 1);
+    guard += 1;
+  }
+
+  return limit ? dates.slice(0, limit) : dates;
+}
+
 function slugifyWorker({ workerEmail, workerName }) {
   const email = String(workerEmail || "").trim().toLowerCase();
   const emailForSlug = email.replace(/^asana\+/, "");
@@ -923,15 +1006,63 @@ function snapshotToLineOverview(snapshot) {
   };
 }
 
-function buildCycleDaysFromTrackerSnapshots(activeSnapshots, selectedDate) {
+function selectedCycleFromTrackerSnapshots(activeSnapshots, selectedDate) {
   const selectedSnapshots = activeSnapshots.filter(snapshot => snapshot.trackerDate === selectedDate);
-  const selectedCycle =
+  return (
     selectedSnapshots.find(snapshot => snapshot.trackerType === "Line Overview" && snapshot.cycle)?.cycle ||
     selectedSnapshots.find(snapshot => snapshot.cycle)?.cycle ||
     activeSnapshots
       .filter(snapshot => snapshot.trackerDate && snapshot.cycle)
       .sort((a, b) => String(b.trackerDate).localeCompare(String(a.trackerDate)))[0]?.cycle ||
-    "";
+    ""
+  );
+}
+
+function cycleDayDateList(byDate, calendar, selectedDate) {
+  const dates = calendar?.dates?.length
+    ? [...calendar.dates]
+    : Array.from(byDate.keys()).sort((a, b) => a.localeCompare(b));
+
+  if (isIsoDate(selectedDate) && !dates.includes(selectedDate)) {
+    dates.push(selectedDate);
+  }
+
+  return Array.from(new Set(dates)).sort((a, b) => a.localeCompare(b));
+}
+
+function cycleDayPayloadFromDateMap(byDate, selectedDate, selectedCycle, calendar, source) {
+  const cycle = calendar?.cycle || selectedCycle || "Current";
+  return {
+    cycle,
+    selectedDate,
+    source,
+    days: cycleDayDateList(byDate, calendar, selectedDate).map((date, index) => {
+      const day = byDate.get(date);
+      return {
+        date,
+        cycle: day?.cycle || cycle,
+        label: `Day ${index + 1}`,
+        dayNumber: index + 1,
+        selected: date === selectedDate,
+        hasSnapshot: Boolean(day),
+        workerCount: Number(day?.workerCount || 0),
+        assignedHours: round(day?.assignedHours || 0),
+        completedHours: round(day?.completedHours || 0),
+        remainingHours: round(day?.remainingHours || 0),
+        taskCount: Number(day?.taskCount || 0),
+        completedTaskCount: Number(day?.completedTaskCount || 0),
+        completeTaskLabel: `${Number(day?.completedTaskCount || 0)}/${Number(day?.taskCount || 0)}`,
+        status: day?.status || (day ? "Assigned" : "No Work"),
+        completionPercent: day?.completionPercent !== null && day?.completionPercent !== undefined
+          ? Number(day.completionPercent || 0)
+          : 0
+      };
+    })
+  };
+}
+
+function buildCycleDaysFromTrackerSnapshots(activeSnapshots, selectedDate, calendar = null) {
+  const selectedCycle = selectedCycleFromTrackerSnapshots(activeSnapshots, selectedDate);
 
   const cycleSnapshots = selectedCycle
     ? activeSnapshots.filter(snapshot => snapshot.cycle === selectedCycle)
@@ -960,7 +1091,9 @@ function buildCycleDaysFromTrackerSnapshots(activeSnapshots, selectedDate) {
     const day = byDate.get(snapshot.trackerDate);
     if (snapshot.trackerType === "Line Overview") {
       day.status = snapshot.trackerStatus || day.status;
-      day.completionPercent = snapshot.completionPercent || day.completionPercent;
+      if (snapshot.completionPercent !== null && snapshot.completionPercent !== undefined) {
+        day.completionPercent = snapshot.completionPercent;
+      }
       continue;
     }
 
@@ -975,36 +1108,21 @@ function buildCycleDaysFromTrackerSnapshots(activeSnapshots, selectedDate) {
     if (snapshot.trackerStatus === "No Work") day.noWorkCount += 1;
   }
 
-  return {
-    cycle: selectedCycle,
-    selectedDate,
-    source: "dat-snapshots",
-    days: Array.from(byDate.values())
-      .sort((a, b) => a.date.localeCompare(b.date))
-      .map((day, index) => ({
-        ...day,
-        dayNumber: index + 1,
-        label: `Day ${index + 1}`,
-        selected: day.date === selectedDate,
-        hasSnapshot: true,
-        completeTaskLabel: `${day.completedTaskCount}/${day.taskCount}`
-      }))
-  };
+  return cycleDayPayloadFromDateMap(byDate, selectedDate, selectedCycle, calendar, "dat-snapshots");
 }
 
-function buildCycleDaysFromRows(dayRows, selectedDate) {
+function buildCycleDaysFromRows(dayRows, selectedDate, calendar = null) {
   const selectedRow = dayRows.find(row => row.assigned_on === selectedDate) || {};
-  const selectedCycle = formatCycleName(selectedRow.cycle_name || dayRows.find(row => row.cycle_name)?.cycle_name) || "Current";
-  const days = dayRows.map((row, index) => {
+  const selectedCycle = formatCycleName(selectedRow.cycle_name || dayRows.find(row => row.cycle_name)?.cycle_name) || calendar?.cycle || "Current";
+  const byDate = new Map();
+
+  for (const row of dayRows) {
     const assignedHours = Number(row.assigned_hours || 0);
     const completedHours = Number(row.completed_hours || 0);
     const completionPercent = assignedHours ? round((completedHours / assignedHours) * 100, 1) : 0;
-    return {
+    byDate.set(row.assigned_on, {
       date: row.assigned_on,
       cycle: formatCycleName(row.cycle_name) || selectedCycle,
-      label: `Day ${index + 1}`,
-      selected: row.assigned_on === selectedDate,
-      hasSnapshot: true,
       workerCount: Number(row.worker_count || 0),
       assignedHours: round(assignedHours),
       completedHours: round(completedHours),
@@ -1014,32 +1132,10 @@ function buildCycleDaysFromRows(dayRows, selectedDate) {
       completeTaskLabel: `${Number(row.completed_task_count || 0)}/${Number(row.task_count || 0)}`,
       status: row.open_task_count > 0 ? "Assigned" : "Complete",
       completionPercent
-    };
-  });
-
-  if (!days.some(day => day.date === selectedDate)) {
-    days.push({
-      date: selectedDate,
-      cycle: selectedCycle,
-      label: `Day ${days.length + 1}`,
-      selected: true,
-      hasSnapshot: false,
-      workerCount: 0,
-      assignedHours: 0,
-      completedHours: 0,
-      remainingHours: 0,
-      taskCount: 0,
-      completedTaskCount: 0,
-      completeTaskLabel: "0/0",
-      status: "No Work",
-      completionPercent: 0
     });
   }
 
-  return {
-    cycle: selectedCycle,
-    days: days.sort((a, b) => a.date.localeCompare(b.date))
-  };
+  return cycleDayPayloadFromDateMap(byDate, selectedDate, selectedCycle, calendar, "hawley-read-model");
 }
 
 async function latestImportRuns() {
@@ -1108,6 +1204,63 @@ async function latestAssignmentDate() {
   return result.rows[0]?.latest_assignment_date || "";
 }
 
+async function cycleCalendar(cycleName, selectedDate) {
+  const cycleNumber = cycleNumberFromName(cycleName);
+  const result = await pool.query(
+    `
+      with cycles as (
+        select
+          fields_json,
+          nullif(regexp_replace(coalesce(fields_json->>'Cycle Number', ''), '[^0-9]+', '', 'g'), '')::int as cycle_number,
+          case
+            when coalesce(fields_json->>'Start Date', '') ~ '^\\d{4}-\\d{2}-\\d{2}$' then (fields_json->>'Start Date')::date
+            else null
+          end as start_date,
+          case
+            when coalesce(fields_json->>'End Date', '') ~ '^\\d{4}-\\d{2}-\\d{2}$' then (fields_json->>'End Date')::date
+            else null
+          end as end_date,
+          nullif(regexp_replace(coalesce(fields_json->>'Days In Cycle', ''), '[^0-9]+', '', 'g'), '')::int as days_in_cycle,
+          fields_json->'Holidays' as holidays
+        from raw.airtable_cycles
+      )
+      select
+        cycle_number,
+        start_date::text,
+        end_date::text,
+        days_in_cycle,
+        holidays
+      from cycles
+      where start_date is not null
+        and (
+          ($2::int is not null and cycle_number = $2::int)
+          or ($2::int is null and $1::date between start_date and coalesce(end_date, start_date))
+        )
+      order by
+        case when $2::int is not null and cycle_number = $2::int then 0 else 1 end,
+        start_date desc
+      limit 1
+    `,
+    [selectedDate, cycleNumber]
+  );
+
+  const row = result.rows[0];
+  if (!row) return null;
+
+  const holidays = holidayDatesFromField(row.holidays, row.start_date);
+  const dates = cycleWorkdays(row.start_date, row.end_date, holidays, row.days_in_cycle);
+  if (!dates.length) return null;
+
+  return {
+    cycle: formatCycleName(row.cycle_number),
+    startDate: row.start_date,
+    endDate: row.end_date,
+    daysInCycle: Number(row.days_in_cycle || dates.length),
+    holidays: Array.from(holidays).sort(),
+    dates
+  };
+}
+
 async function cycleDays(date) {
   const result = await pool.query(
     `
@@ -1139,7 +1292,9 @@ async function cycleDays(date) {
     [date]
   );
 
-  return buildCycleDaysFromRows(result.rows, date);
+  const selectedRow = result.rows.find(row => row.assigned_on === date) || result.rows.find(row => row.cycle_name);
+  const calendar = await cycleCalendar(formatCycleName(selectedRow?.cycle_name), date);
+  return buildCycleDaysFromRows(result.rows, date, calendar);
 }
 
 async function dailyTrackerSnapshots() {
@@ -1219,7 +1374,10 @@ async function dailyAssignmentsPayload(url) {
     );
     await enrichSnapshotWorkersFromRaw(allWorkers);
     applyWorkerDailyActualRows(allWorkers, actualRows);
-    cycleDayPayload = employee ? null : buildCycleDaysFromTrackerSnapshots(trackerSnapshots, date);
+    if (!employee) {
+      const calendar = await cycleCalendar(selectedCycleFromTrackerSnapshots(trackerSnapshots, date), date);
+      cycleDayPayload = buildCycleDaysFromTrackerSnapshots(trackerSnapshots, date, calendar);
+    }
     lineOverview = selectedTrackerSnapshots.find(snapshot => snapshot.trackerType === "Line Overview");
   } else {
     allWorkers = mergeConfiguredWorkers(buildWorkers(rows), configuredRows);
