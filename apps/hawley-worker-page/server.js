@@ -44,7 +44,7 @@ function sendError(res, status, message, details = {}) {
 
 function publicErrorMessage(error) {
   const message = error.message || "";
-  if (/hawley_worker_page_assignments|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|jsonb_display_text/.test(message)) {
+  if (/hawley_worker_page_assignments|hawley_cycle_calendar|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|jsonb_display_text/.test(message)) {
     return {
       status: 503,
       message: "Hawley worker read model is not migrated yet. Run npm run pg:migrate."
@@ -1208,29 +1208,14 @@ async function cycleCalendar(cycleName, selectedDate) {
   const cycleNumber = cycleNumberFromName(cycleName);
   const result = await pool.query(
     `
-      with cycles as (
-        select
-          fields_json,
-          nullif(regexp_replace(coalesce(fields_json->>'Cycle Number', ''), '[^0-9]+', '', 'g'), '')::int as cycle_number,
-          case
-            when coalesce(fields_json->>'Start Date', '') ~ '^\\d{4}-\\d{2}-\\d{2}$' then (fields_json->>'Start Date')::date
-            else null
-          end as start_date,
-          case
-            when coalesce(fields_json->>'End Date', '') ~ '^\\d{4}-\\d{2}-\\d{2}$' then (fields_json->>'End Date')::date
-            else null
-          end as end_date,
-          nullif(regexp_replace(coalesce(fields_json->>'Days In Cycle', ''), '[^0-9]+', '', 'g'), '')::int as days_in_cycle,
-          fields_json->'Holidays' as holidays
-        from raw.airtable_cycles
-      )
       select
         cycle_number,
+        cycle_label,
         start_date::text,
         end_date::text,
         days_in_cycle,
         holidays
-      from cycles
+      from reporting.hawley_cycle_calendar
       where start_date is not null
         and (
           ($2::int is not null and cycle_number = $2::int)
@@ -1252,7 +1237,7 @@ async function cycleCalendar(cycleName, selectedDate) {
   if (!dates.length) return null;
 
   return {
-    cycle: formatCycleName(row.cycle_number),
+    cycle: formatCycleName(row.cycle_label || row.cycle_number),
     startDate: row.start_date,
     endDate: row.end_date,
     daysInCycle: Number(row.days_in_cycle || dates.length),

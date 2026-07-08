@@ -20,6 +20,9 @@ The app prefers mirrored Daily Assignment Tracker snapshots from:
 raw.asana_tasks
 ```
 
+These are Hawley/Postgres rows. The worker page must not call the Asana API at
+runtime.
+
 where `project_gid` is the Daily Assignment Tracker project
 `1214157321063250`. This mirrors the current worker page's snapshot behavior,
 including tasks whose Airtable `Assigned On` value is blank but whose DAT
@@ -36,6 +39,16 @@ actuals and daily summary logged minutes from that table so the worker detail
 page does not under-report a person who has same-day WIP or recovered timer
 minutes outside completed source-task time.
 
+Cycle day chips come from Hawley's reporting calendar:
+
+```sql
+reporting.hawley_cycle_calendar
+```
+
+That view is built inside Hawley/Postgres from mirrored source data. The worker
+page reads this view so the UI uses a Hawley-owned calendar boundary rather than
+live Airtable or raw source-table logic.
+
 If no DAT snapshot exists for the selected date, the app falls back to:
 
 ```sql
@@ -51,8 +64,8 @@ That view enriches `reporting.daily_worker_assignments` with:
 - inferred work area from the operational capability map
 - source sync timestamp
 
-Manager mode uses active records directly from Airtable `Work Force`, mirrored
-in `raw.airtable_work_force`, as the strict employee roster. Dated assignment
+Manager mode uses active records from Hawley's mirrored `Work Force` data in
+`raw.airtable_work_force`, as the strict employee roster. Dated assignment
 rows are attached only to those Work Force workers. This keeps old assignment
 history or capability-map rows from adding stale people to the employee rail.
 
