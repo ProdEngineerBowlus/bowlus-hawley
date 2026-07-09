@@ -1976,6 +1976,7 @@ function authStatusPayload() {
     mode: WORKER_WRITES_ENABLED ? "hawley-live-worker-writes" : "hawley-read-only-pilot",
     workerWritesEnabled: WORKER_WRITES_ENABLED,
     workerWritesAll: WORKER_WRITES_ALL,
+    managerControlEnabled: WORKER_WRITES_ENABLED,
     writeWorkerIds: workerWriteIds(),
     writeWorkerNames: WORKER_WRITES_ENABLED && !WORKER_WRITES_ALL ? [JACOB_R_WORKER_NAME] : [],
     liveWriteScope: WORKER_WRITES_ALL

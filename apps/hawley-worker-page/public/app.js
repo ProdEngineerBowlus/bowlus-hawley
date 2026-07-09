@@ -23,6 +23,7 @@
       mode: "debug-open",
       workerWritesEnabled: false,
       writeWorkerIds: [],
+      managerControlEnabled: false,
     },
     alertStatus: {
       enabled: false,
@@ -1158,7 +1159,7 @@
         <section class="worker-focus">
           ${renderDailyProgress(worker)}
           <div class="task-list">
-            ${renderTaskCards(worker.tasks, true)}
+            ${renderTaskCards(worker.tasks, true, true)}
           </div>
         </section>
       `;
@@ -1167,7 +1168,7 @@
     return `
       <div class="grid assignment-grid">
         <section class="task-list">
-          ${renderTaskCards(worker.tasks, false)}
+          ${renderTaskCards(worker.tasks, false, managerControlEnabled())}
         </section>
         <aside class="panel">
           <div class="panel-header">
@@ -1222,7 +1223,7 @@
     `;
   }
 
-  function renderTaskCards(tasks, locked) {
+  function renderTaskCards(tasks, locked, canControl = locked) {
     const visibleTasks = locked ? openTasks(tasks) : tasks || [];
 
     if (!visibleTasks.length) {
@@ -1232,11 +1233,11 @@
     return visibleTasks
       .slice()
       .sort((a, b) => Number(a.order || 9999) - Number(b.order || 9999))
-      .map((task) => renderTaskCard(task, locked))
+      .map((task) => renderTaskCard(task, locked, canControl))
       .join("");
   }
 
-  function renderTaskCard(task, locked) {
+  function renderTaskCard(task, locked, canControl = locked) {
     const busy = state.actionTaskId === task.id;
     const sopUrl = safeExternalUrl(task.sopUrl);
     const sourceUrl = safeExternalUrl(task.sourceUrl);
@@ -1269,7 +1270,7 @@
             <span class="status-pill${task.completed ? " done" : ""}">${task.completed ? "Done" : "Open"}</span>
           </div>
           ${
-            locked
+            canControl
               ? `<div class="work-actions" data-task-id="${escapeAttr(task.id)}">
                   <a class="btn ${hasSop ? "ghost" : "disabled"}" ${hasSop ? `href="${escapeAttr(sopUrl)}" target="_blank" rel="noreferrer"` : ""} aria-disabled="${hasSop ? "false" : "true"}">${icons.open}<span>SOP</span></a>
                   <button class="btn ghost" type="button" data-action="start-timer" data-task-id="${escapeAttr(task.id)}" ${task.completed || timerRunning || busy ? "disabled" : ""}>${timerRunning ? "Running" : startLabel}</button>
@@ -1515,6 +1516,10 @@
   function refreshWorkerFilter(worker) {
     if (!worker) return "";
     return worker.email || worker.name || worker.id || "";
+  }
+
+  function managerControlEnabled() {
+    return Boolean(state.authStatus.managerControlEnabled && !queryEmployee);
   }
 
   function serverWritesEnabledFor(employee) {

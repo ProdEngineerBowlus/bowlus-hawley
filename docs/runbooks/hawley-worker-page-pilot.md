@@ -16,6 +16,13 @@ source Asana task complete, and adds an Asana story. The live write scope is
 reported by `/api/auth-status`; `writeWorkerIds: ["*"]` means all assigned
 worker pages use server-backed live writes.
 
+Manager control mode uses the same live endpoint. From the manager dashboard,
+selecting a worker opens the manager detail view with Start, Stop, SOP, and
+Complete controls for that worker's assigned tasks. These controls write to
+Hawley first and only push to Asana on Complete. The legacy `Refresh tracker`
+and `Adopt new tasks` buttons remain disabled server-side because those belong
+to the old Daily Assignment Tracker/Airtable write path.
+
 Hawley still does not write to Airtable. The one-minute Airtable
 `Worker Daily Task Actuals` pull is a legacy/readable mirror input and does not
 overwrite Hawley-owned pilot rows with `source_system = 'hawley_worker_live_pilot'`.
