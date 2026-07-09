@@ -179,11 +179,21 @@ class AsanaClient {
         return this.request(pathOrUrl, options, retry + 1);
       }
 
-      if (!response.ok) {
-        throw new Error(`Asana ${options.method || "GET"} failed (${response.status}): ${text.slice(0, 700)}`);
+      let body = {};
+      try {
+        body = text ? JSON.parse(text) : {};
+      } catch {
+        body = {};
       }
 
-      return text ? JSON.parse(text) : {};
+      if (!response.ok) {
+        const error = new Error(`Asana ${options.method || "GET"} failed (${response.status}): ${text.slice(0, 700)}`);
+        error.status = response.status;
+        error.body = body;
+        throw error;
+      }
+
+      return body;
     } finally {
       clearTimeout(timeout);
     }
@@ -271,7 +281,16 @@ function firstMembershipSection(task, projectGid) {
 async function collectNestedSubtasks(asana, parentTask, sourceProject, depthRemaining) {
   if (depthRemaining <= 0 || Number(parentTask.num_subtasks || 0) <= 0) return [];
 
-  const subtasks = await asana.getSubtasks(parentTask.gid);
+  let subtasks = [];
+  try {
+    subtasks = await asana.getSubtasks(parentTask.gid);
+  } catch (error) {
+    if (error.status === 404) {
+      console.warn(`Skipping missing Asana subtask list for parent task ${parentTask.gid}.`);
+      return [];
+    }
+    throw error;
+  }
   const parentSection = firstMembershipSection(parentTask, sourceProject.gid);
   const enriched = subtasks.map(subtask => ({
     ...subtask,
@@ -583,6 +602,8 @@ async function main() {
     taskRowsFetched: 0,
     distinctTasks: 0,
     membershipRows: 0,
+    missingProjects: 0,
+    missingProjectTaskLists: 0,
     recordsRead: 0,
     recordsWritten: 0
   };
@@ -607,7 +628,17 @@ async function main() {
       console.log(`Portfolio ${portfolio.name || config.expectedName}: ${scopedItems.length} projects`);
 
       for (const item of scopedItems) {
-        const project = await asana.getProject(item.gid);
+        let project;
+        try {
+          project = await asana.getProject(item.gid);
+        } catch (error) {
+          if (error.status === 404) {
+            console.warn(`Skipping missing Asana project ${item.gid} (${item.name || "unnamed project"}).`);
+            summary.missingProjects += 1;
+            continue;
+          }
+          throw error;
+        }
         await upsertProject(client, project);
         await upsertPortfolioProject(client, portfolio, project, config.taskType, item);
         summary.projects += 1;
@@ -615,7 +646,17 @@ async function main() {
         summary.recordsWritten += 2;
 
         console.log(`Fetching ${project.name} (${project.gid})`);
-        const tasks = await getProjectTaskTree(asana, project, args);
+        let tasks;
+        try {
+          tasks = await getProjectTaskTree(asana, project, args);
+        } catch (error) {
+          if (error.status === 404) {
+            console.warn(`Skipping inaccessible Asana task list for project ${project.gid} (${project.name || "unnamed project"}).`);
+            summary.missingProjectTaskLists += 1;
+            continue;
+          }
+          throw error;
+        }
         summary.taskRowsFetched += tasks.length;
         summary.recordsRead += tasks.length;
 

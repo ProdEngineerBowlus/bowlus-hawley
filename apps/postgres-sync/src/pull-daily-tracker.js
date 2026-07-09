@@ -106,11 +106,21 @@ class AsanaClient {
         return this.request(pathOrUrl, options, retry + 1);
       }
 
-      if (!response.ok) {
-        throw new Error(`Asana ${options.method || "GET"} failed (${response.status}): ${text.slice(0, 700)}`);
+      let body = {};
+      try {
+        body = text ? JSON.parse(text) : {};
+      } catch {
+        body = {};
       }
 
-      return text ? JSON.parse(text) : {};
+      if (!response.ok) {
+        const error = new Error(`Asana ${options.method || "GET"} failed (${response.status}): ${text.slice(0, 700)}`);
+        error.status = response.status;
+        error.body = body;
+        throw error;
+      }
+
+      return body;
     } finally {
       clearTimeout(timeout);
     }
