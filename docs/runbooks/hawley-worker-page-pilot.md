@@ -1,16 +1,24 @@
 # Hawley Worker Page Pilot
 
-The Hawley worker page is a read-only pilot clone of the Daily Worker App. It
-uses Hawley/Postgres instead of live Airtable and live Asana reads.
+The Hawley worker page is a pilot clone of the Daily Worker App. It uses
+Hawley/Postgres instead of live Airtable and live Asana reads.
 
 ## Boundary
 
-This pilot does not start timers, complete tasks, create Asana time tracking
-entries, or rebuild Daily Assignment Tracker. It reads local Hawley tables and
-reporting views only.
+By default this pilot does not start timers, complete tasks, create Asana time
+tracking entries, or rebuild Daily Assignment Tracker. It reads local Hawley
+tables and reporting views only.
 
-Timer and completion writes should be added only after Hawley has a first-class
-worker session ledger and an approved Asana push path.
+Exception: the Jacob R pilot profile is approved for live worker timer testing.
+That profile writes timer state into Hawley's `hb.worker_daily_task_actuals`
+ledger. On Complete, Hawley creates the Asana time tracking entry, marks the
+source Asana task complete, and adds an Asana story. The live write scope must
+stay limited to worker IDs returned by `/api/auth-status` until broader rollout
+is explicitly approved.
+
+Hawley still does not write to Airtable. The one-minute Airtable
+`Worker Daily Task Actuals` pull is a legacy/readable mirror input and does not
+overwrite Hawley-owned pilot rows with `source_system = 'hawley_worker_live_pilot'`.
 
 ## Read Model
 

@@ -21,6 +21,8 @@
     authStatus: {
       writePinRequired: false,
       mode: "debug-open",
+      workerWritesEnabled: false,
+      writeWorkerIds: [],
     },
     alertStatus: {
       enabled: false,
@@ -1515,6 +1517,12 @@
     return worker.email || worker.name || worker.id || "";
   }
 
+  function serverWritesEnabledFor(employee) {
+    if (state.source === "asana") return true;
+    const ids = Array.isArray(state.authStatus.writeWorkerIds) ? state.authStatus.writeWorkerIds : [];
+    return Boolean(state.authStatus.workerWritesEnabled && ids.includes(employee));
+  }
+
   async function startWorkerTimer(employee, taskId) {
     const activeTask = findActiveTimerTask(taskId);
     if (activeTask) {
@@ -1522,7 +1530,7 @@
       return;
     }
 
-    if (state.source !== "asana") {
+    if (!serverWritesEnabledFor(employee)) {
       const timer = startLocalTimer(state.timers[getTimerKey(taskId)], new Date());
       state.timers[getTimerKey(taskId)] = timer;
       applyTimerToTask(taskId, timer);
@@ -1564,7 +1572,7 @@
   }
 
   async function stopWorkerTimer(employee, taskId) {
-    if (state.source !== "asana") {
+    if (!serverWritesEnabledFor(employee)) {
       const timer = stopLocalTimer(getTaskTimerById(taskId), new Date());
       state.timers[getTimerKey(taskId)] = timer;
       applyTimerToTask(taskId, timer);
@@ -1606,7 +1614,7 @@
   }
 
   async function completeWorkerTask(employee, taskId) {
-    if (state.source !== "asana") {
+    if (!serverWritesEnabledFor(employee)) {
       updateSampleTask(taskId, getTaskTimerById(taskId));
       delete state.timers[getTimerKey(taskId)];
       saveLocalTimers();
@@ -1894,7 +1902,8 @@
       accumulatedMinutes: task.timerAccumulatedMinutes,
     });
     if (taskTimer.startedAt || taskTimer.accumulatedMinutes) return taskTimer;
-    if (state.source === "asana") return taskTimer;
+    const worker = getSelectedWorker();
+    if (state.source === "asana" || serverWritesEnabledFor(worker && worker.id)) return taskTimer;
     return normalizeLocalTimer(state.timers[getTimerKey(task.id)]);
   }
 

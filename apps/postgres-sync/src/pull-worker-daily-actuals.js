@@ -290,6 +290,7 @@ async function upsertHbRows(client, rows) {
           (${columns.map((_, index) => `$${index + 1}`).join(", ")})
         on conflict (ledger_key) do update set
           ${updates.join(", ")}
+        where hb.worker_daily_task_actuals.source_system is distinct from 'hawley_worker_live_pilot'
       `,
       columns.map(column => row[column])
     );

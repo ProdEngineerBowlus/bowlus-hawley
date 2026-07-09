@@ -22,8 +22,20 @@ const ASANA_EVENT_WATCH_INTERVAL_MS = Number(process.env.HAWLEY_ASANA_EVENT_INTE
 const ASANA_EVENT_WATCH_RESTART_MS = Number(process.env.HAWLEY_ASANA_EVENT_WATCH_RESTART_MS || 30000);
 const WORKER_ACTUALS_WATCH_INTERVAL_MS = Number(process.env.HAWLEY_WORKER_ACTUALS_INTERVAL_MS || 60000);
 const WORKER_ACTUALS_WATCH_RESTART_MS = Number(process.env.HAWLEY_WORKER_ACTUALS_WATCH_RESTART_MS || 30000);
+const JACOB_R_WORKER_ID = process.env.HAWLEY_JACOB_R_WORKER_ID || "asana-asana-bowlus-com";
+const JACOB_R_WORKER_NAME = process.env.HAWLEY_JACOB_R_NAME || "Jacob R";
+const JACOB_R_WORKER_EMAIL = process.env.HAWLEY_JACOB_R_EMAIL || "asana@bowlus.com";
+const JACOB_R_WORKER_PHASE = process.env.HAWLEY_JACOB_R_PHASE || "Management";
+const WORKER_WRITES_ENABLED = booleanEnv("HAWLEY_WORKER_WRITES_ENABLED", true);
+const WORKER_WRITE_IDS = new Set(
+  envList(process.env.HAWLEY_WORKER_WRITE_IDS || JACOB_R_WORKER_ID)
+    .map(canonicalWorkerIdForWrites)
+    .filter(Boolean)
+);
+const LIVE_WORKER_SOURCE = "hawley_worker_live_pilot";
 
 const pool = new Pool(getDatabaseConfig());
+const writePool = new Pool(getDatabaseConfig({ useSyncUrl: true }));
 
 const asanaEventWatcherState = {
   enabled: false,
@@ -126,6 +138,36 @@ function booleanEnv(name, defaultValue = false) {
   const value = process.env[name];
   if (value === undefined || value === "") return defaultValue;
   return ["1", "true", "yes", "y", "on"].includes(String(value).trim().toLowerCase());
+}
+
+function envList(value) {
+  return String(value || "")
+    .split(",")
+    .map(item => item.trim())
+    .filter(Boolean);
+}
+
+function canonicalWorkerIdForWrites(value) {
+  const id = String(value || "").trim();
+  if (["hawley-jacob-r", "jacob-r", "jacob-rhodes", JACOB_R_WORKER_EMAIL].includes(id.toLowerCase())) {
+    return JACOB_R_WORKER_ID;
+  }
+  return id;
+}
+
+function isJacobRWorker(worker) {
+  return Boolean(
+    canonicalWorkerIdForWrites(worker?.id) === JACOB_R_WORKER_ID ||
+    String(worker?.email || "").trim().toLowerCase() === JACOB_R_WORKER_EMAIL.toLowerCase()
+  );
+}
+
+function workerWritesAllowed(workerId) {
+  return Boolean(WORKER_WRITES_ENABLED && WORKER_WRITE_IDS.has(canonicalWorkerIdForWrites(workerId)));
+}
+
+function workerWriteIds() {
+  return Array.from(WORKER_WRITE_IDS);
 }
 
 function shouldStartAsanaEventWatcher() {
@@ -746,6 +788,7 @@ function mergeConfiguredWorkers(workers, configuredRows) {
 
 function workerHasVisibleWork(worker) {
   return Boolean(
+    worker.liveWriteEnabled ||
     Number(worker.assignedHours || 0) > 0 ||
     Number(worker.remainingHours || 0) > 0 ||
     Number(worker.completedHours || 0) > 0 ||
@@ -1178,6 +1221,89 @@ function ensureConfiguredSnapshotWorkers(workers, configuredRows) {
   return merged.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function emptyJacobRWorker() {
+  return {
+    id: JACOB_R_WORKER_ID,
+    name: JACOB_R_WORKER_NAME,
+    email: JACOB_R_WORKER_EMAIL,
+    cycle: "",
+    phase: JACOB_R_WORKER_PHASE,
+    phaseBucket: "",
+    phases: [],
+    workBlock: JACOB_R_WORKER_PHASE,
+    workBlocks: [],
+    trackerStatus: "No Work",
+    trackerUrl: "",
+    trackerUrls: [],
+    assignedHours: 0,
+    completedHours: 0,
+    remainingHours: 0,
+    actualHours: 0,
+    actualTimeLoggedHours: 0,
+    actualTimeLoggedMinutes: 0,
+    targetHours: 7.5,
+    taskCount: 0,
+    completedTaskCount: 0,
+    taskOrderRange: "",
+    vinRange: "",
+    vinRanges: [],
+    supportWorkers: "",
+    tasks: [],
+    lastSyncedAt: null,
+    status: "No Work"
+  };
+}
+
+function applyLivePilotWorkerFlags(worker) {
+  if (!worker) return worker;
+  if (isJacobRWorker(worker)) {
+    worker.id = JACOB_R_WORKER_ID;
+    worker.name = JACOB_R_WORKER_NAME;
+    worker.email = worker.email || JACOB_R_WORKER_EMAIL;
+    worker.phase = worker.phase || JACOB_R_WORKER_PHASE;
+    worker.workBlock = worker.workBlock || JACOB_R_WORKER_PHASE;
+  }
+  worker.liveWriteEnabled = workerWritesAllowed(worker.id);
+  worker.writeMode = worker.liveWriteEnabled ? "hawley-live-asana-pilot" : "";
+  return worker;
+}
+
+function ensureLivePilotWorkers(workers) {
+  const mergedById = new Map();
+  for (const worker of workers || []) {
+    const next = applyLivePilotWorkerFlags({ ...worker, tasks: [...(worker.tasks || [])] });
+    const existing = mergedById.get(next.id);
+    if (!existing) {
+      mergedById.set(next.id, next);
+      continue;
+    }
+
+    existing.tasks = mergeTaskLists(existing.tasks, next.tasks);
+    existing.assignedHours = round(Number(existing.assignedHours || 0) + Number(next.assignedHours || 0));
+    existing.completedHours = round(Number(existing.completedHours || 0) + Number(next.completedHours || 0));
+    existing.remainingHours = round(Number(existing.remainingHours || 0) + Number(next.remainingHours || 0));
+    existing.actualTimeLoggedMinutes = Math.max(Number(existing.actualTimeLoggedMinutes || 0), Number(next.actualTimeLoggedMinutes || 0));
+    existing.taskCount = existing.tasks.length;
+    existing.completedTaskCount = existing.tasks.filter(task => task.completed).length;
+    existing.lastSyncedAt = [existing.lastSyncedAt, next.lastSyncedAt].filter(Boolean).sort().at(-1) || null;
+    applyLivePilotWorkerFlags(existing);
+  }
+
+  if (!mergedById.has(JACOB_R_WORKER_ID)) {
+    mergedById.set(JACOB_R_WORKER_ID, applyLivePilotWorkerFlags(emptyJacobRWorker()));
+  }
+
+  return Array.from(mergedById.values()).sort((a, b) => {
+    const liveDelta = Number(b.liveWriteEnabled) - Number(a.liveWriteEnabled);
+    if (liveDelta) return liveDelta;
+    const openDelta = Number(b.remainingHours > 0) - Number(a.remainingHours > 0);
+    if (openDelta) return openDelta;
+    const workDelta = Number(b.taskCount > 0) - Number(a.taskCount > 0);
+    if (workDelta) return workDelta;
+    return a.name.localeCompare(b.name);
+  });
+}
+
 function recalculateSnapshotWorkerCompletion(worker) {
   const completedTasks = (worker.tasks || []).filter(task => task.completed);
   worker.taskCount = (worker.tasks || []).length;
@@ -1261,12 +1387,15 @@ function normalizeWorkerDailyActual(row) {
     allocatedHours: numberFromField(fields["Allocated Hours"]),
     actualMinutes,
     timerMinutes,
+    timerStartedAt: fields["Timer Started At"] || "",
     asanaPostedMinutes,
     loggedMinutes: Math.max(actualMinutes, timerMinutes, asanaPostedMinutes),
     dailyLoggedMinutes: numberFromField(fields["Daily Logged Minutes"]),
     dailyAvailableMinutes: numberFromField(fields["Daily Available Minutes"]),
     dailyEfficiencyPercent: numberFromField(fields["Daily Efficiency Percent"]),
     completed: booleanFromField(fields["Completed?"]),
+    completionPending: booleanFromField(fields["Completion Pending?"]),
+    timeEntryCreated: booleanFromField(fields["Time Entry Created?"]),
     dailySummary: booleanFromField(fields["Daily Summary?"]),
     source: fields.Source || "",
     syncedAt: row.source_synced_at || ""
@@ -1305,16 +1434,19 @@ function applyWorkerDailyActualRows(workers, actualRows) {
     }
 
     const taskIdValue = String(row.taskId || "");
-    if (!taskIdValue || row.loggedMinutes <= 0) continue;
+    const hasTimerState = Boolean(row.timerStartedAt) || row.timerMinutes > 0 || row.completed || row.completionPending;
+    if (!taskIdValue || (row.loggedMinutes <= 0 && !hasTimerState)) continue;
 
     const existingTask = (worker.tasks || []).find(task => String(task.id || "") === taskIdValue);
     if (existingTask) {
       existingTask.actualTimeOnDateMinutes = Math.max(Number(existingTask.actualTimeOnDateMinutes || 0), row.loggedMinutes);
       existingTask.actualTimeMinutes = Math.max(Number(existingTask.actualTimeMinutes || 0), row.asanaPostedMinutes);
       existingTask.timerAccumulatedMinutes = Math.max(Number(existingTask.timerAccumulatedMinutes || 0), row.timerMinutes);
+      existingTask.timerStartedAt = row.timerStartedAt || existingTask.timerStartedAt || "";
       existingTask.ledgerBackfilled = true;
       existingTask.ledgerSource = row.source || "Worker Daily Task Actuals";
       existingTask.ledgerSyncedAt = row.syncedAt || "";
+      if (row.completed) existingTask.completed = true;
       if (!existingTask.title && row.taskName) existingTask.title = row.taskName;
       if (!existingTask.vin && row.vin) existingTask.vin = row.vin;
       if (!existingTask.cycle && row.cycle) existingTask.cycle = row.cycle;
@@ -1331,7 +1463,7 @@ function applyWorkerDailyActualRows(workers, actualRows) {
       targetHours: row.allocatedHours || row.assignedHours,
       actualTimeMinutes: row.asanaPostedMinutes,
       actualTimeOnDateMinutes: row.loggedMinutes,
-      timerStartedAt: "",
+      timerStartedAt: row.timerStartedAt || "",
       timerAccumulatedMinutes: row.timerMinutes,
       timerElapsedMinutes: 0,
       estimatedMinutes: minutesFromHours(row.allocatedHours || row.assignedHours),
@@ -1707,9 +1839,12 @@ async function workerDailyActualRows(date) {
           'Allocated Hours', allocated_hours,
           'Actual Minutes', actual_minutes,
           'Timer Minutes', timer_minutes,
+          'Timer Started At', fields_json ->> 'Timer Started At',
           'Asana Posted Minutes', asana_posted_minutes,
           'Source', source_label,
           'Completed?', completed,
+          'Completion Pending?', fields_json ->> 'Completion Pending?',
+          'Time Entry Created?', fields_json ->> 'Time Entry Created?',
           'Daily Summary?', daily_summary,
           'Daily Available Minutes', daily_available_minutes,
           'Daily Logged Minutes', daily_logged_minutes,
@@ -1729,7 +1864,8 @@ async function workerDailyActualRows(date) {
 
 async function dailyAssignmentsPayload(url) {
   const date = url.searchParams.get("date") || todayIso();
-  const employee = url.searchParams.get("employee") || "";
+  const requestedEmployee = url.searchParams.get("employee") || "";
+  const employee = requestedEmployee ? canonicalWorkerIdForWrites(requestedEmployee) : "";
   const includeNoWork = INCLUDE_NO_WORK_WORKERS || booleanQuery(url.searchParams.get("includeNoWork"));
   if (!isIsoDate(date)) {
     const error = new Error("Date must be YYYY-MM-DD.");
@@ -1763,7 +1899,9 @@ async function dailyAssignmentsPayload(url) {
       configuredRows
     );
     await enrichSnapshotWorkersFromRaw(allWorkers);
+    allWorkers = ensureLivePilotWorkers(allWorkers);
     applyWorkerDailyActualRows(allWorkers, actualRows);
+    allWorkers = ensureLivePilotWorkers(allWorkers);
     if (!employee) {
       const calendar = await cycleCalendar(selectedCycleFromTrackerSnapshots(trackerSnapshots, date), date);
       cycleDayPayload = buildCycleDaysFromTrackerSnapshots(trackerSnapshots, date, calendar);
@@ -1771,7 +1909,9 @@ async function dailyAssignmentsPayload(url) {
     lineOverview = selectedTrackerSnapshots.find(snapshot => snapshot.trackerType === "Line Overview");
   } else {
     allWorkers = mergeConfiguredWorkers(buildWorkers(rows), configuredRows);
+    allWorkers = ensureLivePilotWorkers(allWorkers);
     applyWorkerDailyActualRows(allWorkers, actualRows);
+    allWorkers = ensureLivePilotWorkers(allWorkers);
     cycleDayPayload = employee ? null : await cycleDays(date);
   }
 
@@ -1797,6 +1937,510 @@ async function dailyAssignmentsPayload(url) {
     latestRuns,
     refreshedAt: new Date().toISOString()
   };
+}
+
+function actionError(message, statusCode = 400, details = {}) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  Object.assign(error, details);
+  return error;
+}
+
+async function readJsonBody(req) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > 1024 * 1024) {
+      throw actionError("Request body is too large.", 413);
+    }
+    chunks.push(chunk);
+  }
+
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw actionError("Request body must be valid JSON.", 400);
+  }
+}
+
+function authStatusPayload() {
+  return {
+    writePinRequired: false,
+    mode: WORKER_WRITES_ENABLED ? "hawley-live-jacob-r-pilot" : "hawley-read-only-pilot",
+    workerWritesEnabled: WORKER_WRITES_ENABLED,
+    writeWorkerIds: workerWriteIds(),
+    writeWorkerNames: WORKER_WRITES_ENABLED ? [JACOB_R_WORKER_NAME] : [],
+    liveWriteScope: "timer rows in Hawley plus Asana completion for approved pilot workers only"
+  };
+}
+
+function ledgerKeyForWorkerTask(workerId, date, taskId) {
+  return `${workerId}::${date}::${taskId}`;
+}
+
+function liveTimerFromRow(row) {
+  if (!row) return null;
+  const fields = row.fields_json || {};
+  return {
+    ledgerKey: row.ledger_key || "",
+    taskId: row.asana_task_gid || fields["Asana Task GID"] || "",
+    startedAt: fields["Timer Started At"] || "",
+    accumulatedMinutes: Number(row.timer_minutes || fields["Timer Minutes"] || 0),
+    actualMinutes: Number(row.actual_minutes || fields["Actual Minutes"] || 0),
+    asanaPostedMinutes: Number(row.asana_posted_minutes || fields["Asana Posted Minutes"] || 0),
+    completed: Boolean(row.completed) || booleanFromField(fields["Completed?"]),
+    completionPending: booleanFromField(fields["Completion Pending?"]),
+    timeEntryCreated: booleanFromField(fields["Time Entry Created?"])
+  };
+}
+
+function liveTimerElapsedMinutes(timer, now) {
+  const accumulated = Number(timer?.accumulatedMinutes || 0);
+  if (!timer?.startedAt) return accumulated;
+  const startedAt = new Date(timer.startedAt);
+  if (Number.isNaN(startedAt.getTime())) return accumulated;
+  return accumulated + Math.max(1, Math.round((now.getTime() - startedAt.getTime()) / 60000));
+}
+
+async function assignedWorkerTaskForWrite(employee, date, taskId) {
+  const assignmentUrl = new URL("http://hawley.local/api/daily-assignments");
+  assignmentUrl.searchParams.set("date", date);
+  assignmentUrl.searchParams.set("employee", employee);
+  assignmentUrl.searchParams.set("includeNoWork", "true");
+  const payload = await dailyAssignmentsPayload(assignmentUrl);
+  const worker = (payload.workers || []).find(item => item.id === employee);
+  if (!worker) {
+    throw actionError("Jacob R pilot profile is not available in Hawley for this date.", 404);
+  }
+
+  const task = (worker.tasks || []).find(item => String(item.id || "") === String(taskId));
+  if (!task) {
+    throw actionError("Task is not assigned to this employee for the selected day in Hawley.", 404);
+  }
+
+  return { worker, task };
+}
+
+async function readLiveActualRow(client, ledgerKey) {
+  const result = await client.query(
+    `
+      select
+        ledger_key,
+        asana_task_gid,
+        actual_minutes,
+        timer_minutes,
+        asana_posted_minutes,
+        completed,
+        fields_json
+      from hb.worker_daily_task_actuals
+      where ledger_key = $1
+      limit 1
+    `,
+    [ledgerKey]
+  );
+  return liveTimerFromRow(result.rows[0]);
+}
+
+async function runningLiveTimerForWorker(client, workerId, date, exceptTaskId = "") {
+  const result = await client.query(
+    `
+      select
+        ledger_key,
+        asana_task_gid,
+        actual_minutes,
+        timer_minutes,
+        asana_posted_minutes,
+        completed,
+        fields_json
+      from hb.worker_daily_task_actuals
+      where worker_key = $1
+        and work_date = $2::date
+        and coalesce(fields_json ->> 'Timer Started At', '') <> ''
+        and coalesce(asana_task_gid, '') <> $3
+      order by source_synced_at desc nulls last, worker_daily_actual_id desc
+      limit 1
+    `,
+    [workerId, date, String(exceptTaskId || "")]
+  );
+  return liveTimerFromRow(result.rows[0]);
+}
+
+function liveActualFields(worker, task, date, timer, options = {}) {
+  const actualMinutes = Number(options.actualMinutes ?? timer.actualMinutes ?? timer.accumulatedMinutes ?? 0);
+  const timerMinutes = Number(options.timerMinutes ?? timer.accumulatedMinutes ?? 0);
+  const asanaPostedMinutes = Number(options.asanaPostedMinutes ?? timer.asanaPostedMinutes ?? 0);
+  const completed = Boolean(options.completed);
+  return {
+    "Work Date": date,
+    "Worker Key": worker.id,
+    "Worker Name": worker.name,
+    "Worker Email": worker.email || "",
+    "Asana Task GID": String(task.id || ""),
+    "Task Name": task.title || "",
+    "Task URL": publicLink(task.sourceUrl) || sourceTaskUrl(task.id),
+    "VIN": task.vin || "",
+    "Cycle": formatCycleName(task.cycle),
+    "Phase": formatPhaseName(task.phase || task.workArea),
+    "Assigned Hours": Number(task.assignedHours || task.estimatedHours || 0),
+    "Allocated Hours": Number(task.targetHours || task.assignedHours || task.estimatedHours || 0),
+    "Actual Minutes": actualMinutes,
+    "Timer Minutes": timerMinutes,
+    "Timer Started At": timer.startedAt || "",
+    "Asana Posted Minutes": asanaPostedMinutes,
+    "Source": options.sourceLabel || "Hawley live worker pilot",
+    "Completed?": completed,
+    "Completion Pending?": Boolean(options.completionPending),
+    "Time Entry Created?": Boolean(options.timeEntryCreated),
+    "Last Seen At": options.seenAt || new Date().toISOString(),
+    "Was Assigned In DAT?": true
+  };
+}
+
+async function upsertLiveWorkerActual(client, worker, task, date, timer, options = {}) {
+  const nowIso = options.seenAt || new Date().toISOString();
+  const ledgerKey = ledgerKeyForWorkerTask(worker.id, date, task.id);
+  const fields = liveActualFields(worker, task, date, timer, { ...options, seenAt: nowIso });
+  const result = await client.query(
+    `
+      insert into hb.worker_daily_task_actuals (
+        ledger_key,
+        work_date,
+        worker_key,
+        worker_name,
+        worker_email,
+        asana_task_gid,
+        task_name,
+        task_url,
+        vin,
+        cycle_label,
+        phase_label,
+        assigned_hours,
+        allocated_hours,
+        actual_minutes,
+        timer_minutes,
+        asana_posted_minutes,
+        source_label,
+        was_assigned_in_dat,
+        completed,
+        last_seen_at,
+        fields_json,
+        source_system,
+        source_synced_at,
+        normalized_at
+      )
+      values (
+        $1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10,
+        $11, $12, $13, $14, $15, $16, $17, true, $18, $19,
+        $20::jsonb, $21, $19, now()
+      )
+      on conflict (ledger_key) do update set
+        work_date = excluded.work_date,
+        worker_key = excluded.worker_key,
+        worker_name = excluded.worker_name,
+        worker_email = excluded.worker_email,
+        asana_task_gid = excluded.asana_task_gid,
+        task_name = excluded.task_name,
+        task_url = excluded.task_url,
+        vin = excluded.vin,
+        cycle_label = excluded.cycle_label,
+        phase_label = excluded.phase_label,
+        assigned_hours = excluded.assigned_hours,
+        allocated_hours = excluded.allocated_hours,
+        actual_minutes = excluded.actual_minutes,
+        timer_minutes = excluded.timer_minutes,
+        asana_posted_minutes = excluded.asana_posted_minutes,
+        source_label = excluded.source_label,
+        was_assigned_in_dat = true,
+        completed = excluded.completed,
+        last_seen_at = excluded.last_seen_at,
+        fields_json = coalesce(hb.worker_daily_task_actuals.fields_json, '{}'::jsonb) || excluded.fields_json,
+        source_system = excluded.source_system,
+        source_synced_at = excluded.source_synced_at,
+        normalized_at = now()
+      returning
+        ledger_key,
+        asana_task_gid,
+        actual_minutes,
+        timer_minutes,
+        asana_posted_minutes,
+        completed,
+        fields_json
+    `,
+    [
+      ledgerKey,
+      date,
+      worker.id,
+      worker.name,
+      worker.email || "",
+      String(task.id || ""),
+      task.title || "",
+      publicLink(task.sourceUrl) || sourceTaskUrl(task.id),
+      task.vin || "",
+      formatCycleName(task.cycle),
+      formatPhaseName(task.phase || task.workArea),
+      Number(task.assignedHours || task.estimatedHours || 0),
+      Number(task.targetHours || task.assignedHours || task.estimatedHours || 0),
+      Number(options.actualMinutes ?? timer.actualMinutes ?? timer.accumulatedMinutes ?? 0),
+      Number(options.timerMinutes ?? timer.accumulatedMinutes ?? 0),
+      Number(options.asanaPostedMinutes ?? timer.asanaPostedMinutes ?? 0),
+      options.sourceLabel || "Hawley live worker pilot",
+      Boolean(options.completed),
+      nowIso,
+      JSON.stringify(fields),
+      LIVE_WORKER_SOURCE
+    ]
+  );
+  return liveTimerFromRow(result.rows[0]);
+}
+
+async function asanaJson(token, url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    }
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw actionError(`Asana API returned ${response.status}: ${text}`, response.status);
+  }
+
+  return response.json();
+}
+
+async function createTimeTrackingEntry(token, taskId, durationMinutes, enteredOn) {
+  const url = new URL(`https://app.asana.com/api/1.0/tasks/${taskId}/time_tracking_entries`);
+  await asanaJson(token, url, {
+    method: "POST",
+    body: JSON.stringify({
+      data: {
+        duration_minutes: durationMinutes,
+        entered_on: enteredOn
+      }
+    })
+  });
+}
+
+async function updateAsanaTask(token, taskId, data) {
+  const url = new URL(`https://app.asana.com/api/1.0/tasks/${taskId}`);
+  await asanaJson(token, url, {
+    method: "PUT",
+    body: JSON.stringify({ data })
+  });
+}
+
+async function createAsanaStory(token, taskId, text) {
+  const url = new URL(`https://app.asana.com/api/1.0/tasks/${taskId}/stories`);
+  await asanaJson(token, url, {
+    method: "POST",
+    body: JSON.stringify({ data: { text } })
+  });
+}
+
+function formatTimerMinutes(minutes) {
+  const total = Math.max(0, Math.round(Number(minutes || 0)));
+  const hours = Math.floor(total / 60);
+  const remainder = total % 60;
+  if (hours && remainder) return `${hours}h ${remainder}m`;
+  if (hours) return `${hours}h`;
+  return `${remainder}m`;
+}
+
+async function handleWorkerTaskAction(req) {
+  const body = await readJsonBody(req);
+  const action = String(body.action || "").trim().toLowerCase();
+  const employee = canonicalWorkerIdForWrites(body.employee || "");
+  const taskId = String(body.taskId || "").trim();
+  const date = String(body.date || todayIso()).trim();
+
+  if (!["start", "stop", "complete"].includes(action)) {
+    throw actionError("Action must be start, stop, or complete.", 400);
+  }
+  if (!employee || !workerWritesAllowed(employee)) {
+    throw actionError("Live worker writes are enabled only for the Jacob R pilot profile.", 403, {
+      mode: authStatusPayload().mode,
+      writeWorkerIds: workerWriteIds()
+    });
+  }
+  if (!taskId) throw actionError("Task ID is required.", 400);
+  if (!isIsoDate(date)) throw actionError("Date must be YYYY-MM-DD.", 400);
+
+  const { worker, task } = await assignedWorkerTaskForWrite(employee, date, taskId);
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const ledgerKey = ledgerKeyForWorkerTask(worker.id, date, task.id);
+  const client = await writePool.connect();
+
+  try {
+    const current = await readLiveActualRow(client, ledgerKey);
+
+    if (action === "start") {
+      if (current?.completed) {
+        throw actionError("This task is already completed in the Hawley timer ledger.", 409);
+      }
+      if (current?.startedAt) {
+        return {
+          ok: true,
+          action,
+          taskId,
+          startedAt: current.startedAt,
+          accumulatedMinutes: current.accumulatedMinutes,
+          elapsedMinutes: liveTimerElapsedMinutes(current, now),
+          completed: false
+        };
+      }
+
+      const blocking = await runningLiveTimerForWorker(client, worker.id, date, task.id);
+      if (blocking) {
+        throw actionError("Stop the running Jacob R timer before starting another task.", 409, {
+          code: "TIMER_SESSION_BLOCKED",
+          blockingTaskId: blocking.taskId
+        });
+      }
+
+      const timer = {
+        startedAt: nowIso,
+        accumulatedMinutes: Number(current?.accumulatedMinutes || 0),
+        actualMinutes: Number(current?.actualMinutes || 0),
+        asanaPostedMinutes: Number(current?.asanaPostedMinutes || 0)
+      };
+      const saved = await upsertLiveWorkerActual(client, worker, task, date, timer, {
+        actualMinutes: timer.actualMinutes,
+        timerMinutes: timer.accumulatedMinutes,
+        asanaPostedMinutes: timer.asanaPostedMinutes,
+        sourceLabel: "Hawley timer started",
+        seenAt: nowIso
+      });
+
+      return {
+        ok: true,
+        action,
+        taskId,
+        startedAt: saved.startedAt,
+        accumulatedMinutes: saved.accumulatedMinutes,
+        elapsedMinutes: liveTimerElapsedMinutes(saved, now),
+        completed: false
+      };
+    }
+
+    if (!current) {
+      throw actionError("Start the timer before stopping or completing this task.", 409);
+    }
+
+    const elapsedMinutes = liveTimerElapsedMinutes(current, now);
+    if (action === "stop") {
+      const saved = await upsertLiveWorkerActual(client, worker, task, date, {
+        ...current,
+        startedAt: "",
+        accumulatedMinutes: elapsedMinutes,
+        actualMinutes: elapsedMinutes
+      }, {
+        actualMinutes: elapsedMinutes,
+        timerMinutes: elapsedMinutes,
+        asanaPostedMinutes: current.asanaPostedMinutes,
+        sourceLabel: "Hawley timer stopped",
+        seenAt: nowIso
+      });
+
+      return {
+        ok: true,
+        action,
+        taskId,
+        startedAt: "",
+        accumulatedMinutes: saved.accumulatedMinutes,
+        elapsedMinutes: saved.accumulatedMinutes,
+        completed: false
+      };
+    }
+
+    if (elapsedMinutes <= 0) {
+      throw actionError("Start the timer before completing this task.", 409);
+    }
+    if (current.completed && current.timeEntryCreated) {
+      return {
+        ok: true,
+        action,
+        taskId,
+        elapsedMinutes: current.actualMinutes || current.accumulatedMinutes,
+        completed: true,
+        alreadyCompleted: true
+      };
+    }
+
+    const token = process.env.ASANA_PAT;
+    if (!token) {
+      throw actionError("ASANA_PAT is not configured for live completion writes.", 503);
+    }
+
+    await upsertLiveWorkerActual(client, worker, task, date, {
+      ...current,
+      startedAt: "",
+      accumulatedMinutes: elapsedMinutes,
+      actualMinutes: elapsedMinutes
+    }, {
+      actualMinutes: elapsedMinutes,
+      timerMinutes: elapsedMinutes,
+      asanaPostedMinutes: current.asanaPostedMinutes,
+      completionPending: true,
+      timeEntryCreated: current.timeEntryCreated,
+      sourceLabel: "Hawley completion pending",
+      seenAt: nowIso
+    });
+
+    if (!current.timeEntryCreated) {
+      await createTimeTrackingEntry(token, task.id, elapsedMinutes, date);
+      await upsertLiveWorkerActual(client, worker, task, date, {
+        ...current,
+        startedAt: "",
+        accumulatedMinutes: elapsedMinutes,
+        actualMinutes: elapsedMinutes,
+        asanaPostedMinutes: elapsedMinutes
+      }, {
+        actualMinutes: elapsedMinutes,
+        timerMinutes: elapsedMinutes,
+        asanaPostedMinutes: elapsedMinutes,
+        completionPending: true,
+        timeEntryCreated: true,
+        sourceLabel: "Hawley Asana time posted",
+        seenAt: nowIso
+      });
+    }
+
+    await updateAsanaTask(token, task.id, { completed: true });
+    await createAsanaStory(token, task.id, `Hawley worker pilot timer logged ${formatTimerMinutes(elapsedMinutes)}.`);
+    const saved = await upsertLiveWorkerActual(client, worker, task, date, {
+      ...current,
+      startedAt: "",
+      accumulatedMinutes: elapsedMinutes,
+      actualMinutes: elapsedMinutes,
+      asanaPostedMinutes: Math.max(elapsedMinutes, current.asanaPostedMinutes || 0)
+    }, {
+      actualMinutes: elapsedMinutes,
+      timerMinutes: elapsedMinutes,
+      asanaPostedMinutes: Math.max(elapsedMinutes, current.asanaPostedMinutes || 0),
+      completed: true,
+      completionPending: false,
+      timeEntryCreated: true,
+      sourceLabel: "Hawley task completed",
+      seenAt: nowIso
+    });
+
+    return {
+      ok: true,
+      action,
+      taskId,
+      elapsedMinutes: saved.actualMinutes || elapsedMinutes,
+      completed: true
+    };
+  } finally {
+    client.release();
+  }
 }
 
 async function healthPayload() {
@@ -1883,10 +2527,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/auth-status" && req.method === "GET") {
-      sendJson(res, 200, {
-        writePinRequired: false,
-        mode: "hawley-read-only-pilot"
-      });
+      sendJson(res, 200, authStatusPayload());
       return;
     }
 
@@ -1935,9 +2576,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/worker-task-action" && req.method === "POST") {
-      sendError(res, 409, "Hawley worker pilot is read-only. Timer and completion writes are not enabled yet.", {
-        mode: "hawley-read-only-pilot"
-      });
+      sendJson(res, 200, await handleWorkerTaskAction(req));
       return;
     }
 
@@ -1968,7 +2607,10 @@ function shutdown(signal) {
   stopAsanaEventWatcher(signal);
   stopWorkerActualsWatcher(signal);
   server.close(() => {
-    pool.end()
+    Promise.all([
+      pool.end(),
+      writePool.end()
+    ])
       .catch(() => {})
       .finally(() => process.exit(0));
   });
