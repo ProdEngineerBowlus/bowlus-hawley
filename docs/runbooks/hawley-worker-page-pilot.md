@@ -9,12 +9,12 @@ By default this pilot does not start timers, complete tasks, create Asana time
 tracking entries, or rebuild Daily Assignment Tracker. It reads local Hawley
 tables and reporting views only.
 
-Exception: the Jacob R pilot profile is approved for live worker timer testing.
-That profile writes timer state into Hawley's `hb.worker_daily_task_actuals`
+Exception: worker pages are approved for live timer testing on real tasks. A
+worker page writes timer state into Hawley's `hb.worker_daily_task_actuals`
 ledger. On Complete, Hawley creates the Asana time tracking entry, marks the
-source Asana task complete, and adds an Asana story. The live write scope must
-stay limited to worker IDs returned by `/api/auth-status` until broader rollout
-is explicitly approved.
+source Asana task complete, and adds an Asana story. The live write scope is
+reported by `/api/auth-status`; `writeWorkerIds: ["*"]` means all assigned
+worker pages use server-backed live writes.
 
 Hawley still does not write to Airtable. The one-minute Airtable
 `Worker Daily Task Actuals` pull is a legacy/readable mirror input and does not

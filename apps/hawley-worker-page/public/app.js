@@ -1520,7 +1520,7 @@
   function serverWritesEnabledFor(employee) {
     if (state.source === "asana") return true;
     const ids = Array.isArray(state.authStatus.writeWorkerIds) ? state.authStatus.writeWorkerIds : [];
-    return Boolean(state.authStatus.workerWritesEnabled && ids.includes(employee));
+    return Boolean(state.authStatus.workerWritesEnabled && (ids.includes("*") || ids.includes(employee)));
   }
 
   async function startWorkerTimer(employee, taskId) {

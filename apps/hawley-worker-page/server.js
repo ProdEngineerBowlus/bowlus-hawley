@@ -27,8 +27,9 @@ const JACOB_R_WORKER_NAME = process.env.HAWLEY_JACOB_R_NAME || "Jacob R";
 const JACOB_R_WORKER_EMAIL = process.env.HAWLEY_JACOB_R_EMAIL || "asana@bowlus.com";
 const JACOB_R_WORKER_PHASE = process.env.HAWLEY_JACOB_R_PHASE || "Management";
 const WORKER_WRITES_ENABLED = booleanEnv("HAWLEY_WORKER_WRITES_ENABLED", true);
+const WORKER_WRITES_ALL = booleanEnv("HAWLEY_WORKER_WRITES_ALL", true) || String(process.env.HAWLEY_WORKER_WRITE_IDS || "").trim() === "*";
 const WORKER_WRITE_IDS = new Set(
-  envList(process.env.HAWLEY_WORKER_WRITE_IDS || JACOB_R_WORKER_ID)
+  envList(process.env.HAWLEY_WORKER_WRITE_IDS || (WORKER_WRITES_ALL ? "" : JACOB_R_WORKER_ID))
     .map(canonicalWorkerIdForWrites)
     .filter(Boolean)
 );
@@ -163,11 +164,14 @@ function isJacobRWorker(worker) {
 }
 
 function workerWritesAllowed(workerId) {
-  return Boolean(WORKER_WRITES_ENABLED && WORKER_WRITE_IDS.has(canonicalWorkerIdForWrites(workerId)));
+  const id = canonicalWorkerIdForWrites(workerId);
+  if (!WORKER_WRITES_ENABLED || !id || id === "worker-unknown") return false;
+  if (WORKER_WRITES_ALL) return true;
+  return WORKER_WRITE_IDS.has(id);
 }
 
 function workerWriteIds() {
-  return Array.from(WORKER_WRITE_IDS);
+  return WORKER_WRITES_ALL ? ["*"] : Array.from(WORKER_WRITE_IDS);
 }
 
 function shouldStartAsanaEventWatcher() {
@@ -788,7 +792,7 @@ function mergeConfiguredWorkers(workers, configuredRows) {
 
 function workerHasVisibleWork(worker) {
   return Boolean(
-    worker.liveWriteEnabled ||
+    isJacobRWorker(worker) ||
     Number(worker.assignedHours || 0) > 0 ||
     Number(worker.remainingHours || 0) > 0 ||
     Number(worker.completedHours || 0) > 0 ||
@@ -1969,11 +1973,14 @@ async function readJsonBody(req) {
 function authStatusPayload() {
   return {
     writePinRequired: false,
-    mode: WORKER_WRITES_ENABLED ? "hawley-live-jacob-r-pilot" : "hawley-read-only-pilot",
+    mode: WORKER_WRITES_ENABLED ? "hawley-live-worker-writes" : "hawley-read-only-pilot",
     workerWritesEnabled: WORKER_WRITES_ENABLED,
+    workerWritesAll: WORKER_WRITES_ALL,
     writeWorkerIds: workerWriteIds(),
-    writeWorkerNames: WORKER_WRITES_ENABLED ? [JACOB_R_WORKER_NAME] : [],
-    liveWriteScope: "timer rows in Hawley plus Asana completion for approved pilot workers only"
+    writeWorkerNames: WORKER_WRITES_ENABLED && !WORKER_WRITES_ALL ? [JACOB_R_WORKER_NAME] : [],
+    liveWriteScope: WORKER_WRITES_ALL
+      ? "timer rows in Hawley plus Asana completion for assigned worker tasks"
+      : "timer rows in Hawley plus Asana completion for approved pilot workers only"
   };
 }
 
@@ -2013,7 +2020,7 @@ async function assignedWorkerTaskForWrite(employee, date, taskId) {
   const payload = await dailyAssignmentsPayload(assignmentUrl);
   const worker = (payload.workers || []).find(item => item.id === employee);
   if (!worker) {
-    throw actionError("Jacob R pilot profile is not available in Hawley for this date.", 404);
+    throw actionError("Worker profile is not available in Hawley for this date.", 404);
   }
 
   const task = (worker.tasks || []).find(item => String(item.id || "") === String(taskId));
@@ -2263,7 +2270,7 @@ async function handleWorkerTaskAction(req) {
     throw actionError("Action must be start, stop, or complete.", 400);
   }
   if (!employee || !workerWritesAllowed(employee)) {
-    throw actionError("Live worker writes are enabled only for the Jacob R pilot profile.", 403, {
+    throw actionError("Live worker writes are not enabled for this employee.", 403, {
       mode: authStatusPayload().mode,
       writeWorkerIds: workerWriteIds()
     });
@@ -2298,7 +2305,7 @@ async function handleWorkerTaskAction(req) {
 
       const blocking = await runningLiveTimerForWorker(client, worker.id, date, task.id);
       if (blocking) {
-        throw actionError("Stop the running Jacob R timer before starting another task.", 409, {
+        throw actionError("Stop the running timer before starting another task.", 409, {
           code: "TIMER_SESSION_BLOCKED",
           blockingTaskId: blocking.taskId
         });
