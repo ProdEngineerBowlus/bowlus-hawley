@@ -1409,6 +1409,18 @@ function cycleDayPayloadFromDateMap(byDate, selectedDate, selectedCycle, calenda
     source,
     days: cycleDayDateList(byDate, calendar, selectedDate).map((date, index) => {
       const day = byDate.get(date);
+      const assignedHours = Number(day?.assignedHours || 0);
+      const completedHours = Number(day?.completedHours || 0);
+      const taskCount = Number(day?.taskCount || 0);
+      const completedTaskCount = Number(day?.completedTaskCount || 0);
+      const hoursCompletionPercent = day?.completionPercent !== null && day?.completionPercent !== undefined
+        ? Number(day.completionPercent || 0)
+        : assignedHours
+          ? round((completedHours / assignedHours) * 100, 1)
+          : 0;
+      const taskCompletionPercent = taskCount
+        ? round((completedTaskCount / taskCount) * 100, 1)
+        : 0;
       return {
         date,
         cycle: day?.cycle || cycle,
@@ -1417,16 +1429,16 @@ function cycleDayPayloadFromDateMap(byDate, selectedDate, selectedCycle, calenda
         selected: date === selectedDate,
         hasSnapshot: Boolean(day),
         workerCount: Number(day?.workerCount || 0),
-        assignedHours: round(day?.assignedHours || 0),
-        completedHours: round(day?.completedHours || 0),
+        assignedHours: round(assignedHours),
+        completedHours: round(completedHours),
         remainingHours: round(day?.remainingHours || 0),
-        taskCount: Number(day?.taskCount || 0),
-        completedTaskCount: Number(day?.completedTaskCount || 0),
-        completeTaskLabel: `${Number(day?.completedTaskCount || 0)}/${Number(day?.taskCount || 0)}`,
+        taskCount,
+        completedTaskCount,
+        completeTaskLabel: `${completedTaskCount}/${taskCount}`,
         status: day?.status || (day ? "Assigned" : "No Work"),
-        completionPercent: day?.completionPercent !== null && day?.completionPercent !== undefined
-          ? Number(day.completionPercent || 0)
-          : 0
+        completionPercent: taskCompletionPercent,
+        taskCompletionPercent,
+        hoursCompletionPercent
       };
     })
   };

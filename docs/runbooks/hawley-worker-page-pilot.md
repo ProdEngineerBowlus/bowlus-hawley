@@ -122,6 +122,12 @@ By default it refreshes a recent Work Date window, not the full Airtable mirror.
 It is read-only against Airtable and does not write to Airtable, Asana, or the
 current shop worker app.
 
+The manager `C# day` gauge is intentionally a task-completion gauge. Its percent
+must be `completedTaskCount / taskCount`, matching the adjacent `X/Y tasks
+complete` label. Hour-based cycle progress from Daily Assignment Line Overview
+or Phase Cycle Load can be exposed separately, but should not be displayed as a
+task-completion percent.
+
 Refresh Asana completion/permalink context and DAT snapshots:
 
 ```powershell

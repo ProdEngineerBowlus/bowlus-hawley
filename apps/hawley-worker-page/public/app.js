@@ -857,9 +857,8 @@
     const cycleDays = state.cycleDays || {};
     const days = Array.isArray(cycleDays.days) ? cycleDays.days : [];
     const selected = days.find((day) => day.selected) || days.find((day) => day.date === state.date) || {};
-    const cyclePercent = selected.completionPercent !== null && selected.completionPercent !== undefined
-      ? Math.round(Number(selected.completionPercent || 0))
-      : 0;
+    const cyclePercentValue = selected.taskCompletionPercent ?? selected.completionPercent ?? 0;
+    const cyclePercent = Math.round(Number(cyclePercentValue || 0));
     const lineDetail = efficiencyRows.length
       ? `${efficiencyRows.length} worker average - ${belowThresholdCount} below 75%`
       : "No worker time logged yet";
