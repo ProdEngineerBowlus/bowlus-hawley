@@ -79,6 +79,11 @@ this in the App Platform Settings page by editing `DATABASE_URL` as a normal
 environment-variable row/value for the service or app. Also check for duplicate
 `DATABASE_URL` entries; component-level variables override app-level variables.
 
+Hawley's shared Postgres config strips DigitalOcean's sample
+`/path/to/ca-certificate.crt` SSL file placeholder if it is left in the URL, but
+the preferred App Platform value should still omit `sslrootcert` and keep only
+`sslmode=require`.
+
 After saving environment variable changes, redeploy the app and re-check:
 
 ```powershell
