@@ -98,13 +98,30 @@ After the deployed app can connect to Postgres, the cloud database still needs
 the Hawley schema and mirror data:
 
 ```powershell
-npm run pg:migrate
-npm run pg:refresh-worker-read-model
+npm run pg:bootstrap-cloud
 ```
 
 Run these from an App Platform console or trusted cloud job using a database
 user with migration/write privileges. Keep `HAWLEY_ALLOW_SOURCE_WRITES=false`;
 these commands write to Hawley Postgres only, not back to Airtable or Asana.
+
+`pg:bootstrap-cloud` runs the first-load sequence in order:
+
+```text
+pg:migrate
+pg:pull:airtable
+pg:normalize
+pg:pull:asana
+pg:build:hb
+pg:pull:daily-tracker
+```
+
+After the first bootstrap, use the faster one-minute or manual worker refresh
+path:
+
+```powershell
+npm run pg:refresh-worker-read-model
+```
 
 If the runtime `bowlus_app` user does not have enough privileges to migrate,
 use the sync/migration database user for the load step, then leave the web app
