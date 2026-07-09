@@ -152,6 +152,7 @@ http://127.0.0.1:5273?employee=<worker-slug>
 
 ```text
 GET /api/health
+GET /api/sync-status
 GET /api/daily-assignments?date=YYYY-MM-DD
 GET /api/daily-assignments?date=YYYY-MM-DD&includeNoWork=true
 GET /api/daily-assignments?date=YYYY-MM-DD&employee=<worker-slug>
@@ -163,6 +164,11 @@ POST /api/worker-task-action
 ```
 
 The `POST` endpoints intentionally return read-only pilot errors.
+
+`/api/sync-status` reports HB freshness from Postgres only: the in-process
+Asana event watcher state and latest `sync.run_log` rows. It is the fastest way
+to confirm that the worker page is reading a fresh Hawley Brain instead of
+silently leaning on Airtable or live Asana.
 
 ## Configuration
 

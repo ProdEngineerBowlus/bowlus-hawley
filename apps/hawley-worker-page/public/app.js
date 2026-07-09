@@ -1,6 +1,7 @@
 (function () {
   const PROJECT_ID = "1214157321063250";
   const ASSIGNMENT_AUTO_REFRESH_MS = 90 * 1000;
+  const SYNC_STATUS_REFRESH_MS = 60 * 1000;
   let today = getTodayIso();
   const queryEmployee = getEmployeeFromUrl();
   const queryDate = queryEmployee ? "" : getDateFromUrl();
@@ -36,6 +37,11 @@
       pending: [],
       history: [],
     },
+    syncStatus: {
+      watcher: {},
+      latestRuns: {},
+      refreshedAt: "",
+    },
     source: "loading",
     date: selectedDate,
     project: {
@@ -44,6 +50,8 @@
       url: "https://app.asana.com/1/829365006370166/project/1214157321063250",
     },
     latestTrackerDate: "",
+    latestRuns: {},
+    refreshedAt: "",
     cycleDays: null,
     workers: [],
     lineOverview: null,
@@ -262,6 +270,7 @@
   loadAlertStatus();
   if (!queryEmployee) {
     loadRefreshStatus();
+    loadSyncStatus();
   }
   window.setInterval(() => {
     if (hasVisibleRunningTimer()) render();
@@ -269,6 +278,11 @@
   window.setInterval(() => {
     if (!state.actionTaskId) loadAssignments({ silent: true });
   }, ASSIGNMENT_AUTO_REFRESH_MS);
+  if (!queryEmployee) {
+    window.setInterval(() => {
+      loadSyncStatus({ silent: true });
+    }, SYNC_STATUS_REFRESH_MS);
+  }
 
   async function loadAssignments(options = {}) {
     const silent = Boolean(options.silent);
@@ -339,6 +353,17 @@
     }
   }
 
+  async function loadSyncStatus(options = {}) {
+    try {
+      const response = await fetch(`/api/sync-status?_=${Date.now()}`);
+      if (!response.ok) return;
+      state.syncStatus = await response.json();
+      if (!options.silent || !state.actionTaskId) render();
+    } catch (error) {
+      // Freshness status is supplemental; assignments still carry last run info.
+    }
+  }
+
   async function loadAuthStatus() {
     try {
       const response = await fetch("/api/auth-status");
@@ -356,6 +381,8 @@
     state.project = payload.project || state.project;
     state.lineOverview = payload.lineOverview || null;
     state.latestTrackerDate = payload.latestTrackerDate || "";
+    state.latestRuns = payload.latestRuns || {};
+    state.refreshedAt = payload.refreshedAt || "";
     state.cycleDays = payload.cycleDays || null;
     const workers = Array.isArray(payload.workers) ? payload.workers : [];
     state.workers = queryEmployee ? workers.filter((worker) => worker.id === queryEmployee) : workers;
@@ -638,19 +665,78 @@
   }
 
   function renderManagerDashboard() {
+    const freshnessPanel = renderFreshnessPanel();
     if (!state.workers.length) {
       const latest = state.latestTrackerDate && state.latestTrackerDate !== state.date
         ? `<div class="field-hint">Latest available tracker date: ${escapeHtml(formatLongDate(state.latestTrackerDate))}. Refresh tracker before using today's worker pages.</div>`
         : "";
-      return `<div class="empty-state">No worker assignment snapshots are available for ${escapeHtml(formatLongDate(state.date))}.${latest}</div>`;
+      return `
+        ${freshnessPanel}
+        <div class="empty-state">No worker assignment snapshots are available for ${escapeHtml(formatLongDate(state.date))}.${latest}</div>
+      `;
     }
 
     return `
       <section class="manager-dashboard">
         ${renderCycleDayBar()}
+        ${freshnessPanel}
         ${renderEfficiencyPanel()}
         ${renderAlertAttentionPanel()}
       </section>
+    `;
+  }
+
+  function renderFreshnessPanel() {
+    const syncStatus = state.syncStatus || {};
+    const watcher = syncStatus.watcher || {};
+    const latestRuns = syncStatus.latestRuns || state.latestRuns || {};
+    const running = Boolean(watcher.running);
+    const intervalMs = Number(watcher.intervalMs || 60000);
+    const watcherTone = running ? "good" : watcher.requested || watcher.enabled ? "warn" : "risk";
+    const watcherDetail = running
+      ? `Every ${formatMinutes(Math.round(intervalMs / 60000))}`
+      : watcher.reason || "Not running";
+    const refreshedAt = syncStatus.refreshedAt || state.refreshedAt;
+
+    return `
+      <section class="panel freshness-panel">
+        <div class="panel-header dashboard-header">
+          <div>
+            <h2 class="panel-title">HB freshness</h2>
+            <p class="summary-line">${escapeHtml(refreshedAt ? `Checked ${formatRelativeTime(refreshedAt)}` : "Waiting for sync status")}</p>
+          </div>
+          <span class="status-pill ${escapeAttr(watcherTone)}">${escapeHtml(running ? "Watching" : "Offline")}</span>
+        </div>
+        <div class="panel-body freshness-grid">
+          ${renderFreshnessMetric("Asana watcher", running ? "Running" : "Off", watcherDetail, watcherTone)}
+          ${renderRunFreshness("Asana events", latestRuns.pull_asana_events, 5)}
+          ${renderRunFreshness("Full Asana", latestRuns.pull_asana, 180)}
+          ${renderRunFreshness("DAT mirror", latestRuns.pull_daily_tracker, 60)}
+          ${renderRunFreshness("Legacy Airtable", latestRuns.pull_airtable, 1440)}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderRunFreshness(label, run, freshMinutes) {
+    const endedAt = run && run.ended_at;
+    const ok = run && run.status === "success";
+    const ageMinutes = endedAt ? (Date.now() - new Date(endedAt).getTime()) / 60000 : Infinity;
+    const tone = ok && ageMinutes <= freshMinutes ? "good" : ok ? "warn" : "risk";
+    const detailParts = [];
+    if (run && run.status) detailParts.push(run.status === "success" ? "ok" : run.status);
+    if (run && Number(run.records_written || 0)) detailParts.push(`${formatCompactNumber(run.records_written)} writes`);
+    if (run && Number(run.error_count || 0)) detailParts.push(`${formatCompactNumber(run.error_count)} errors`);
+    return renderFreshnessMetric(label, endedAt ? formatRelativeTime(endedAt) : "Never", detailParts.join(" - ") || "No run logged", tone);
+  }
+
+  function renderFreshnessMetric(label, value, detail, level) {
+    return `
+      <div class="freshness-metric ${escapeAttr(level || "")}">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(value)}</strong>
+        <small>${escapeHtml(detail)}</small>
+      </div>
     `;
   }
 
@@ -1978,6 +2064,24 @@
     return local.toISOString().slice(0, 10);
   }
 
+  function formatRelativeTime(value) {
+    const timestamp = new Date(value).getTime();
+    if (!timestamp) return "unknown";
+    const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+    if (seconds < 90) return "just now";
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date(timestamp));
+  }
+
   function formatLongDate(isoDate) {
     const date = new Date(`${isoDate}T00:00:00`);
     return new Intl.DateTimeFormat(undefined, {
@@ -2171,6 +2275,14 @@
       maximumFractionDigits: 2,
       minimumFractionDigits: Number.isInteger(numeric) ? 0 : 2,
     });
+  }
+
+  function formatCompactNumber(value) {
+    const numeric = Number(value || 0);
+    return new Intl.NumberFormat(undefined, {
+      notation: "compact",
+      maximumFractionDigits: numeric >= 10000 ? 1 : 0,
+    }).format(numeric);
   }
 
   function escapeHtml(value) {

@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { getDatabaseConfig } from "../postgres-sync/src/config.js";
@@ -9,6 +10,7 @@ const { Pool } = pg;
 
 const __filename = fileURLToPath(import.meta.url);
 const appDir = path.dirname(__filename);
+const repoRoot = path.resolve(appDir, "..", "..");
 const staticDir = path.join(appDir, "public");
 
 const HOST = process.env.HAWLEY_WORKER_HOST || (process.env.PORT ? "0.0.0.0" : "127.0.0.1");
@@ -16,8 +18,28 @@ const PORT = Number(process.env.PORT || process.env.HAWLEY_WORKER_PORT || 5273);
 const DAILY_TRACKER_PROJECT_ID = process.env.HAWLEY_DAILY_TRACKER_PROJECT_GID || "1214157321063250";
 const USE_DAT_SNAPSHOTS = process.env.HAWLEY_WORKER_USE_DAT_SNAPSHOTS === "true";
 const INCLUDE_NO_WORK_WORKERS = process.env.HAWLEY_WORKER_INCLUDE_NO_WORK === "true";
+const ASANA_EVENT_WATCH_INTERVAL_MS = Number(process.env.HAWLEY_ASANA_EVENT_INTERVAL_MS || 60000);
+const ASANA_EVENT_WATCH_RESTART_MS = Number(process.env.HAWLEY_ASANA_EVENT_WATCH_RESTART_MS || 30000);
 
 const pool = new Pool(getDatabaseConfig());
+
+const asanaEventWatcherState = {
+  enabled: false,
+  requested: false,
+  running: false,
+  pid: null,
+  startedAt: "",
+  lastOutputAt: "",
+  lastExit: null,
+  lastError: "",
+  intervalMs: ASANA_EVENT_WATCH_INTERVAL_MS,
+  restartMs: ASANA_EVENT_WATCH_RESTART_MS,
+  mode: "web-service-sidecar",
+  reason: ""
+};
+let asanaEventWatcherProcess = null;
+let asanaEventWatcherRestartTimer = null;
+let asanaEventWatcherStopping = false;
 
 const CONTENT_TYPES = Object.freeze({
   ".html": "text/html; charset=utf-8",
@@ -78,6 +100,146 @@ function publicErrorMessage(error) {
     status: error.statusCode || 500,
     message: message || "Unexpected server error."
   };
+}
+
+function booleanEnv(name, defaultValue = false) {
+  const value = process.env[name];
+  if (value === undefined || value === "") return defaultValue;
+  return ["1", "true", "yes", "y", "on"].includes(String(value).trim().toLowerCase());
+}
+
+function shouldStartAsanaEventWatcher() {
+  if (process.env.HAWLEY_ASANA_EVENT_WATCH_IN_WEB !== undefined) {
+    return booleanEnv("HAWLEY_ASANA_EVENT_WATCH_IN_WEB", false);
+  }
+  return process.env.NODE_ENV === "production";
+}
+
+function syncDatabaseConfigured() {
+  return Boolean(process.env.HAWLEY_SYNC_DATABASE_URL || process.env.HAWLEY_MIGRATION_DATABASE_URL);
+}
+
+function asanaEventWatcherStatus() {
+  return { ...asanaEventWatcherState };
+}
+
+function logWatcherStream(streamName, chunk) {
+  const lines = String(chunk)
+    .split(/\r?\n/)
+    .filter(Boolean);
+  for (const line of lines) {
+    asanaEventWatcherState.lastOutputAt = new Date().toISOString();
+    if (streamName === "stderr") {
+      asanaEventWatcherState.lastError = line.slice(0, 1000);
+      console.error(`[hawley-asana-events] ${line}`);
+    } else {
+      console.log(`[hawley-asana-events] ${line}`);
+    }
+  }
+}
+
+function startAsanaEventWatcher() {
+  asanaEventWatcherState.requested = shouldStartAsanaEventWatcher();
+  asanaEventWatcherState.enabled = false;
+  asanaEventWatcherState.reason = "";
+
+  if (!asanaEventWatcherState.requested) {
+    asanaEventWatcherState.reason = "disabled";
+    return;
+  }
+
+  if (!process.env.ASANA_PAT) {
+    asanaEventWatcherState.reason = "missing ASANA_PAT";
+    console.warn("Hawley Asana event watcher disabled: missing ASANA_PAT.");
+    return;
+  }
+
+  if (!syncDatabaseConfigured()) {
+    asanaEventWatcherState.reason = "missing HAWLEY_SYNC_DATABASE_URL or HAWLEY_MIGRATION_DATABASE_URL";
+    console.warn("Hawley Asana event watcher disabled: missing sync database URL.");
+    return;
+  }
+
+  if (!Number.isFinite(ASANA_EVENT_WATCH_INTERVAL_MS) || ASANA_EVENT_WATCH_INTERVAL_MS < 15000) {
+    asanaEventWatcherState.reason = "invalid HAWLEY_ASANA_EVENT_INTERVAL_MS";
+    console.warn("Hawley Asana event watcher disabled: interval must be at least 15000 ms.");
+    return;
+  }
+
+  asanaEventWatcherState.enabled = true;
+  asanaEventWatcherState.reason = "running";
+  spawnAsanaEventWatcher();
+}
+
+function spawnAsanaEventWatcher() {
+  if (asanaEventWatcherStopping || asanaEventWatcherProcess) return;
+
+  const args = [
+    "./apps/postgres-sync/src/pull-asana-events.js",
+    "--loop",
+    "--interval-ms",
+    String(ASANA_EVENT_WATCH_INTERVAL_MS)
+  ];
+
+  const child = spawn(process.execPath, args, {
+    cwd: repoRoot,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true
+  });
+
+  asanaEventWatcherProcess = child;
+  asanaEventWatcherState.running = true;
+  asanaEventWatcherState.pid = child.pid || null;
+  asanaEventWatcherState.startedAt = new Date().toISOString();
+  asanaEventWatcherState.lastExit = null;
+  asanaEventWatcherState.lastError = "";
+  asanaEventWatcherState.reason = "running";
+
+  child.stdout.on("data", chunk => logWatcherStream("stdout", chunk));
+  child.stderr.on("data", chunk => logWatcherStream("stderr", chunk));
+  child.on("error", error => {
+    asanaEventWatcherState.lastError = error.message;
+    asanaEventWatcherState.reason = "spawn failed";
+    console.error(`Hawley Asana event watcher failed to start: ${error.message}`);
+  });
+  child.on("exit", (code, signal) => {
+    asanaEventWatcherProcess = null;
+    asanaEventWatcherState.running = false;
+    asanaEventWatcherState.pid = null;
+    asanaEventWatcherState.lastExit = {
+      code,
+      signal,
+      at: new Date().toISOString()
+    };
+
+    if (asanaEventWatcherStopping || !asanaEventWatcherState.enabled) {
+      asanaEventWatcherState.reason = "stopped";
+      return;
+    }
+
+    asanaEventWatcherState.reason = "restarting";
+    const restartMs = Number.isFinite(ASANA_EVENT_WATCH_RESTART_MS) && ASANA_EVENT_WATCH_RESTART_MS >= 0
+      ? ASANA_EVENT_WATCH_RESTART_MS
+      : 30000;
+    console.warn(`Hawley Asana event watcher exited; restarting in ${restartMs} ms.`);
+    asanaEventWatcherRestartTimer = setTimeout(() => {
+      asanaEventWatcherRestartTimer = null;
+      spawnAsanaEventWatcher();
+    }, restartMs);
+    asanaEventWatcherRestartTimer.unref?.();
+  });
+}
+
+function stopAsanaEventWatcher(signal = "SIGTERM") {
+  asanaEventWatcherStopping = true;
+  if (asanaEventWatcherRestartTimer) {
+    clearTimeout(asanaEventWatcherRestartTimer);
+    asanaEventWatcherRestartTimer = null;
+  }
+  if (asanaEventWatcherProcess && !asanaEventWatcherProcess.killed) {
+    asanaEventWatcherProcess.kill(signal);
+  }
 }
 
 async function applyRuntimeReadGrants() {
@@ -1488,7 +1650,19 @@ async function healthPayload() {
     app: "hawley-worker-page",
     database: db.rows[0],
     counts: counts.rows[0],
-    latestRuns
+    latestRuns,
+    watcher: asanaEventWatcherStatus()
+  };
+}
+
+async function syncStatusPayload() {
+  return {
+    ok: true,
+    app: "hawley-worker-page",
+    mode: "hawley-brain",
+    watcher: asanaEventWatcherStatus(),
+    latestRuns: await latestImportRuns(),
+    refreshedAt: new Date().toISOString()
   };
 }
 
@@ -1520,6 +1694,11 @@ const server = http.createServer(async (req, res) => {
   try {
     if (url.pathname === "/api/health") {
       sendJson(res, 200, await healthPayload());
+      return;
+    }
+
+    if (url.pathname === "/api/sync-status") {
+      sendJson(res, 200, await syncStatusPayload());
       return;
     }
 
@@ -1603,10 +1782,24 @@ const server = http.createServer(async (req, res) => {
 
 async function startServer() {
   await applyRuntimeReadGrants();
+  startAsanaEventWatcher();
   server.listen(PORT, HOST, () => {
     console.log(`Hawley worker pilot listening on http://${HOST}:${PORT}`);
   });
 }
+
+function shutdown(signal) {
+  stopAsanaEventWatcher(signal);
+  server.close(() => {
+    pool.end()
+      .catch(() => {})
+      .finally(() => process.exit(0));
+  });
+  setTimeout(() => process.exit(0), 5000).unref?.();
+}
+
+process.once("SIGTERM", () => shutdown("SIGTERM"));
+process.once("SIGINT", () => shutdown("SIGINT"));
 
 startServer().catch(error => {
   console.error("Failed to start Hawley worker pilot.");

@@ -483,6 +483,72 @@ button {
   gap: 14px;
 }
 
+.freshness-panel {
+  overflow: hidden;
+}
+
+.freshness-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.freshness-metric {
+  min-height: 86px;
+  display: grid;
+  align-content: center;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--soft);
+  padding: 12px 14px;
+}
+
+.admin-shell .freshness-panel {
+  background:
+    linear-gradient(135deg, rgba(32, 39, 29, 0.98), rgba(16, 20, 15, 0.98));
+}
+
+.admin-shell .freshness-metric {
+  background: rgba(14, 17, 13, 0.5);
+  border-color: #364233;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.freshness-metric.good {
+  border-left-color: var(--primary);
+}
+
+.freshness-metric.warn {
+  border-left-color: var(--yellow);
+}
+
+.freshness-metric.risk {
+  border-left-color: var(--accent);
+}
+
+.freshness-metric span,
+.freshness-metric small {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.freshness-metric strong {
+  min-width: 0;
+  font-size: 20px;
+  line-height: 1.15;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .cycle-panel {
   overflow: hidden;
 }
@@ -1733,6 +1799,7 @@ button {
   }
 
   .attention-card-grid,
+  .freshness-grid,
   .efficiency-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1840,6 +1907,10 @@ button {
   }
 
   .alert-lane-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .freshness-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1964,6 +2035,7 @@ button {
   .alert-row,
   .alert-lane-grid,
   .attention-card-grid,
+  .freshness-grid,
   .efficiency-grid,
   .employee-efficiency-list,
   .signal-grid,

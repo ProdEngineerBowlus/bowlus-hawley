@@ -40,6 +40,7 @@ ASANA_PAT=<secret>
 AIRTABLE_PAT=<secret>
 AIRTABLE_BASE=<secret>
 HAWLEY_ASANA_PORTFOLIO_SCOPE=both
+HAWLEY_ASANA_EVENT_WATCH_IN_WEB=true
 HAWLEY_ASANA_EVENT_INTERVAL_MS=60000
 HAWLEY_ASANA_EVENT_BUILD_HB=true
 HAWLEY_ASANA_INCLUDE_SUBTASKS=true
@@ -143,6 +144,60 @@ The worker web service also verifies runtime read grants at startup when
 on Hawley/Postgres schemas to `bowlus_app` and `bowlus_readonly`; it does not run
 bootstrap imports and does not read or write Airtable or Asana.
 
+## Cloud Freshness
+
+For the first App Platform pilot, the web service starts the Asana event watcher
+inside the same container instead of adding a separate App Platform Worker
+component. This keeps the pilot on the existing web-service footprint while the
+app count is still one instance.
+
+The watcher runs:
+
+```powershell
+node ./apps/postgres-sync/src/pull-asana-events.js --loop --interval-ms 60000
+```
+
+It reads Asana event streams for the imported portfolio projects, refreshes
+changed task rows in Hawley/Postgres, and rebuilds HB when task changes are
+found. It does not write to Asana or Airtable.
+
+Startup rules:
+
+- `NODE_ENV=production` starts the watcher by default.
+- `HAWLEY_ASANA_EVENT_WATCH_IN_WEB=false` disables it.
+- `HAWLEY_ASANA_EVENT_WATCH_IN_WEB=true` enables it explicitly.
+- `ASANA_PAT` and `HAWLEY_SYNC_DATABASE_URL` or
+  `HAWLEY_MIGRATION_DATABASE_URL` must be present.
+
+Status endpoints:
+
+```text
+GET /api/health
+GET /api/sync-status
+```
+
+`/api/sync-status` returns the watcher pid/running state plus the latest
+`sync.run_log` entries for Airtable, Asana, Asana events, and Daily Assignment
+Tracker mirroring. The manager dashboard also shows these signals in the `HB
+freshness` panel.
+
+Later, after cost/ownership is confirmed, the same watcher can move to a
+separate App Platform Worker component with:
+
+```powershell
+npm run pg:watch:asana-events
+```
+
+A nightly legacy Airtable refresh can be added as an App Platform scheduled job
+running:
+
+```powershell
+npm run pg:refresh-legacy-airtable-bootstrap
+```
+
+Do not add the Worker component or scheduled job without explicit approval,
+because either can change the App Platform bill or resource layout.
+
 ## Health Checks
 
 Root page:
@@ -160,4 +215,5 @@ GET /api/health
 ```
 
 Expected after migration/load: `ok: true` plus row counts for the worker read
-model, Daily Assignment Tracker mirror, workforce mirror, and HB actuals.
+model, Daily Assignment Tracker mirror, workforce mirror, HB actuals, and the
+current Asana event watcher state.
