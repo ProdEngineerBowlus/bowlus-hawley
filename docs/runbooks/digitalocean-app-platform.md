@@ -138,6 +138,11 @@ set encrypted `HAWLEY_SYNC_DATABASE_URL` to the sync/migration database user.
 The web app will continue to use lower-privilege `DATABASE_URL`; the bootstrap
 scripts use `HAWLEY_SYNC_DATABASE_URL` when it is present.
 
+The worker web service also verifies runtime read grants at startup when
+`HAWLEY_SYNC_DATABASE_URL` is present. This startup step only grants read access
+on Hawley/Postgres schemas to `bowlus_app` and `bowlus_readonly`; it does not run
+bootstrap imports and does not read or write Airtable or Asana.
+
 ## Health Checks
 
 Root page:

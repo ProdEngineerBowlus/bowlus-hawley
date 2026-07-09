@@ -80,6 +80,29 @@ function publicErrorMessage(error) {
   };
 }
 
+async function applyRuntimeReadGrants() {
+  if (!process.env.HAWLEY_SYNC_DATABASE_URL && !process.env.HAWLEY_MIGRATION_DATABASE_URL) return;
+
+  const client = new pg.Client(getDatabaseConfig({ useSyncUrl: true }));
+  await client.connect();
+  try {
+    const grantStatements = [
+      "grant usage on schema raw, core, calc, reporting, sync, hb, ops to bowlus_app",
+      "grant select on all tables in schema raw, sync, hb, ops, calc, reporting to bowlus_app",
+      "grant select on all tables in schema hb, ops, calc, reporting to bowlus_readonly",
+      "alter default privileges in schema raw, sync, hb, ops, calc, reporting grant select on tables to bowlus_app",
+      "alter default privileges in schema hb, ops, calc, reporting grant select on tables to bowlus_readonly"
+    ];
+
+    for (const statement of grantStatements) {
+      await client.query(statement);
+    }
+    console.log("Hawley runtime read grants verified.");
+  } finally {
+    await client.end();
+  }
+}
+
 function todayIso() {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
@@ -1578,6 +1601,15 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`Hawley worker pilot listening on http://${HOST}:${PORT}`);
+async function startServer() {
+  await applyRuntimeReadGrants();
+  server.listen(PORT, HOST, () => {
+    console.log(`Hawley worker pilot listening on http://${HOST}:${PORT}`);
+  });
+}
+
+startServer().catch(error => {
+  console.error("Failed to start Hawley worker pilot.");
+  console.error(error.message);
+  process.exitCode = 1;
 });
