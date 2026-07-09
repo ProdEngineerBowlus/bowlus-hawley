@@ -18,6 +18,14 @@ export function sanitizeDatabaseUrlForPg(rawUrl) {
       }
     }
 
+    if (
+      url.searchParams.get("sslmode") === "require" &&
+      !url.searchParams.has("uselibpqcompat")
+    ) {
+      url.searchParams.set("uselibpqcompat", "true");
+      changed = true;
+    }
+
     return changed ? url.toString() : rawUrl;
   } catch {
     return rawUrl;

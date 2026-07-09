@@ -82,7 +82,9 @@ environment-variable row/value for the service or app. Also check for duplicate
 Hawley's shared Postgres config strips DigitalOcean's sample
 `/path/to/ca-certificate.crt` SSL file placeholder if it is left in the URL, but
 the preferred App Platform value should still omit `sslrootcert` and keep only
-`sslmode=require`.
+`sslmode=require`. The same config adds `uselibpqcompat=true` for
+`sslmode=require` URLs so Node's Postgres driver uses encrypted SSL without
+requiring a CA bundle file inside the App Platform container.
 
 After saving environment variable changes, redeploy the app and re-check:
 
