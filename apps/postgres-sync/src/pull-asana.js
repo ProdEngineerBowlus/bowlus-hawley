@@ -570,7 +570,7 @@ function selectedPortfolioKeys(args) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const asana = new AsanaClient(requiredEnv("ASANA_PAT"));
-  const client = new Client(getDatabaseConfig());
+  const client = new Client(getDatabaseConfig({ useSyncUrl: true }));
   await client.connect();
 
   const summary = {

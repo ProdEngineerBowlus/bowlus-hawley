@@ -55,7 +55,7 @@ function taskStatus(fields) {
 }
 
 async function main() {
-  const client = new Client(getDatabaseConfig());
+  const client = new Client(getDatabaseConfig({ useSyncUrl: true }));
   await client.connect();
 
   try {

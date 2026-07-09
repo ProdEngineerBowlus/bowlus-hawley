@@ -31,6 +31,7 @@ Required App Platform runtime variables:
 
 ```text
 DATABASE_URL=${<database-component-name>.DATABASE_URL}
+HAWLEY_SYNC_DATABASE_URL=<sync-or-admin database URL>
 NODE_ENV=production
 HAWLEY_DRY_RUN=true
 HAWLEY_ALLOW_SOURCE_WRITES=false
@@ -48,6 +49,15 @@ HAWLEY_ASANA_COMPLETED_SINCE=1970-01-01T00:00:00.000Z
 
 Do not commit real token values. Use the Shop Ops `.env` only as a local
 credential pointer.
+
+`DATABASE_URL` is the low-privilege runtime connection for the web app. Keep it
+on `bowlus_app`.
+
+`HAWLEY_SYNC_DATABASE_URL` is used only by the `apps/postgres-sync` scripts and
+should point at a database user that can create schemas/tables and write mirror
+data during bootstrap, such as the DigitalOcean admin user or a properly granted
+`bowlus_sync` user. Store it as an encrypted App Platform variable. Do not paste
+the value into chat or commit it.
 
 ## Database URL Binding
 
@@ -124,8 +134,9 @@ npm run pg:refresh-worker-read-model
 ```
 
 If the runtime `bowlus_app` user does not have enough privileges to migrate,
-use the sync/migration database user for the load step, then leave the web app
-on the lower-privilege runtime user.
+set encrypted `HAWLEY_SYNC_DATABASE_URL` to the sync/migration database user.
+The web app will continue to use lower-privilege `DATABASE_URL`; the bootstrap
+scripts use `HAWLEY_SYNC_DATABASE_URL` when it is present.
 
 ## Health Checks
 

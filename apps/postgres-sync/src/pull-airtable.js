@@ -236,7 +236,7 @@ async function finishRun(client, id, status, summary) {
 async function main() {
   const baseId = requiredEnv("AIRTABLE_BASE");
   const token = requiredEnv("AIRTABLE_PAT");
-  const client = new Client(getDatabaseConfig());
+  const client = new Client(getDatabaseConfig({ useSyncUrl: true }));
   await client.connect();
 
   const runId = await startRun(client);

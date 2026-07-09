@@ -440,7 +440,7 @@ async function pruneProjectRows(client, projectGid, currentTaskGids) {
 
 async function main() {
   const asana = new AsanaClient(requiredEnv("ASANA_PAT"));
-  const client = new Client(getDatabaseConfig());
+  const client = new Client(getDatabaseConfig({ useSyncUrl: true }));
   await client.connect();
 
   const summary = {

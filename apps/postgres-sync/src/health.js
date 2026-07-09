@@ -4,7 +4,7 @@ import { getDatabaseConfig } from "./config.js";
 const { Client } = pg;
 
 async function main() {
-  const client = new Client(getDatabaseConfig());
+  const client = new Client(getDatabaseConfig({ useSyncUrl: true }));
   await client.connect();
 
   const result = await client.query(`

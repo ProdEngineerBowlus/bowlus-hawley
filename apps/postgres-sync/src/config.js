@@ -32,10 +32,14 @@ export function sanitizeDatabaseUrlForPg(rawUrl) {
   }
 }
 
-export function getDatabaseConfig() {
-  if (process.env.DATABASE_URL) {
+export function getDatabaseConfig(options = {}) {
+  const databaseUrl = options.useSyncUrl
+    ? process.env.HAWLEY_SYNC_DATABASE_URL || process.env.HAWLEY_MIGRATION_DATABASE_URL || process.env.DATABASE_URL
+    : process.env.DATABASE_URL;
+
+  if (databaseUrl) {
     return {
-      connectionString: sanitizeDatabaseUrlForPg(process.env.DATABASE_URL)
+      connectionString: sanitizeDatabaseUrlForPg(databaseUrl)
     };
   }
 

@@ -36,7 +36,7 @@ const COUNT_QUERIES = Object.freeze([
 ]);
 
 async function main() {
-  const client = new Client(getDatabaseConfig());
+  const client = new Client(getDatabaseConfig({ useSyncUrl: true }));
   await client.connect();
 
   try {

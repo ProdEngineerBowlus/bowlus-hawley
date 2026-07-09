@@ -574,7 +574,7 @@ function runBuildHb() {
 
 async function pollOnce(args) {
   const asana = new AsanaClient(requiredEnv("ASANA_PAT"));
-  const client = new Client(getDatabaseConfig());
+  const client = new Client(getDatabaseConfig({ useSyncUrl: true }));
   await client.connect();
 
   const summary = {
@@ -603,7 +603,7 @@ async function pollOnce(args) {
       await client.end();
       await runBuildHb();
       summary.hbRebuilt = true;
-      const logClient = new Client(getDatabaseConfig());
+      const logClient = new Client(getDatabaseConfig({ useSyncUrl: true }));
       await logClient.connect();
       await finishRun(logClient, runId, "success", summary);
       await logClient.end();

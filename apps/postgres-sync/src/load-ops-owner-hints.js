@@ -103,7 +103,7 @@ async function main() {
   const rows = parseCsv(fs.readFileSync(csvPath, "utf8"))
     .filter(row => row.work_area_key && (row.owner_person_name || row.owner_person_email));
 
-  const client = new Client(getDatabaseConfig());
+  const client = new Client(getDatabaseConfig({ useSyncUrl: true }));
   await client.connect();
 
   try {
