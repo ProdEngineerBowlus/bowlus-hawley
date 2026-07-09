@@ -17,11 +17,13 @@ reported by `/api/auth-status`; `writeWorkerIds: ["*"]` means all assigned
 worker pages use server-backed live writes.
 
 Manager control mode uses the same live endpoint. From the manager dashboard,
-selecting a worker opens the manager detail view with Start, Stop, SOP, and
-Complete controls for that worker's assigned tasks. These controls write to
-Hawley first and only push to Asana on Complete. The legacy `Refresh tracker`
-and `Adopt new tasks` buttons remain disabled server-side because those belong
-to the old Daily Assignment Tracker/Airtable write path.
+selecting a worker opens the manager detail view with Start, Stop, End Session,
+SOP, and Complete controls for that worker's assigned tasks. These controls
+write to Hawley first and only push to Asana on Complete. End Session is
+manager-only: it clears a running/paused timer session, keeps the logged actual
+minutes on today's Hawley row, and leaves the task open. The legacy `Refresh
+tracker` and `Adopt new tasks` buttons remain disabled server-side because
+those belong to the old Daily Assignment Tracker/Airtable write path.
 
 Hawley still does not write to Airtable. The one-minute Airtable
 `Worker Daily Task Actuals` pull is a legacy/readable mirror input and does not
@@ -201,7 +203,11 @@ POST /api/refresh-daily-tracker
 POST /api/worker-task-action
 ```
 
-The `POST` endpoints intentionally return read-only pilot errors.
+`POST /api/worker-task-action` supports `start`, `stop`, `release`, and
+`complete` when live worker writes are enabled. `release` is the manager-only
+End Session path. `POST /api/refresh-daily-tracker` intentionally remains a
+read-only pilot error because tracker rebuild/adoption belongs to the old Daily
+Assignment Tracker/Airtable write path.
 
 `/api/sync-status` reports HB freshness from Postgres only: the in-process
 Asana event watcher state, the in-process Worker Daily Task Actuals watcher

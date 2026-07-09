@@ -374,6 +374,18 @@ button {
   color: var(--accent);
 }
 
+.chip.action-chip {
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.chip.action-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .main {
   min-width: 0;
   display: grid;

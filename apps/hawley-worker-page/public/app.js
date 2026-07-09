@@ -840,6 +840,9 @@
 
   function renderAttentionCard(signal) {
     const level = signal.level === "risk" ? "risk" : signal.label === "Paused" ? "paused" : "warn";
+    const releaseButton = managerControlEnabled() && signal.releaseTaskId
+      ? `<button class="btn ghost" type="button" data-action="release-timer" data-worker-id="${escapeAttr(signal.id)}" data-task-id="${escapeAttr(signal.releaseTaskId)}">End session</button>`
+      : "";
     return `
       <article class="attention-card ${escapeAttr(level)}">
         <div class="attention-card-main">
@@ -847,6 +850,7 @@
           <strong>${escapeHtml(signal.name)}</strong>
           <span>${escapeHtml(signal.detail)}</span>
         </div>
+        ${releaseButton}
         <button class="btn ghost" type="button" data-worker="${escapeAttr(signal.id)}">Details</button>
       </article>
     `;
@@ -1249,6 +1253,8 @@
     const loggedMinutes = timerElapsedMinutes(timer);
     const timerRunning = Boolean(timerStartedAt) && !task.completed;
     const timerHasTime = loggedMinutes > 0 && !task.completed;
+    const timerSessionOpen = timerHasTime && (Boolean(timerStartedAt) || Number(task.timerAccumulatedMinutes || 0) > 0);
+    const canEndSession = managerControlEnabled() && timerSessionOpen;
     const startLabel = timerHasTime ? "Resume timer" : "Start timer";
     const estimateChip = renderEstimateChip(task);
     const taskActualMinutes = Number(task.actualTimeOnDateMinutes ?? task.actualTimeMinutes ?? 0);
@@ -1266,6 +1272,7 @@
             ${!locked && task.ledgerBackfilled ? `<span class="chip yellow">Ledger</span>` : ""}
             ${!locked && taskActualMinutes ? `<span class="chip green">${formatMinutes(taskActualMinutes)} actual</span>` : ""}
             ${timerHasTime ? `<span class="chip green">${escapeHtml(formatTimerState(timer))}</span>` : ""}
+            ${canEndSession ? `<button class="chip action-chip" type="button" data-action="release-timer" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>End session</button>` : ""}
             ${task.phase ? `<span class="chip yellow">${escapeHtml(task.phase)}</span>` : ""}
             ${task.vin ? `<span class="chip">VIN ${escapeHtml(task.vin)}</span>` : ""}
             <span class="status-pill${task.completed ? " done" : ""}">${task.completed ? "Done" : "Open"}</span>
@@ -1382,6 +1389,16 @@
         const worker = getSelectedWorker();
         if (!worker) return;
         await completeWorkerTask(worker.id, button.dataset.taskId);
+      });
+    });
+
+    document.querySelectorAll("[data-action='release-timer']").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const worker = button.dataset.workerId
+          ? state.workers.find((item) => item.id === button.dataset.workerId)
+          : getSelectedWorker();
+        if (!worker) return;
+        await releaseWorkerTimer(worker.id, button.dataset.taskId);
       });
     });
   }
@@ -1654,6 +1671,38 @@
     }
   }
 
+  async function releaseWorkerTimer(employee, taskId) {
+    const task = findTaskById(taskId);
+    const name = task && task.title ? `"${task.title}"` : "this task";
+    if (!window.confirm(`End the timer session for ${name}? Logged time will stay on today's record, but the task will remain open.`)) {
+      return;
+    }
+
+    state.actionTaskId = taskId;
+    render();
+
+    try {
+      const response = await postJsonWithPin("/api/worker-task-action", {
+        employee,
+        taskId,
+        date: state.date,
+        action: "release",
+      });
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error || `Save failed with ${response.status}`);
+      }
+
+      showToast("Timer session ended");
+      await loadAssignments();
+    } catch (error) {
+      state.actionTaskId = "";
+      render();
+      showToast(error.message || "Could not end timer session");
+    }
+  }
+
   function updateSampleTask(taskId, timer) {
     for (const worker of state.workers) {
       const task = worker.tasks.find((item) => item.id === taskId);
@@ -1790,6 +1839,7 @@
             label: hasConflict ? "Timer conflict" : "Paused",
             level: hasConflict ? "risk" : "warn",
             score: hasConflict ? 5 : 1,
+            releaseTaskId: (pausedTask && pausedTask.id) || "",
             detail: hasConflict
               ? `Running ${runningTask.title || "a task"} while ${pausedTask.title || "another task"} is paused`
               : `${formatMinutes(actual)} ${actualTimeLabel().toLowerCase()}`,
@@ -1920,6 +1970,14 @@
     }
 
     return normalizeLocalTimer(state.timers[getTimerKey(taskId)]);
+  }
+
+  function findTaskById(taskId) {
+    for (const worker of state.workers) {
+      const task = (worker.tasks || []).find((item) => item.id === taskId);
+      if (task) return task;
+    }
+    return null;
   }
 
   function findActiveTimerTask(exceptTaskId) {

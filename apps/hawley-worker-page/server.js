@@ -2013,6 +2013,16 @@ function liveTimerElapsedMinutes(timer, now) {
   return accumulated + Math.max(1, Math.round((now.getTime() - startedAt.getTime()) / 60000));
 }
 
+function liveTimerBaseActualMinutes(timer) {
+  const actual = Number(timer?.actualMinutes || 0);
+  const accumulated = Number(timer?.accumulatedMinutes || 0);
+  return Math.max(0, actual - accumulated);
+}
+
+function liveTimerTotalActualMinutes(timer, now) {
+  return liveTimerBaseActualMinutes(timer) + liveTimerElapsedMinutes(timer, now);
+}
+
 async function assignedWorkerTaskForWrite(employee, date, taskId) {
   const assignmentUrl = new URL("http://hawley.local/api/daily-assignments");
   assignmentUrl.searchParams.set("date", date);
@@ -2267,8 +2277,8 @@ async function handleWorkerTaskAction(req) {
   const taskId = String(body.taskId || "").trim();
   const date = String(body.date || todayIso()).trim();
 
-  if (!["start", "stop", "complete"].includes(action)) {
-    throw actionError("Action must be start, stop, or complete.", 400);
+  if (!["start", "stop", "release", "complete"].includes(action)) {
+    throw actionError("Action must be start, stop, release, or complete.", 400);
   }
   if (!employee || !workerWritesAllowed(employee)) {
     throw actionError("Live worker writes are not enabled for this employee.", 403, {
@@ -2342,14 +2352,15 @@ async function handleWorkerTaskAction(req) {
     }
 
     const elapsedMinutes = liveTimerElapsedMinutes(current, now);
+    const actualMinutes = liveTimerTotalActualMinutes(current, now);
     if (action === "stop") {
       const saved = await upsertLiveWorkerActual(client, worker, task, date, {
         ...current,
         startedAt: "",
         accumulatedMinutes: elapsedMinutes,
-        actualMinutes: elapsedMinutes
+        actualMinutes
       }, {
-        actualMinutes: elapsedMinutes,
+        actualMinutes,
         timerMinutes: elapsedMinutes,
         asanaPostedMinutes: current.asanaPostedMinutes,
         sourceLabel: "Hawley timer stopped",
@@ -2367,7 +2378,41 @@ async function handleWorkerTaskAction(req) {
       };
     }
 
-    if (elapsedMinutes <= 0) {
+    if (action === "release") {
+      if (current.completionPending) {
+        throw actionError("This timer is already being completed and cannot be ended as an open session.", 409);
+      }
+      if (current.completed) {
+        throw actionError("This task is already completed in the Hawley timer ledger.", 409);
+      }
+
+      const saved = await upsertLiveWorkerActual(client, worker, task, date, {
+        ...current,
+        startedAt: "",
+        accumulatedMinutes: 0,
+        actualMinutes
+      }, {
+        actualMinutes,
+        timerMinutes: 0,
+        asanaPostedMinutes: current.asanaPostedMinutes,
+        sourceLabel: "Hawley timer session ended",
+        seenAt: nowIso
+      });
+
+      return {
+        ok: true,
+        action,
+        taskId,
+        startedAt: "",
+        accumulatedMinutes: 0,
+        elapsedMinutes,
+        actualMinutes: saved.actualMinutes || actualMinutes,
+        completed: false,
+        released: true
+      };
+    }
+
+    if (actualMinutes <= 0) {
       throw actionError("Start the timer before completing this task.", 409);
     }
     if (current.completed && current.timeEntryCreated) {
@@ -2390,9 +2435,9 @@ async function handleWorkerTaskAction(req) {
       ...current,
       startedAt: "",
       accumulatedMinutes: elapsedMinutes,
-      actualMinutes: elapsedMinutes
+      actualMinutes
     }, {
-      actualMinutes: elapsedMinutes,
+      actualMinutes,
       timerMinutes: elapsedMinutes,
       asanaPostedMinutes: current.asanaPostedMinutes,
       completionPending: true,
@@ -2401,18 +2446,20 @@ async function handleWorkerTaskAction(req) {
       seenAt: nowIso
     });
 
-    if (!current.timeEntryCreated) {
-      await createTimeTrackingEntry(token, task.id, elapsedMinutes, date);
+    const unpostedMinutes = Math.max(0, actualMinutes - Number(current.asanaPostedMinutes || 0));
+    const postedMinutes = Number(current.asanaPostedMinutes || 0) + unpostedMinutes;
+    if (unpostedMinutes > 0) {
+      await createTimeTrackingEntry(token, task.id, unpostedMinutes, date);
       await upsertLiveWorkerActual(client, worker, task, date, {
         ...current,
         startedAt: "",
         accumulatedMinutes: elapsedMinutes,
-        actualMinutes: elapsedMinutes,
-        asanaPostedMinutes: elapsedMinutes
+        actualMinutes,
+        asanaPostedMinutes: postedMinutes
       }, {
-        actualMinutes: elapsedMinutes,
+        actualMinutes,
         timerMinutes: elapsedMinutes,
-        asanaPostedMinutes: elapsedMinutes,
+        asanaPostedMinutes: postedMinutes,
         completionPending: true,
         timeEntryCreated: true,
         sourceLabel: "Hawley Asana time posted",
@@ -2426,12 +2473,12 @@ async function handleWorkerTaskAction(req) {
       ...current,
       startedAt: "",
       accumulatedMinutes: elapsedMinutes,
-      actualMinutes: elapsedMinutes,
-      asanaPostedMinutes: Math.max(elapsedMinutes, current.asanaPostedMinutes || 0)
+      actualMinutes,
+      asanaPostedMinutes: Math.max(postedMinutes, current.asanaPostedMinutes || 0)
     }, {
-      actualMinutes: elapsedMinutes,
+      actualMinutes,
       timerMinutes: elapsedMinutes,
-      asanaPostedMinutes: Math.max(elapsedMinutes, current.asanaPostedMinutes || 0),
+      asanaPostedMinutes: Math.max(postedMinutes, current.asanaPostedMinutes || 0),
       completed: true,
       completionPending: false,
       timeEntryCreated: true,
@@ -2443,7 +2490,7 @@ async function handleWorkerTaskAction(req) {
       ok: true,
       action,
       taskId,
-      elapsedMinutes: saved.actualMinutes || elapsedMinutes,
+      elapsedMinutes: saved.actualMinutes || actualMinutes,
       completed: true
     };
   } finally {
