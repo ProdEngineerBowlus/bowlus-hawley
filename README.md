@@ -1,6 +1,6 @@
 # H.A.W.L.E. ("Hawley")
 
-Historical Asana/Airtable Workflow Layer for Engineering.
+Historical Analytics & Workflow Logic Engine.
 
 Hawley is the local production engineering brain for Bowlus shop operations. It
 is named after Hawley Bowlus, the aircraft designer and original Bowlus inventor.
