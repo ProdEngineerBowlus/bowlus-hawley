@@ -1268,7 +1268,8 @@ function normalizeWorkerDailyActual(row) {
     dailyEfficiencyPercent: numberFromField(fields["Daily Efficiency Percent"]),
     completed: booleanFromField(fields["Completed?"]),
     dailySummary: booleanFromField(fields["Daily Summary?"]),
-    source: fields.Source || ""
+    source: fields.Source || "",
+    syncedAt: row.source_synced_at || ""
   };
 }
 
@@ -1313,6 +1314,7 @@ function applyWorkerDailyActualRows(workers, actualRows) {
       existingTask.timerAccumulatedMinutes = Math.max(Number(existingTask.timerAccumulatedMinutes || 0), row.timerMinutes);
       existingTask.ledgerBackfilled = true;
       existingTask.ledgerSource = row.source || "Worker Daily Task Actuals";
+      existingTask.ledgerSyncedAt = row.syncedAt || "";
       if (!existingTask.title && row.taskName) existingTask.title = row.taskName;
       if (!existingTask.vin && row.vin) existingTask.vin = row.vin;
       if (!existingTask.cycle && row.cycle) existingTask.cycle = row.cycle;
@@ -1342,7 +1344,8 @@ function applyWorkerDailyActualRows(workers, actualRows) {
       workedTimeRecovered: true,
       ledgerBackfilled: true,
       recoveredSource: row.source || "Worker Daily Task Actuals",
-      ledgerSource: row.source || "Worker Daily Task Actuals"
+      ledgerSource: row.source || "Worker Daily Task Actuals",
+      ledgerSyncedAt: row.syncedAt || ""
     });
   }
 
@@ -1676,6 +1679,7 @@ async function workerDailyActualRows(date) {
     `
       select
         worker_daily_actual_id::text as record_id,
+        source_synced_at::text,
         jsonb_build_object(
           'Work Date', work_date::text,
           'Worker Key', worker_key,
