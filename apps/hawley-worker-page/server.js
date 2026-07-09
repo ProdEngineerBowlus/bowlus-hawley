@@ -11,8 +11,8 @@ const __filename = fileURLToPath(import.meta.url);
 const appDir = path.dirname(__filename);
 const staticDir = path.join(appDir, "public");
 
-const HOST = process.env.HAWLEY_WORKER_HOST || "127.0.0.1";
-const PORT = Number(process.env.HAWLEY_WORKER_PORT || 5273);
+const HOST = process.env.HAWLEY_WORKER_HOST || (process.env.PORT ? "0.0.0.0" : "127.0.0.1");
+const PORT = Number(process.env.PORT || process.env.HAWLEY_WORKER_PORT || 5273);
 const DAILY_TRACKER_PROJECT_ID = process.env.HAWLEY_DAILY_TRACKER_PROJECT_GID || "1214157321063250";
 const USE_DAT_SNAPSHOTS = process.env.HAWLEY_WORKER_USE_DAT_SNAPSHOTS === "true";
 const INCLUDE_NO_WORK_WORKERS = process.env.HAWLEY_WORKER_INCLUDE_NO_WORK === "true";
