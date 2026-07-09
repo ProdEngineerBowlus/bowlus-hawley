@@ -161,11 +161,31 @@ It reads Asana event streams for the imported portfolio projects, refreshes
 changed task rows in Hawley/Postgres, and rebuilds HB when task changes are
 found. It does not write to Asana or Airtable.
 
+The web service also starts the fast Worker Daily Task Actuals watcher in
+production. It is read-only against Airtable and keeps Hawley's logged-time
+overlay fresher without running the full Airtable bootstrap mirror every minute.
+
+That watcher runs:
+
+```powershell
+node ./apps/postgres-sync/src/pull-worker-daily-actuals.js --loop --interval-ms 60000
+```
+
+It pulls only Airtable `Worker Daily Task Actuals` rows in a recent Work Date
+window into `raw.airtable_worker_daily_actuals` and
+`hb.worker_daily_task_actuals`. This is the bridge path while the current shop
+worker app still writes timer actuals to Airtable first.
+
 Startup rules:
 
 - `NODE_ENV=production` starts the watcher by default.
 - `HAWLEY_ASANA_EVENT_WATCH_IN_WEB=false` disables it.
 - `HAWLEY_ASANA_EVENT_WATCH_IN_WEB=true` enables it explicitly.
+- `HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB=false` disables the Worker Daily Task
+  Actuals watcher.
+- `HAWLEY_WORKER_ACTUALS_INTERVAL_MS=60000` sets its one-minute cadence.
+- `HAWLEY_WORKER_ACTUALS_WINDOW_DAYS=14` limits the past Work Date window.
+- `HAWLEY_WORKER_ACTUALS_FUTURE_DAYS=2` keeps near-future rows in the mirror.
 - `ASANA_PAT` and `HAWLEY_SYNC_DATABASE_URL` or
   `HAWLEY_MIGRATION_DATABASE_URL` must be present.
 
@@ -176,10 +196,10 @@ GET /api/health
 GET /api/sync-status
 ```
 
-`/api/sync-status` returns the watcher pid/running state plus the latest
-`sync.run_log` entries for Airtable, Asana, Asana events, and Daily Assignment
-Tracker mirroring. The manager dashboard also shows these signals in the `HB
-freshness` panel.
+`/api/sync-status` returns watcher pid/running states plus the latest
+`sync.run_log` entries for Airtable, Worker Daily Task Actuals, Asana, Asana
+events, and Daily Assignment Tracker mirroring. The manager dashboard also shows
+these signals in the `HB freshness` panel.
 
 Later, after cost/ownership is confirmed, the same watcher can move to a
 separate App Platform Worker component with:
@@ -216,4 +236,4 @@ GET /api/health
 
 Expected after migration/load: `ok: true` plus row counts for the worker read
 model, Daily Assignment Tracker mirror, workforce mirror, HB actuals, and the
-current Asana event watcher state.
+current Asana event and Worker Daily Task Actuals watcher states.

@@ -105,6 +105,23 @@ npm run pg:pull:airtable
 npm run pg:normalize
 ```
 
+Refresh only the fast worker logged-time ledger:
+
+```powershell
+npm run pg:pull:worker-actuals
+```
+
+This pulls Airtable `Worker Daily Task Actuals` into:
+
+```sql
+raw.airtable_worker_daily_actuals
+hb.worker_daily_task_actuals
+```
+
+By default it refreshes a recent Work Date window, not the full Airtable mirror.
+It is read-only against Airtable and does not write to Airtable, Asana, or the
+current shop worker app.
+
 Refresh Asana completion/permalink context and DAT snapshots:
 
 ```powershell
@@ -166,9 +183,10 @@ POST /api/worker-task-action
 The `POST` endpoints intentionally return read-only pilot errors.
 
 `/api/sync-status` reports HB freshness from Postgres only: the in-process
-Asana event watcher state and latest `sync.run_log` rows. It is the fastest way
-to confirm that the worker page is reading a fresh Hawley Brain instead of
-silently leaning on Airtable or live Asana.
+Asana event watcher state, the in-process Worker Daily Task Actuals watcher
+state, and latest `sync.run_log` rows. It is the fastest way to confirm that the
+worker page is reading a fresh Hawley Brain instead of silently leaning on
+Airtable or live Asana.
 
 ## Configuration
 
@@ -177,6 +195,10 @@ HAWLEY_WORKER_HOST=127.0.0.1
 HAWLEY_WORKER_PORT=5273
 HAWLEY_DAILY_TRACKER_PROJECT_GID=1214157321063250
 HAWLEY_WORKER_INCLUDE_NO_WORK=false
+HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB=false
+HAWLEY_WORKER_ACTUALS_INTERVAL_MS=60000
+HAWLEY_WORKER_ACTUALS_WINDOW_DAYS=14
+HAWLEY_WORKER_ACTUALS_FUTURE_DAYS=2
 ```
 
 The app uses the same Postgres environment variables as the Hawley sync scripts:

@@ -20,6 +20,8 @@ const USE_DAT_SNAPSHOTS = process.env.HAWLEY_WORKER_USE_DAT_SNAPSHOTS === "true"
 const INCLUDE_NO_WORK_WORKERS = process.env.HAWLEY_WORKER_INCLUDE_NO_WORK === "true";
 const ASANA_EVENT_WATCH_INTERVAL_MS = Number(process.env.HAWLEY_ASANA_EVENT_INTERVAL_MS || 60000);
 const ASANA_EVENT_WATCH_RESTART_MS = Number(process.env.HAWLEY_ASANA_EVENT_WATCH_RESTART_MS || 30000);
+const WORKER_ACTUALS_WATCH_INTERVAL_MS = Number(process.env.HAWLEY_WORKER_ACTUALS_INTERVAL_MS || 60000);
+const WORKER_ACTUALS_WATCH_RESTART_MS = Number(process.env.HAWLEY_WORKER_ACTUALS_WATCH_RESTART_MS || 30000);
 
 const pool = new Pool(getDatabaseConfig());
 
@@ -40,6 +42,24 @@ const asanaEventWatcherState = {
 let asanaEventWatcherProcess = null;
 let asanaEventWatcherRestartTimer = null;
 let asanaEventWatcherStopping = false;
+
+const workerActualsWatcherState = {
+  enabled: false,
+  requested: false,
+  running: false,
+  pid: null,
+  startedAt: "",
+  lastOutputAt: "",
+  lastExit: null,
+  lastError: "",
+  intervalMs: WORKER_ACTUALS_WATCH_INTERVAL_MS,
+  restartMs: WORKER_ACTUALS_WATCH_RESTART_MS,
+  mode: "web-service-sidecar",
+  reason: ""
+};
+let workerActualsWatcherProcess = null;
+let workerActualsWatcherRestartTimer = null;
+let workerActualsWatcherStopping = false;
 
 const CONTENT_TYPES = Object.freeze({
   ".html": "text/html; charset=utf-8",
@@ -115,12 +135,30 @@ function shouldStartAsanaEventWatcher() {
   return process.env.NODE_ENV === "production";
 }
 
+function shouldStartWorkerActualsWatcher() {
+  if (process.env.HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB !== undefined) {
+    return booleanEnv("HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB", false);
+  }
+  return process.env.NODE_ENV === "production";
+}
+
 function syncDatabaseConfigured() {
   return Boolean(process.env.HAWLEY_SYNC_DATABASE_URL || process.env.HAWLEY_MIGRATION_DATABASE_URL);
 }
 
 function asanaEventWatcherStatus() {
   return { ...asanaEventWatcherState };
+}
+
+function workerActualsWatcherStatus() {
+  return { ...workerActualsWatcherState };
+}
+
+function watcherStatuses() {
+  return {
+    asanaEvents: asanaEventWatcherStatus(),
+    workerDailyActuals: workerActualsWatcherStatus()
+  };
 }
 
 function logWatcherStream(streamName, chunk) {
@@ -134,6 +172,21 @@ function logWatcherStream(streamName, chunk) {
       console.error(`[hawley-asana-events] ${line}`);
     } else {
       console.log(`[hawley-asana-events] ${line}`);
+    }
+  }
+}
+
+function logWorkerActualsWatcherStream(streamName, chunk) {
+  const lines = String(chunk)
+    .split(/\r?\n/)
+    .filter(Boolean);
+  for (const line of lines) {
+    workerActualsWatcherState.lastOutputAt = new Date().toISOString();
+    if (streamName === "stderr") {
+      workerActualsWatcherState.lastError = line.slice(0, 1000);
+      console.error(`[hawley-worker-actuals] ${line}`);
+    } else {
+      console.log(`[hawley-worker-actuals] ${line}`);
     }
   }
 }
@@ -239,6 +292,110 @@ function stopAsanaEventWatcher(signal = "SIGTERM") {
   }
   if (asanaEventWatcherProcess && !asanaEventWatcherProcess.killed) {
     asanaEventWatcherProcess.kill(signal);
+  }
+}
+
+function startWorkerActualsWatcher() {
+  workerActualsWatcherState.requested = shouldStartWorkerActualsWatcher();
+  workerActualsWatcherState.enabled = false;
+  workerActualsWatcherState.reason = "";
+
+  if (!workerActualsWatcherState.requested) {
+    workerActualsWatcherState.reason = "disabled";
+    return;
+  }
+
+  if (!process.env.AIRTABLE_PAT || !process.env.AIRTABLE_BASE) {
+    workerActualsWatcherState.reason = "missing AIRTABLE_PAT or AIRTABLE_BASE";
+    console.warn("Hawley Worker Daily Task Actuals watcher disabled: missing Airtable configuration.");
+    return;
+  }
+
+  if (!syncDatabaseConfigured()) {
+    workerActualsWatcherState.reason = "missing HAWLEY_SYNC_DATABASE_URL or HAWLEY_MIGRATION_DATABASE_URL";
+    console.warn("Hawley Worker Daily Task Actuals watcher disabled: missing sync database URL.");
+    return;
+  }
+
+  if (!Number.isFinite(WORKER_ACTUALS_WATCH_INTERVAL_MS) || WORKER_ACTUALS_WATCH_INTERVAL_MS < 15000) {
+    workerActualsWatcherState.reason = "invalid HAWLEY_WORKER_ACTUALS_INTERVAL_MS";
+    console.warn("Hawley Worker Daily Task Actuals watcher disabled: interval must be at least 15000 ms.");
+    return;
+  }
+
+  workerActualsWatcherState.enabled = true;
+  workerActualsWatcherState.reason = "running";
+  spawnWorkerActualsWatcher();
+}
+
+function spawnWorkerActualsWatcher() {
+  if (workerActualsWatcherStopping || workerActualsWatcherProcess) return;
+
+  const args = [
+    "./apps/postgres-sync/src/pull-worker-daily-actuals.js",
+    "--loop",
+    "--interval-ms",
+    String(WORKER_ACTUALS_WATCH_INTERVAL_MS)
+  ];
+
+  const child = spawn(process.execPath, args, {
+    cwd: repoRoot,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true
+  });
+
+  workerActualsWatcherProcess = child;
+  workerActualsWatcherState.running = true;
+  workerActualsWatcherState.pid = child.pid || null;
+  workerActualsWatcherState.startedAt = new Date().toISOString();
+  workerActualsWatcherState.lastExit = null;
+  workerActualsWatcherState.lastError = "";
+  workerActualsWatcherState.reason = "running";
+
+  child.stdout.on("data", chunk => logWorkerActualsWatcherStream("stdout", chunk));
+  child.stderr.on("data", chunk => logWorkerActualsWatcherStream("stderr", chunk));
+  child.on("error", error => {
+    workerActualsWatcherState.lastError = error.message;
+    workerActualsWatcherState.reason = "spawn failed";
+    console.error(`Hawley Worker Daily Task Actuals watcher failed to start: ${error.message}`);
+  });
+  child.on("exit", (code, signal) => {
+    workerActualsWatcherProcess = null;
+    workerActualsWatcherState.running = false;
+    workerActualsWatcherState.pid = null;
+    workerActualsWatcherState.lastExit = {
+      code,
+      signal,
+      at: new Date().toISOString()
+    };
+
+    if (workerActualsWatcherStopping || !workerActualsWatcherState.enabled) {
+      workerActualsWatcherState.reason = "stopped";
+      return;
+    }
+
+    workerActualsWatcherState.reason = "restarting";
+    const restartMs = Number.isFinite(WORKER_ACTUALS_WATCH_RESTART_MS) && WORKER_ACTUALS_WATCH_RESTART_MS >= 0
+      ? WORKER_ACTUALS_WATCH_RESTART_MS
+      : 30000;
+    console.warn(`Hawley Worker Daily Task Actuals watcher exited; restarting in ${restartMs} ms.`);
+    workerActualsWatcherRestartTimer = setTimeout(() => {
+      workerActualsWatcherRestartTimer = null;
+      spawnWorkerActualsWatcher();
+    }, restartMs);
+    workerActualsWatcherRestartTimer.unref?.();
+  });
+}
+
+function stopWorkerActualsWatcher(signal = "SIGTERM") {
+  workerActualsWatcherStopping = true;
+  if (workerActualsWatcherRestartTimer) {
+    clearTimeout(workerActualsWatcherRestartTimer);
+    workerActualsWatcherRestartTimer = null;
+  }
+  if (workerActualsWatcherProcess && !workerActualsWatcherProcess.killed) {
+    workerActualsWatcherProcess.kill(signal);
   }
 }
 
@@ -1359,7 +1516,7 @@ async function latestImportRuns() {
       records_written,
       error_count
     from sync.run_log
-    where job_name in ('pull_airtable', 'pull_asana', 'pull_asana_events', 'pull_daily_tracker')
+    where job_name in ('pull_airtable', 'pull_worker_daily_actuals', 'pull_asana', 'pull_asana_events', 'pull_daily_tracker')
     order by job_name, id desc
   `);
 
@@ -1651,7 +1808,8 @@ async function healthPayload() {
     database: db.rows[0],
     counts: counts.rows[0],
     latestRuns,
-    watcher: asanaEventWatcherStatus()
+    watcher: asanaEventWatcherStatus(),
+    watchers: watcherStatuses()
   };
 }
 
@@ -1661,6 +1819,7 @@ async function syncStatusPayload() {
     app: "hawley-worker-page",
     mode: "hawley-brain",
     watcher: asanaEventWatcherStatus(),
+    watchers: watcherStatuses(),
     latestRuns: await latestImportRuns(),
     refreshedAt: new Date().toISOString()
   };
@@ -1783,6 +1942,7 @@ const server = http.createServer(async (req, res) => {
 async function startServer() {
   await applyRuntimeReadGrants();
   startAsanaEventWatcher();
+  startWorkerActualsWatcher();
   server.listen(PORT, HOST, () => {
     console.log(`Hawley worker pilot listening on http://${HOST}:${PORT}`);
   });
@@ -1790,6 +1950,7 @@ async function startServer() {
 
 function shutdown(signal) {
   stopAsanaEventWatcher(signal);
+  stopWorkerActualsWatcher(signal);
   server.close(() => {
     pool.end()
       .catch(() => {})

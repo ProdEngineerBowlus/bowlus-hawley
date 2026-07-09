@@ -8,6 +8,7 @@
     "pg:health": "node ./apps/postgres-sync/src/health.js",
     "pg:migrate": "node ./apps/postgres-sync/src/migrate.js",
     "pg:pull:airtable": "node ./apps/postgres-sync/src/pull-airtable.js",
+    "pg:pull:worker-actuals": "node ./apps/postgres-sync/src/pull-worker-daily-actuals.js",
     "pg:pull:asana": "node ./apps/postgres-sync/src/pull-asana.js",
     "pg:pull:asana-events": "node ./apps/postgres-sync/src/pull-asana-events.js",
     "pg:watch:asana-events": "node ./apps/postgres-sync/src/pull-asana-events.js --loop --interval-ms 60000",

@@ -689,13 +689,20 @@
   function renderFreshnessPanel() {
     const syncStatus = state.syncStatus || {};
     const watcher = syncStatus.watcher || {};
+    const workerActualsWatcher = syncStatus.watchers?.workerDailyActuals || {};
     const latestRuns = syncStatus.latestRuns || state.latestRuns || {};
     const running = Boolean(watcher.running);
     const intervalMs = Number(watcher.intervalMs || 60000);
+    const workerActualsRunning = Boolean(workerActualsWatcher.running);
+    const workerActualsIntervalMs = Number(workerActualsWatcher.intervalMs || 60000);
     const watcherTone = running ? "good" : watcher.requested || watcher.enabled ? "warn" : "risk";
+    const workerActualsTone = workerActualsRunning ? "good" : workerActualsWatcher.requested || workerActualsWatcher.enabled ? "warn" : "risk";
     const watcherDetail = running
       ? `Every ${formatMinutes(Math.round(intervalMs / 60000))}`
       : watcher.reason || "Not running";
+    const workerActualsDetail = workerActualsRunning
+      ? `Every ${formatMinutes(Math.round(workerActualsIntervalMs / 60000))}`
+      : workerActualsWatcher.reason || "Not running";
     const refreshedAt = syncStatus.refreshedAt || state.refreshedAt;
 
     return `
@@ -709,7 +716,9 @@
         </div>
         <div class="panel-body freshness-grid">
           ${renderFreshnessMetric("Asana watcher", running ? "Running" : "Off", watcherDetail, watcherTone)}
+          ${renderFreshnessMetric("Worker actuals", workerActualsRunning ? "Running" : "Off", workerActualsDetail, workerActualsTone)}
           ${renderRunFreshness("Asana events", latestRuns.pull_asana_events, 5)}
+          ${renderRunFreshness("Worker actuals", latestRuns.pull_worker_daily_actuals, 5)}
           ${renderRunFreshness("Full Asana", latestRuns.pull_asana, 180)}
           ${renderRunFreshness("DAT mirror", latestRuns.pull_daily_tracker, 60)}
           ${renderRunFreshness("Legacy Airtable", latestRuns.pull_airtable, 1440)}
