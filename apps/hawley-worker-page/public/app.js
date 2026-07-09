@@ -307,6 +307,7 @@
 
     try {
       const params = new URLSearchParams({ date: state.date, _: String(Date.now()) });
+      params.set("includeNoWork", "true");
       if (queryEmployee) params.set("employee", queryEmployee);
       const response = await fetch(`/api/daily-assignments?${params.toString()}`);
       if (!response.ok) throw new Error(`Asana API returned ${response.status}`);
