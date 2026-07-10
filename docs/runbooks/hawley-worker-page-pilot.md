@@ -207,6 +207,13 @@ that will come from Hawley's richer utilization ledger. Task rows are one layer
 deeper: use the phase rail to see all phase tasks, or select a worker to see
 that worker's tasks for the phase/day.
 
+Task drill-ins separate same-day time from task history. `Actual today` is the
+selected work date only. `Worker total` sums Hawley's
+`hb.worker_daily_task_actuals` rows for that worker/task across recorded dates.
+`Team total` sums all recorded workers on the same Asana task across recorded
+dates. The full task estimate is shown as `Task estimate`; it should not be
+treated as a same-day efficiency denominator for multi-day or team tasks.
+
 Worker pages use the familiar pattern:
 
 ```text

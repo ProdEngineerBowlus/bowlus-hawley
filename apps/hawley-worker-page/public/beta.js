@@ -172,6 +172,25 @@
     return Number(task.assignedHours || task.estimatedHours || 0);
   }
 
+  function taskWorkerHistoryMinutes(task) {
+    return Number(task.actualTimeAllDatesMinutes || task.actualHistory?.totalMinutes || 0);
+  }
+
+  function taskTeamHistoryMinutes(task) {
+    return Number(task.teamActualTimeAllDatesMinutes || task.teamActualHistory?.totalMinutes || 0);
+  }
+
+  function historyRange(task, scope = "worker") {
+    const history = scope === "team" ? task.teamActualHistory : task.actualHistory;
+    const coverage = scope === "team" ? task.teamActualHistoryCoverage : task.actualHistoryCoverage;
+    if (coverage) return coverage;
+    const dates = Array.isArray(history?.dates) ? history.dates : [];
+    if (!dates.length) return "";
+    const first = dates[0]?.date || "";
+    const last = dates[dates.length - 1]?.date || "";
+    return first && last && first !== last ? `${first} to ${last}` : first;
+  }
+
   function workers() {
     return Array.isArray(state.assignments?.workers) ? state.assignments.workers : [];
   }
@@ -288,12 +307,18 @@
         rows.push({
           workerName: worker.name || worker.email || "Unknown worker",
           taskName: task.name || task.taskName || task.title || "Untitled task",
-          sourceTaskGid: task.sourceTaskGid || task.gid || task.taskGid || "",
+          sourceTaskGid: task.sourceTaskGid || task.gid || task.taskGid || task.asanaTaskGid || task.id || "",
           vin: task.vin || task.vinNumber || task.trailerVin || "",
           assignedHours,
           actualMinutes,
           completed: Boolean(task.completed),
-          efficiencyPercent: actualMinutes ? Math.round((assignedHours * 60 / actualMinutes) * 100) : null,
+          workerHistoryMinutes: taskWorkerHistoryMinutes(task),
+          teamHistoryMinutes: taskTeamHistoryMinutes(task),
+          workerHistoryDateCount: Number(task.actualHistoryDateCount || task.actualHistory?.dateCount || 0),
+          teamHistoryDateCount: Number(task.teamActualHistoryDateCount || task.teamActualHistory?.dateCount || 0),
+          teamWorkerCount: Number(task.teamActualWorkerCount || task.teamActualHistory?.workerCount || 0),
+          workerHistoryRange: historyRange(task, "worker"),
+          teamHistoryRange: historyRange(task, "team"),
           updatedAt: task.modifiedAt || task.updatedAt || task.completedAt || "",
         });
       }
@@ -307,15 +332,23 @@
     const completedTaskCount = rows.filter((row) => row.completed).length;
     const assignedHours = rows.reduce((sum, row) => sum + row.assignedHours, 0);
     const actualMinutes = rows.reduce((sum, row) => sum + row.actualMinutes, 0);
+    const workerHistoryMinutes = rows.reduce((sum, row) => sum + row.workerHistoryMinutes, 0);
+    const teamHistoryByTask = new Map();
+    for (const row of rows) {
+      if (!row.sourceTaskGid) continue;
+      teamHistoryByTask.set(row.sourceTaskGid, Math.max(teamHistoryByTask.get(row.sourceTaskGid) || 0, row.teamHistoryMinutes));
+    }
+    const teamHistoryMinutes = Array.from(teamHistoryByTask.values()).reduce((sum, minutes) => sum + minutes, 0);
     return {
       taskCount: rows.length,
       completedTaskCount,
       openTaskCount: rows.length - completedTaskCount,
       assignedHours,
       actualMinutes,
+      workerHistoryMinutes,
+      teamHistoryMinutes,
       workerCount: workerNames.size,
       completionPercent: rows.length ? Math.round((completedTaskCount / rows.length) * 100) : 0,
-      efficiencyPercent: actualMinutes ? Math.round((assignedHours * 60 / actualMinutes) * 100) : null,
     };
   }
 
@@ -421,11 +454,18 @@
       <div class="task-row">
         <div class="row-main">
           <strong>${escapeHtml(row.taskName)}</strong>
-          <small>${escapeHtml([row.workerName, row.vin ? `VIN ${row.vin}` : "", row.sourceTaskGid].filter(Boolean).join(" - "))}</small>
+          <small>${escapeHtml([
+            row.workerName,
+            row.vin ? `VIN ${row.vin}` : "",
+            row.workerHistoryRange ? `worker history ${row.workerHistoryRange}` : "",
+            row.teamWorkerCount > 1 ? `${formatNumber(row.teamWorkerCount)} workers on task` : "",
+            row.sourceTaskGid
+          ].filter(Boolean).join(" - "))}</small>
         </div>
-        <div class="row-stat"><span>Actual</span><strong>${formatMinutes(row.actualMinutes)}</strong></div>
-        <div class="row-stat"><span>Assigned</span><strong>${formatHours(row.assignedHours)}</strong></div>
-        <div class="row-stat"><span>Efficiency</span><strong>${formatPercent(row.efficiencyPercent)}</strong></div>
+        <div class="row-stat"><span>Actual today</span><strong>${formatMinutes(row.actualMinutes)}</strong></div>
+        <div class="row-stat"><span>Worker total</span><strong>${formatMinutes(row.workerHistoryMinutes)}</strong></div>
+        <div class="row-stat"><span>Team total</span><strong>${formatMinutes(row.teamHistoryMinutes)}</strong></div>
+        <div class="row-stat"><span>Task estimate</span><strong>${formatHours(row.assignedHours)}</strong></div>
         <div class="row-stat"><span>Status</span><strong>${row.completed ? "Complete" : "Open"}</strong></div>
       </div>
     `).join("");
@@ -444,8 +484,8 @@
         ${metric("Open without actual", formatNumber(staleRows), "review candidates")}
       </div>
       <div class="debug-box transition-note">
-        <strong>Transition ledger status</strong>
-        <p>The beta page can read phase, task, worker, assigned, actual, and completion rows today. The richer transition stream from the new Hawley ledger will plug into this panel next, so we can show phase handoffs, task switching, review-required events, and end-session gaps without changing the live app.</p>
+        <strong>Actual-time composition</strong>
+        <p>Actual today is only the selected work date. Worker total and team total come from Hawley's worker actual ledger across all recorded dates for the same Asana task. If the work happened before the ledger existed, history will be incomplete and the row should stay in review.</p>
       </div>
     `;
   }
@@ -528,12 +568,12 @@
   function renderTaskScopeMetricStrip(summary) {
     return `
       <section class="status-strip phase-metrics">
-        ${metric("Actual", formatMinutes(summary.actualMinutes), "worker actual ledger")}
-        ${metric("Assigned", formatHours(summary.assignedHours), "task estimate")}
+        ${metric("Actual today", formatMinutes(summary.actualMinutes), "selected work date")}
+        ${metric("Worker history", formatMinutes(summary.workerHistoryMinutes), "all recorded dates")}
+        ${metric("Team history", formatMinutes(summary.teamHistoryMinutes), "all workers, all dates")}
+        ${metric("Task estimate", formatHours(summary.assignedHours), "full task estimate")}
         ${metric("Tasks", `${formatNumber(summary.completedTaskCount)}/${formatNumber(summary.taskCount)}`, `${formatNumber(summary.openTaskCount)} open`)}
         ${metric("Completion", formatPercent(summary.completionPercent), "task row completion")}
-        ${metric("Efficiency", formatPercent(summary.efficiencyPercent), "assigned hours / actual today")}
-        ${metric("Workers", formatNumber(summary.workerCount), "scope")}
       </section>
     `;
   }

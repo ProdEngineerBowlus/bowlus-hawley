@@ -314,7 +314,7 @@ a {
 }
 
 .task-row {
-  grid-template-columns: minmax(240px, 1.7fr) repeat(4, minmax(86px, 0.65fr));
+  grid-template-columns: minmax(260px, 1.55fr) repeat(5, minmax(92px, 0.65fr));
 }
 
 .row-main strong {

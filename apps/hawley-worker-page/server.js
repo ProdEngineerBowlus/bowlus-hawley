@@ -2139,6 +2139,120 @@ async function workerDailyActualRows(date) {
   return result.rows.map(normalizeWorkerDailyActual);
 }
 
+function actualLoggedMinutesFromRaw(row) {
+  return Math.max(
+    Number(row.actual_minutes || 0),
+    Number(row.timer_minutes || 0),
+    Number(row.asana_posted_minutes || 0)
+  );
+}
+
+function summarizeTaskActualHistory(rows) {
+  const byDate = new Map();
+  const workerIds = new Set();
+  let totalMinutes = 0;
+
+  for (const row of rows || []) {
+    const loggedMinutes = actualLoggedMinutesFromRaw(row);
+    if (loggedMinutes <= 0) continue;
+    const date = row.work_date || "";
+    const workerId = row.worker_key || slugifyWorker({
+      workerEmail: row.worker_email,
+      workerName: row.worker_name
+    });
+    if (workerId) workerIds.add(workerId);
+    totalMinutes += loggedMinutes;
+    byDate.set(date, (byDate.get(date) || 0) + loggedMinutes);
+  }
+
+  const dates = Array.from(byDate.entries())
+    .map(([date, minutes]) => ({ date, minutes }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  return {
+    totalMinutes,
+    totalHours: round(totalMinutes / 60),
+    dateCount: dates.length,
+    workerCount: workerIds.size,
+    firstDate: dates[0]?.date || "",
+    lastDate: dates[dates.length - 1]?.date || "",
+    dates
+  };
+}
+
+async function attachWorkerTaskActualHistory(workers) {
+  const taskIds = Array.from(new Set(
+    (workers || [])
+      .flatMap(worker => (worker.tasks || []).map(task => String(task.id || task.asanaTaskGid || "")))
+      .filter(id => /^\d+$/.test(id))
+  ));
+  if (!taskIds.length) return;
+
+  const result = await pool.query(
+    `
+      select
+        worker_key,
+        worker_name,
+        worker_email,
+        asana_task_gid,
+        task_name,
+        work_date::text,
+        actual_minutes,
+        timer_minutes,
+        asana_posted_minutes,
+        completed,
+        source_label,
+        source_synced_at::text
+      from hb.worker_daily_task_actuals
+      where asana_task_gid = any($1::text[])
+        and not daily_summary
+      order by
+        asana_task_gid,
+        work_date,
+        worker_name nulls last
+    `,
+    [taskIds]
+  );
+
+  const byTask = new Map();
+  const byTaskWorker = new Map();
+  for (const row of result.rows) {
+    const taskId = String(row.asana_task_gid || "");
+    if (!taskId) continue;
+    const workerId = row.worker_key || slugifyWorker({
+      workerEmail: row.worker_email,
+      workerName: row.worker_name
+    });
+    if (!byTask.has(taskId)) byTask.set(taskId, []);
+    byTask.get(taskId).push(row);
+    const taskWorkerKey = `${taskId}::${workerId}`;
+    if (!byTaskWorker.has(taskWorkerKey)) byTaskWorker.set(taskWorkerKey, []);
+    byTaskWorker.get(taskWorkerKey).push(row);
+  }
+
+  for (const worker of workers || []) {
+    for (const task of worker.tasks || []) {
+      const taskId = String(task.id || task.asanaTaskGid || "");
+      if (!taskId) continue;
+      const workerHistory = summarizeTaskActualHistory(byTaskWorker.get(`${taskId}::${worker.id}`) || []);
+      const teamHistory = summarizeTaskActualHistory(byTask.get(taskId) || []);
+      task.actualHistory = workerHistory;
+      task.teamActualHistory = teamHistory;
+      task.actualTimeAllDatesMinutes = workerHistory.totalMinutes;
+      task.teamActualTimeAllDatesMinutes = teamHistory.totalMinutes;
+      task.actualHistoryDateCount = workerHistory.dateCount;
+      task.teamActualHistoryDateCount = teamHistory.dateCount;
+      task.teamActualWorkerCount = teamHistory.workerCount;
+      task.actualHistoryCoverage = workerHistory.dateCount
+        ? `${workerHistory.firstDate}${workerHistory.lastDate && workerHistory.lastDate !== workerHistory.firstDate ? ` to ${workerHistory.lastDate}` : ""}`
+        : "";
+      task.teamActualHistoryCoverage = teamHistory.dateCount
+        ? `${teamHistory.firstDate}${teamHistory.lastDate && teamHistory.lastDate !== teamHistory.firstDate ? ` to ${teamHistory.lastDate}` : ""}`
+        : "";
+    }
+  }
+}
+
 async function dailyAssignmentsPayload(url) {
   const date = url.searchParams.get("date") || todayIso();
   const requestedEmployee = url.searchParams.get("employee") || "";
@@ -2193,6 +2307,7 @@ async function dailyAssignmentsPayload(url) {
   }
 
   const workers = visibleWorkersForRequest(allWorkers, employee, includeNoWork);
+  await attachWorkerTaskActualHistory(workers);
   const managerLineOverview = employee
     ? null
     : lineOverview
