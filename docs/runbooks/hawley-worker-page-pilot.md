@@ -65,6 +65,11 @@ actuals and daily summary logged minutes from that table so the worker detail
 page does not under-report a person who has same-day WIP or recovered timer
 minutes outside completed source-task time.
 
+`Actual today` and the manager `Line daily efficiency` signal must use only
+Hawley's worker actuals ledger (`hb.worker_daily_task_actuals`). Asana task
+`actual_time_minutes` is cumulative over the life of the task, so it should stay
+available as total task context but must not be counted as same-day logged time.
+
 Cycle day chips come from Hawley's reporting calendar:
 
 ```sql

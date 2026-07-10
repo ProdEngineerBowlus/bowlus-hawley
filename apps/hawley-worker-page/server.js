@@ -927,7 +927,7 @@ function taskFromRow(row) {
     estimatedHours: round(estimatedHours),
     estimatedMinutes: minutesFromHours(estimatedHours),
     actualTimeMinutes: Number(row.actual_time_minutes || 0),
-    actualTimeOnDateMinutes: Number(row.actual_time_minutes || 0),
+    actualTimeOnDateMinutes: 0,
     sourceUrl: publicLink(row.asana_permalink_url),
     trackerUrl: "",
     sopUrl: publicLink(row.sop_link || row.document_link),
@@ -1021,7 +1021,8 @@ function buildWorkers(rows) {
       remainingHours: round(worker.remainingHours),
       status: worker.taskCount === 0 ? "No Work" : worker.remainingHours > 0 ? "Open" : "Complete",
       trackerStatus: worker.taskCount === 0 ? "No Work" : worker.remainingHours > 0 ? "Assigned" : "Complete",
-      actualTimeLoggedMinutes: Number(worker.actualTimeMinutes || 0),
+      actualTimeLoggedMinutes: 0,
+      actualTimeLoggedHours: 0,
       tasks: worker.tasks.sort((a, b) => Number(a.completed) - Number(b.completed) || a.workArea.localeCompare(b.workArea) || a.title.localeCompare(b.title))
     }))
     .sort((a, b) => {
@@ -1066,7 +1067,7 @@ function workerHasVisibleWork(worker) {
     Number(worker.completedHours || 0) > 0 ||
     Number(worker.taskCount || 0) > 0 ||
     (worker.tasks || []).length > 0 ||
-    Number(worker.actualTimeLoggedMinutes || worker.actualTimeMinutes || 0) > 0 ||
+    Number(worker.actualTimeLoggedMinutes || 0) > 0 ||
     (worker.dailyEfficiency && Number(worker.dailyEfficiency.loggedMinutes || 0) > 0)
   );
 }
@@ -1105,7 +1106,7 @@ function buildManagerSignals(workers) {
   const openWorkers = workerList.filter(worker => worker.remainingHours > 0);
   const noWorkWorkers = workerList.filter(worker => worker.taskCount === 0);
   const openTasks = workers.reduce((sum, worker) => sum + worker.tasks.filter(task => !task.completed).length, 0);
-  const actualTimeLoggedMinutes = workerList.reduce((sum, worker) => sum + Number(worker.actualTimeLoggedMinutes || worker.actualTimeMinutes || 0), 0);
+  const actualTimeLoggedMinutes = workerList.reduce((sum, worker) => sum + Number(worker.actualTimeLoggedMinutes || 0), 0);
   const targetMinutes = workersWithWork.length * 7.5 * 60;
 
   return {
@@ -1358,9 +1359,10 @@ function snapshotToWorker(snapshot) {
     assignedHours: snapshot.assignedHours,
     completedHours: snapshot.completedHours,
     remainingHours: snapshot.remainingHours,
-    actualHours: snapshot.actualHours,
-    actualTimeLoggedHours: snapshot.actualHours,
-    actualTimeLoggedMinutes: minutesFromHours(snapshot.actualHours),
+    actualHours: 0,
+    snapshotActualHours: snapshot.actualHours,
+    actualTimeLoggedHours: 0,
+    actualTimeLoggedMinutes: 0,
     targetHours: snapshot.targetHours,
     taskCount: snapshot.taskCount || tasks.length,
     completedTaskCount: snapshot.completedTaskCount || tasks.filter(task => task.completed).length,
@@ -1625,7 +1627,7 @@ async function enrichSnapshotWorkersFromRaw(workers) {
       task.completed = Boolean(row.completed);
       task.sourceUrl = publicLink(row.permalink_url) || task.sourceUrl;
       task.actualTimeMinutes = Number(row.actual_time_minutes || 0);
-      task.actualTimeOnDateMinutes = Number(row.actual_time_minutes || 0);
+      task.actualTimeOnDateMinutes = Number(task.actualTimeOnDateMinutes || 0);
       task.sopUrl = publicLink(textValue(fields["SOP Link"]) || task.sopUrl);
       task.estimatedMinutes = estimatedMinutes || task.estimatedMinutes || minutesFromHours(task.assignedHours);
       task.targetHours = Number(task.targetHours || task.assignedHours || 0);
