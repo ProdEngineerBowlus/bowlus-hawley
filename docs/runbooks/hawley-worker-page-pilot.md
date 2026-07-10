@@ -70,6 +70,12 @@ Hawley's worker actuals ledger (`hb.worker_daily_task_actuals`). Asana task
 `actual_time_minutes` is cumulative over the life of the task, so it should stay
 available as total task context but must not be counted as same-day logged time.
 
+The Hawley Line View should keep the visible day totals congruent with the phase
+rows it renders: planned assigned hours/tasks come from
+`reporting.hawley_worker_page_assignments`, while actual time and transition
+signals come from Hawley's worker actual/session reporting views. The raw debug
+payload panel is hidden by default and is available only with `?debug=1`.
+
 Cycle day chips come from Hawley's reporting calendar:
 
 ```sql

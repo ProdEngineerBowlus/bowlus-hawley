@@ -320,8 +320,12 @@ Implemented pilot behavior:
 - The next `start` for the same worker/day creates a
   `core.task_transition_events` gap from the previous stopped session to the
   new session.
-- The line view reads `/api/utilization-report` for phase, worker, transition,
-  and review metrics.
+- The line view reads `/api/utilization-report` for actuals, phase/worker
+  transition metrics, and review metrics, while planned assigned hours/tasks
+  remain based on the Hawley assignment read model so the visible day totals and
+  phase rows use the same denominator.
+- The debug payload panel is hidden in normal live use. Append `?debug=1` to the
+  line-view URL when raw payload inspection is needed.
 - Manager classification buttons stay hidden until a transition row is selected;
   reviews write only to Hawley's review tables and do not write to Asana or
   Airtable.

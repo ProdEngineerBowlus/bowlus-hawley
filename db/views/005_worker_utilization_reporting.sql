@@ -466,8 +466,8 @@ select
   round((coalesce(session_phase.total_actual_task_minutes, 0) / 60.0)::numeric, 2) as total_actual_task_hours,
   coalesce(transition_phase.total_transition_minutes, 0)::numeric(12, 2) as total_transition_minutes,
   coalesce(transition_phase.excess_transition_minutes, 0)::numeric(12, 2) as excess_transition_minutes,
-  coalesce(session_phase.total_estimated_minutes, assignment_phase.assigned_estimated_minutes, 0) as total_estimated_minutes,
-  round((coalesce(session_phase.total_estimated_minutes, assignment_phase.assigned_estimated_minutes, 0)::numeric / nullif(session_phase.total_actual_task_minutes, 0) * 100)::numeric, 2) as efficiency_percent,
+  coalesce(assignment_phase.assigned_estimated_minutes, session_phase.total_estimated_minutes, 0) as total_estimated_minutes,
+  round((coalesce(assignment_phase.assigned_estimated_minutes, session_phase.total_estimated_minutes, 0)::numeric / nullif(session_phase.total_actual_task_minutes, 0) * 100)::numeric, 2) as efficiency_percent,
   coalesce(assignment_phase.assigned_task_count, 0) as assigned_task_count,
   coalesce(assignment_phase.completed_task_count, 0) as completed_task_count,
   round((coalesce(assignment_phase.completed_task_count, 0)::numeric / nullif(assignment_phase.assigned_task_count, 0) * 100)::numeric, 2) as assigned_vs_completed_percent,
@@ -513,7 +513,8 @@ assignment_worker_phase as (
     inferred_work_area_key as phase_key,
     inferred_work_area_name as phase_name,
     count(*)::integer as assigned_task_count,
-    count(*) filter (where completed)::integer as completed_task_count
+    count(*) filter (where completed)::integer as completed_task_count,
+    round(sum(coalesce(estimated_hours, 0) * 60)::numeric, 0)::integer as assigned_estimated_minutes
   from reporting.hawley_worker_page_assignments
   where assigned_on is not null
     and nullif(coalesce(worker_email, worker_name), '') is not null
@@ -552,10 +553,10 @@ select
   coalesce(session_worker_phase.phase_name, assignment_worker_phase.phase_name, transition_worker_phase.phase_name, keys.phase_key, 'Unspecified') as phase_name,
   coalesce(session_worker_phase.actual_task_minutes, 0) as actual_task_minutes,
   round((coalesce(session_worker_phase.actual_task_minutes, 0) / 60.0)::numeric, 2) as actual_task_hours,
-  coalesce(session_worker_phase.estimated_minutes, 0) as estimated_minutes,
+  coalesce(assignment_worker_phase.assigned_estimated_minutes, session_worker_phase.estimated_minutes, 0) as estimated_minutes,
   coalesce(transition_worker_phase.transition_minutes, 0)::numeric(12, 2) as transition_minutes,
   coalesce(transition_worker_phase.excess_transition_minutes, 0)::numeric(12, 2) as excess_transition_minutes,
-  round((coalesce(session_worker_phase.estimated_minutes, 0)::numeric / nullif(session_worker_phase.actual_task_minutes, 0) * 100)::numeric, 2) as efficiency_percent,
+  round((coalesce(assignment_worker_phase.assigned_estimated_minutes, session_worker_phase.estimated_minutes, 0)::numeric / nullif(session_worker_phase.actual_task_minutes, 0) * 100)::numeric, 2) as efficiency_percent,
   coalesce(assignment_worker_phase.assigned_task_count, 0) as assigned_task_count,
   coalesce(session_worker_phase.started_task_count, 0) as started_task_count,
   coalesce(assignment_worker_phase.completed_task_count, 0) as completed_task_count,

@@ -9,6 +9,7 @@
 
   const params = new URLSearchParams(window.location.search);
   const initialView = params.get("view");
+  const debugMode = params.get("debug") === "1" || params.get("debug") === "true";
   const validPhaseViews = new Set(["workers", "tasks", "worker", "transitions", "review"]);
   const today = localTodayIso();
   const state = {
@@ -188,7 +189,9 @@
       state.auth = auth;
       state.assignments = assignments;
       state.utilization = utilization;
-      if (state.selectedPhase && !selectedPhaseRow()) state.selectedPhase = "";
+      const matchedPhase = selectedPhaseRow();
+      if (state.selectedPhase && !matchedPhase) state.selectedPhase = "";
+      if (matchedPhase && state.selectedPhase !== matchedPhase.phaseKey) state.selectedPhase = matchedPhase.phaseKey;
       if (!state.selectedPhase) {
         state.phaseView = "workers";
         state.selectedWorker = "";
@@ -249,7 +252,7 @@
   }
 
   function phaseKeyMatches(left, right) {
-    return Boolean(left || right) && normalizeKey(left) === normalizeKey(right);
+    return Boolean(left || right) && canonicalPhaseKeyForValue(left) === canonicalPhaseKeyForValue(right);
   }
 
   function workerKeyMatches(left, right) {
@@ -332,14 +335,22 @@
       .replace(/[^a-z0-9]+/g, "");
   }
 
-  function canonicalPhaseForTask(task) {
-    const phase = phaseNameForTask(task);
-    const rawKey = task.workAreaKey || phaseKeyForName(phase);
+  function canonicalPhaseKeyForValue(value) {
+    const token = phaseAliasToken(value);
+    if (!token) return normalizeKey(value);
+    for (const group of phaseAliasGroups) {
+      const aliases = new Set([group.key, group.display, ...group.aliases].map(phaseAliasToken));
+      if (aliases.has(token)) return group.key;
+    }
+    return normalizeKey(value);
+  }
+
+  function canonicalPhaseForValues(phase, rawKey = "") {
+    const safePhase = phase || "Unspecified";
+    const safeRawKey = rawKey || phaseKeyForName(safePhase);
     const tokens = new Set([
-      phaseAliasToken(rawKey),
-      phaseAliasToken(phase),
-      phaseAliasToken(task.phase),
-      phaseAliasToken(task.phaseBucket),
+      phaseAliasToken(safeRawKey),
+      phaseAliasToken(safePhase),
     ].filter(Boolean));
 
     for (const group of phaseAliasGroups) {
@@ -349,19 +360,42 @@
           return {
             phase: group.display,
             phaseKey: group.key,
-            rawPhase: phase,
-            rawPhaseKey: rawKey,
+            rawPhase: safePhase,
+            rawPhaseKey: safeRawKey,
           };
         }
       }
     }
 
     return {
-      phase,
-      phaseKey: phaseKeyForName(phase),
-      rawPhase: phase,
-      rawPhaseKey: rawKey,
+      phase: safePhase,
+      phaseKey: phaseKeyForName(safePhase),
+      rawPhase: safePhase,
+      rawPhaseKey: safeRawKey,
     };
+  }
+
+  function canonicalPhaseForTask(task) {
+    const phase = phaseNameForTask(task);
+    const rawKey = task.workAreaKey || phaseKeyForName(phase);
+    const taskInfo = canonicalPhaseForValues(phase, rawKey);
+    const extraTokens = [
+      task.phase,
+      task.phaseBucket,
+    ].filter(Boolean);
+
+    if (taskInfo.phaseKey !== phaseKeyForName(phase)) return taskInfo;
+    for (const value of extraTokens) {
+      const extraInfo = canonicalPhaseForValues(value, value);
+      if (extraInfo.phaseKey !== phaseKeyForName(value)) {
+        return {
+          ...extraInfo,
+          rawPhase: phase,
+          rawPhaseKey: rawKey,
+        };
+      }
+    }
+    return taskInfo;
   }
 
   function phaseKeyForName(name) {
@@ -382,7 +416,7 @@
   function tasksForWorker(worker, phaseKey = "") {
     const tasks = Array.isArray(worker.tasks) ? worker.tasks : [];
     if (!phaseKey) return tasks;
-    return tasks.filter((task) => taskPhaseKey(task) === phaseKey);
+    return tasks.filter((task) => phaseKeyMatches(taskPhaseKey(task), phaseKey));
   }
 
   function phaseRows() {
@@ -452,13 +486,37 @@
           phaseKeyMatches(item.phaseSlug, row.phaseKey) ||
           phaseKeyMatches(item.phaseName, row.phase)
         );
+        const reportActualMinutes = Number(reportPhase?.totalActualTaskMinutes || 0);
+        const reportEstimatedMinutes = Number(reportPhase?.totalEstimatedMinutes || 0);
+        const reportTaskCount = Number(reportPhase?.assignedTaskCount || 0);
+        const reportCompletedTaskCount = Number(reportPhase?.completedTaskCount || 0);
+        const taskCount = row.taskCount || reportTaskCount;
+        const completedTaskCount = row.taskCount ? row.completedTaskCount : reportCompletedTaskCount;
+        const assignedHours = row.taskCount ? row.assignedHours : reportEstimatedMinutes / 60;
+        const actualMinutes = row.actualMinutes || reportActualMinutes;
+        const openTaskCount = row.taskCount
+          ? row.openTaskCount
+          : Math.max(0, reportTaskCount - reportCompletedTaskCount);
+        const workerCount = Math.max(
+          row.workerIds.size,
+          Number(reportPhase?.workerCount || 0),
+          Number(reportPhase?.assignedWorkerCount || 0)
+        );
+        const reportCompletion = reportPhase?.assignedVsCompletedPercent;
+        const reportEfficiency = reportPhase?.efficiencyPercent;
         return {
           ...row,
-          workerCount: row.workerIds.size || Number(reportPhase?.workerCount || reportPhase?.assignedWorkerCount || 0),
+          phase: row.phase || reportPhase?.phaseName || "Unspecified",
+          taskCount,
+          completedTaskCount,
+          assignedHours,
+          actualMinutes,
+          openTaskCount,
+          workerCount,
           rawPhaseNames: Array.from(row.rawPhaseNames).sort(),
           rawPhaseKeys: Array.from(row.rawPhaseKeys).sort(),
-          completionPercent: row.taskCount ? Math.round((row.completedTaskCount / row.taskCount) * 100) : Number(reportPhase?.assignedVsCompletedPercent || 0),
-          efficiencyPercent: row.actualMinutes ? Math.round((row.assignedHours * 60 / row.actualMinutes) * 100) : reportPhase?.efficiencyPercent ?? null,
+          completionPercent: taskCount ? Math.round((completedTaskCount / taskCount) * 100) : Number(reportCompletion || 0),
+          efficiencyPercent: actualMinutes ? Math.round((assignedHours * 60 / actualMinutes) * 100) : reportEfficiency ?? null,
           transitionStats: stats,
           transitionMinutes: stats.totalTransitionMinutes,
           reviewFlags: stats.unreviewedTransitionCount,
@@ -469,7 +527,41 @@
   }
 
   function selectedPhaseRow() {
-    return phaseRows().find((row) => row.phaseKey === state.selectedPhase) || null;
+    return phaseRows().find((row) => phaseKeyMatches(row.phaseKey, state.selectedPhase)) || null;
+  }
+
+  function lineViewMetrics() {
+    const rows = phaseRows();
+    const line = state.assignments?.lineOverview || {};
+    const signals = state.assignments?.managerSignals || {};
+    if (!rows.length) {
+      return {
+        assignedHours: Number(line.assignedHours || 0),
+        completedHours: Number(line.completedHours || 0),
+        remainingHours: Number(line.remainingHours || 0),
+        taskCount: Number(line.taskCount || 0),
+        completedTaskCount: Number(line.completedTaskCount || 0),
+        openTaskCount: Number(signals.openTaskCount || signals.openTasks || 0),
+        actualMinutes: Number(signals.actualTimeLoggedMinutes || 0),
+      };
+    }
+
+    const assignedHours = rows.reduce((sum, row) => sum + Number(row.assignedHours || 0), 0);
+    const completedHours = rows.reduce((sum, row) => sum + Number(row.completedHours || 0), 0);
+    const taskCount = rows.reduce((sum, row) => sum + Number(row.taskCount || 0), 0);
+    const completedTaskCount = rows.reduce((sum, row) => sum + Number(row.completedTaskCount || 0), 0);
+    const openTaskCount = rows.reduce((sum, row) => sum + Number(row.openTaskCount || 0), 0);
+    const actualMinutes = rows.reduce((sum, row) => sum + Number(row.actualMinutes || 0), 0);
+
+    return {
+      assignedHours,
+      completedHours,
+      remainingHours: Math.max(0, assignedHours - completedHours),
+      taskCount,
+      completedTaskCount,
+      openTaskCount,
+      actualMinutes,
+    };
   }
 
   function selectedPhaseWorkerRow() {
@@ -608,12 +700,13 @@
     const signals = state.assignments?.managerSignals || {};
     const syncRuns = state.sync?.latestRuns || {};
     const writeMode = state.auth?.workerWritesEnabled ? "Live writes enabled on main app" : "Main app read-only";
+    const visibleLine = lineViewMetrics();
 
     return `
       <section class="status-strip">
-        ${metric("Cycle", line.cycle || "Current", `${formatNumber(line.completedTaskCount || 0)}/${formatNumber(line.taskCount || 0)} tasks complete`)}
-        ${metric("Assigned", formatHours(line.assignedHours || 0), `${formatHours(line.remainingHours || 0)} remaining`)}
-        ${metric("Actual today", formatMinutes(signals.actualTimeLoggedMinutes || 0), "from worker actual ledger")}
+        ${metric("Cycle", line.cycle || "Current", `${formatNumber(visibleLine.completedTaskCount)}/${formatNumber(visibleLine.taskCount)} tasks complete`)}
+        ${metric("Assigned", formatHours(visibleLine.assignedHours), `${formatHours(visibleLine.remainingHours)} remaining`)}
+        ${metric("Actual today", formatMinutes(visibleLine.actualMinutes), "from worker actual ledger")}
         ${metric("Sync", syncRuns.pull_asana_events?.status || state.sync?.watcher?.lastStatus || "unknown", formatDateTime(syncRuns.pull_asana_events?.ended_at || state.sync?.refreshedAt))}
         <div class="metric">
           <span>Write safety</span>
@@ -621,7 +714,7 @@
           <small>${escapeHtml(reviewControlsEnabled() ? "Transition reviews write only to Hawley" : writeMode)}</small>
         </div>
         ${metric("Workers", formatNumber(signals.workerCount || workers().length), `${formatNumber(signals.workersWithWork || 0)} with work`)}
-        ${metric("Open tasks", formatNumber(signals.openTaskCount || signals.openTasks || 0), "manager payload")}
+        ${metric("Open tasks", formatNumber(visibleLine.openTaskCount), "visible line rows")}
         ${metric("Mode", state.assignments?.mode || "--", `latest tracker ${state.assignments?.latestTrackerDate || "--"}`)}
       </section>
     `;
@@ -877,6 +970,8 @@
   }
 
   function renderDebugPanel() {
+    if (!debugMode) return "";
+
     const payload = {
       date: state.date,
       selectedPhase: state.selectedPhase,
@@ -890,6 +985,7 @@
       lineOverview: state.assignments?.lineOverview,
       managerSignals: state.assignments?.managerSignals,
       cycleDays: state.assignments?.cycleDays,
+      utilizationSummary: state.utilization?.summary,
     };
 
     return `
