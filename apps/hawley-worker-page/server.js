@@ -1923,6 +1923,15 @@ async function dailyAssignmentsPayload(url) {
   }
 
   const workers = visibleWorkersForRequest(allWorkers, employee, includeNoWork);
+  const managerLineOverview = employee
+    ? null
+    : lineOverview
+      ? snapshotToLineOverview(lineOverview)
+      : buildLineOverview(workers, date, latestRuns);
+
+  if (managerLineOverview && cycleDayPayload?.cycle) {
+    managerLineOverview.cycle = cycleDayPayload.cycle;
+  }
 
   return {
     ok: true,
@@ -1936,7 +1945,7 @@ async function dailyAssignmentsPayload(url) {
       name: "Daily Assignment Tracker",
       url: `https://app.asana.com/1/829365006370166/project/${DAILY_TRACKER_PROJECT_ID}`
     },
-    lineOverview: employee ? null : lineOverview ? snapshotToLineOverview(lineOverview) : buildLineOverview(workers, date, latestRuns),
+    lineOverview: managerLineOverview,
     managerSignals: employee ? null : buildManagerSignals(workers),
     cycleDays: cycleDayPayload,
     latestTrackerDate: useTrackerSnapshot ? latestTrackerSnapshotDate || latestDate : latestDate,
