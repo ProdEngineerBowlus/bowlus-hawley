@@ -211,6 +211,8 @@ The beta phase overview uses canonical operational phase buckets for known
 nomenclature drift. For example, `FAB-B` rolls into `FAB 1-3`, and `Frame-A`
 rolls into `Frames / Phase A`. The original task labels remain in the payload
 for debugging, but the phase list should show the canonical production bucket.
+Worker rows inside a phase drill-in should show the selected task phase/bucket,
+not the worker's home or configured capability label.
 
 Task drill-ins separate same-day time from task history. `Actual today` is the
 selected work date only. `Worker total` sums Hawley's

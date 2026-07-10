@@ -327,6 +327,14 @@
     return phaseWorkerRows(state.selectedPhase).find((row) => row.workerKey === state.selectedWorker) || null;
   }
 
+  function phaseLabelForTasks(tasks, fallbackPhaseKey = "") {
+    const labels = Array.from(new Set(
+      (tasks || []).map((task) => canonicalPhaseForTask(task).phase).filter(Boolean)
+    )).sort();
+    if (labels.length) return labels.join(", ");
+    return phaseRows().find((row) => row.phaseKey === fallbackPhaseKey)?.phase || "Phase work";
+  }
+
   function phaseWorkerRows(phaseKey) {
     return workers()
       .map((worker) => {
@@ -339,7 +347,8 @@
           id: worker.id,
           workerKey: workerKeyForWorker(worker),
           name: worker.name || worker.email || "Unknown worker",
-          role: worker.phase || worker.workArea || "",
+          role: phaseLabelForTasks(tasks, phaseKey),
+          homeRole: worker.phase || worker.workArea || "",
           taskCount: tasks.length,
           completedTaskCount,
           openTasks: tasks.length - completedTaskCount,
