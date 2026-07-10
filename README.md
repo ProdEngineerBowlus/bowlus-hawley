@@ -92,6 +92,12 @@ the legacy Daily Assignment Tracker snapshot shape:
 npm run worker:hawley
 ```
 
+The production utilization, transition gap, phase reporting, manager review,
+and Asana writeback-queue design is documented in
+`docs/runbooks/worker-utilization-transition-ledger.md`. The first database
+foundation lives in `db/migrations/012_worker_utilization_ledger.sql` and
+`db/views/005_worker_utilization_reporting.sql`.
+
 ## Secret Rules
 
 Do not commit:
