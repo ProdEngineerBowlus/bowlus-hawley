@@ -8,10 +8,13 @@
   }
 
   const params = new URLSearchParams(window.location.search);
+  const initialView = params.get("view");
   const today = localTodayIso();
   const state = {
     date: params.get("date") || today,
     selectedPhase: params.get("phase") || "",
+    phaseView: initialView === "tasks" || initialView === "worker" ? initialView : "workers",
+    selectedWorker: params.get("worker") || "",
     loading: true,
     error: "",
     health: null,
@@ -78,8 +81,20 @@
     url.searchParams.set("date", state.date);
     if (state.selectedPhase) {
       url.searchParams.set("phase", state.selectedPhase);
+      if (state.phaseView && state.phaseView !== "workers") {
+        url.searchParams.set("view", state.phaseView);
+      } else {
+        url.searchParams.delete("view");
+      }
+      if (state.phaseView === "worker" && state.selectedWorker) {
+        url.searchParams.set("worker", state.selectedWorker);
+      } else {
+        url.searchParams.delete("worker");
+      }
     } else {
       url.searchParams.delete("phase");
+      url.searchParams.delete("view");
+      url.searchParams.delete("worker");
     }
     window.history.replaceState({}, "", url);
   }
@@ -87,12 +102,30 @@
   function setDate(nextDate) {
     state.date = nextDate || today;
     state.selectedPhase = "";
+    state.phaseView = "workers";
+    state.selectedWorker = "";
     updateUrl();
     load();
   }
 
   function setPhase(phaseKey) {
     state.selectedPhase = phaseKey || "";
+    state.phaseView = "workers";
+    state.selectedWorker = "";
+    updateUrl();
+    render();
+  }
+
+  function setPhaseView(view) {
+    state.phaseView = view || "workers";
+    if (state.phaseView !== "worker") state.selectedWorker = "";
+    updateUrl();
+    render();
+  }
+
+  function setWorker(workerKey) {
+    state.phaseView = "worker";
+    state.selectedWorker = workerKey || "";
     updateUrl();
     render();
   }
@@ -115,6 +148,13 @@
       state.auth = auth;
       state.assignments = assignments;
       if (state.selectedPhase && !selectedPhaseRow()) state.selectedPhase = "";
+      if (!state.selectedPhase) {
+        state.phaseView = "workers";
+        state.selectedWorker = "";
+      } else if (state.phaseView === "worker" && !selectedPhaseWorkerRow()) {
+        state.phaseView = "workers";
+        state.selectedWorker = "";
+      }
       updateUrl();
     } catch (error) {
       state.error = error.message || "Could not load beta diagnostics.";
@@ -145,6 +185,10 @@
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "") || "unspecified";
+  }
+
+  function workerKeyForWorker(worker) {
+    return phaseKeyForName(worker.id || worker.email || worker.name || "unknown-worker");
   }
 
   function taskPhaseKey(task) {
@@ -201,6 +245,11 @@
     return phaseRows().find((row) => row.phaseKey === state.selectedPhase) || null;
   }
 
+  function selectedPhaseWorkerRow() {
+    if (!state.selectedWorker) return null;
+    return phaseWorkerRows(state.selectedPhase).find((row) => row.workerKey === state.selectedWorker) || null;
+  }
+
   function phaseWorkerRows(phaseKey) {
     return workers()
       .map((worker) => {
@@ -211,6 +260,7 @@
         const completedHours = tasks.reduce((sum, task) => sum + (task.completed ? taskHours(task) : 0), 0);
         return {
           id: worker.id,
+          workerKey: workerKeyForWorker(worker),
           name: worker.name || worker.email || "Unknown worker",
           role: worker.phase || worker.workArea || "",
           taskCount: tasks.length,
@@ -228,9 +278,10 @@
       .sort((a, b) => b.actualMinutes - a.actualMinutes || b.assignedHours - a.assignedHours || a.name.localeCompare(b.name));
   }
 
-  function phaseTaskRows(phaseKey) {
+  function phaseTaskRows(phaseKey, workerKey = "") {
     const rows = [];
     for (const worker of workers()) {
+      if (workerKey && workerKeyForWorker(worker) !== workerKey) continue;
       for (const task of tasksForWorker(worker, phaseKey)) {
         const assignedHours = taskHours(task);
         const actualMinutes = taskActualToday(task);
@@ -248,6 +299,24 @@
       }
     }
     return rows.sort((a, b) => b.actualMinutes - a.actualMinutes || a.taskName.localeCompare(b.taskName));
+  }
+
+  function taskScopeSummary(phaseKey, workerKey = "") {
+    const rows = phaseTaskRows(phaseKey, workerKey);
+    const workerNames = new Set(rows.map((row) => row.workerName));
+    const completedTaskCount = rows.filter((row) => row.completed).length;
+    const assignedHours = rows.reduce((sum, row) => sum + row.assignedHours, 0);
+    const actualMinutes = rows.reduce((sum, row) => sum + row.actualMinutes, 0);
+    return {
+      taskCount: rows.length,
+      completedTaskCount,
+      openTaskCount: rows.length - completedTaskCount,
+      assignedHours,
+      actualMinutes,
+      workerCount: workerNames.size,
+      completionPercent: rows.length ? Math.round((completedTaskCount / rows.length) * 100) : 0,
+      efficiencyPercent: actualMinutes ? Math.round((assignedHours * 60 / actualMinutes) * 100) : null,
+    };
   }
 
   function metric(label, value, detail = "") {
@@ -330,7 +399,7 @@
     const rows = phaseWorkerRows(phaseKey);
     if (!rows.length) return `<div class="empty">No worker activity is attached to this phase for ${escapeHtml(state.date)}.</div>`;
     return rows.map((row) => `
-      <div class="worker-row phase-worker-row">
+      <button class="worker-row phase-worker-row worker-button" type="button" data-action="select-worker" data-worker-key="${escapeHtml(row.workerKey)}">
         <div class="row-main">
           <strong>${escapeHtml(row.name)}</strong>
           <small>${escapeHtml(row.role || "Phase worker")}</small>
@@ -341,12 +410,12 @@
         <div class="row-stat"><span>Complete</span><strong>${formatPercent(row.completionPercent)}</strong></div>
         <div class="row-stat"><span>Efficiency</span><strong>${formatPercent(row.efficiencyPercent)}</strong></div>
         <div class="row-stat"><span>Open</span><strong>${formatNumber(row.openTasks)}</strong></div>
-      </div>
+      </button>
     `).join("");
   }
 
-  function renderPhaseTasks(phaseKey) {
-    const rows = phaseTaskRows(phaseKey);
+  function renderPhaseTasks(phaseKey, workerKey = "") {
+    const rows = phaseTaskRows(phaseKey, workerKey);
     if (!rows.length) return `<div class="empty">No task detail is attached to this phase for ${escapeHtml(state.date)}.</div>`;
     return rows.map((row) => `
       <div class="task-row">
@@ -362,8 +431,8 @@
     `).join("");
   }
 
-  function renderTransitionPanel(phaseKey) {
-    const taskRows = phaseTaskRows(phaseKey);
+  function renderTransitionPanel(phaseKey, workerKey = "") {
+    const taskRows = phaseTaskRows(phaseKey, workerKey);
     const actualTasks = taskRows.filter((row) => row.actualMinutes > 0).length;
     const completedTasks = taskRows.filter((row) => row.completed).length;
     const staleRows = taskRows.filter((row) => !row.actualMinutes && !row.completed).length;
@@ -381,10 +450,100 @@
     `;
   }
 
+  function railTile(label, value, detail = "", pending = false) {
+    return `
+      <div class="rail-tile ${pending ? "pending" : ""}">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(value)}</strong>
+        ${detail ? `<small>${escapeHtml(detail)}</small>` : ""}
+      </div>
+    `;
+  }
+
+  function renderPhaseRail(phase) {
+    const summary = taskScopeSummary(phase.phaseKey);
+    const workerRows = phaseWorkerRows(phase.phaseKey);
+    const touchedWorkers = workerRows.filter((row) => row.actualMinutes > 0).length;
+    const touchedTasks = phaseTaskRows(phase.phaseKey).filter((row) => row.actualMinutes > 0).length;
+
+    return `
+      <section class="panel phase-rail-panel">
+        <div class="panel-header">
+          <h2 class="panel-title">Phase rail</h2>
+          ${statusPill("preview layer", "warn")}
+        </div>
+        <div class="panel-body">
+          <div class="phase-rail">
+            ${railTile("Workers touched", formatNumber(touchedWorkers), `${formatNumber(workerRows.length)} assigned or active`)}
+            ${railTile("Tasks touched", formatNumber(touchedTasks), `${formatNumber(summary.taskCount)} total in phase`)}
+            ${railTile("Completed", formatNumber(summary.completedTaskCount), `${formatNumber(summary.openTaskCount)} open`)}
+            ${railTile("Task switches", "--", "coming from transition ledger", true)}
+            ${railTile("Handoff gaps", "--", "coming from transition ledger", true)}
+            ${railTile("Review flags", "--", "coming from manager review layer", true)}
+          </div>
+          <div class="rail-actions">
+            <button class="btn primary" type="button" data-action="show-phase-tasks">All phase tasks</button>
+            <button class="btn" type="button" disabled>Transitions soon</button>
+            <button class="btn" type="button" disabled>Review queue soon</button>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  function renderPhaseHero(phase, label = "Phase detail", title = phase.phase, detail = "") {
+    const phaseDetail = detail || `${state.date} - ${formatNumber(phase.workerCount)} workers - ${formatNumber(phase.completedTaskCount)}/${formatNumber(phase.taskCount)} tasks complete`;
+    const backToPhase = state.phaseView !== "workers"
+      ? `<button class="btn" type="button" data-action="back-to-phase">Back to phase</button>`
+      : "";
+
+    return `
+      <section class="phase-detail-hero">
+        <div class="phase-hero-actions">
+          <button class="btn" type="button" data-action="back-to-day">Back to day</button>
+          ${backToPhase}
+        </div>
+        <div>
+          <span class="section-kicker">${escapeHtml(label)}</span>
+          <h2>${escapeHtml(title)}</h2>
+          <p>${escapeHtml(phaseDetail)}</p>
+        </div>
+      </section>
+    `;
+  }
+
+  function renderPhaseMetricStrip(phase) {
+    return `
+      <section class="status-strip phase-metrics">
+        ${metric("Actual", formatMinutes(phase.actualMinutes), "worker actual ledger")}
+        ${metric("Assigned", formatHours(phase.assignedHours), `${formatHours(phase.completedHours)} completed estimate`)}
+        ${metric("Tasks", `${formatNumber(phase.completedTaskCount)}/${formatNumber(phase.taskCount)}`, `${formatNumber(phase.openTaskCount)} open`)}
+        ${metric("Completion", formatPercent(phase.completionPercent), "task row completion")}
+        ${metric("Efficiency", formatPercent(phase.efficiencyPercent), "assigned hours / actual today")}
+        ${metric("Workers", formatNumber(phase.workerCount), "worked or assigned in phase")}
+      </section>
+    `;
+  }
+
+  function renderTaskScopeMetricStrip(summary) {
+    return `
+      <section class="status-strip phase-metrics">
+        ${metric("Actual", formatMinutes(summary.actualMinutes), "worker actual ledger")}
+        ${metric("Assigned", formatHours(summary.assignedHours), "task estimate")}
+        ${metric("Tasks", `${formatNumber(summary.completedTaskCount)}/${formatNumber(summary.taskCount)}`, `${formatNumber(summary.openTaskCount)} open`)}
+        ${metric("Completion", formatPercent(summary.completionPercent), "task row completion")}
+        ${metric("Efficiency", formatPercent(summary.efficiencyPercent), "assigned hours / actual today")}
+        ${metric("Workers", formatNumber(summary.workerCount), "scope")}
+      </section>
+    `;
+  }
+
   function renderDebugPanel() {
     const payload = {
       date: state.date,
       selectedPhase: state.selectedPhase,
+      phaseView: state.phaseView,
+      selectedWorker: state.selectedWorker,
       health: state.health,
       sync: state.sync,
       auth: state.auth,
@@ -443,42 +602,70 @@
     const phase = selectedPhaseRow();
     if (!phase) return renderDayView();
 
-    return `
-      ${renderNotice()}
-      <section class="phase-detail-hero">
-        <button class="btn" type="button" data-action="back-to-day">Back to day</button>
-        <div>
-          <span class="section-kicker">Phase detail</span>
-          <h2>${escapeHtml(phase.phase)}</h2>
-          <p>${escapeHtml(state.date)} - ${formatNumber(phase.workerCount)} workers - ${formatNumber(phase.completedTaskCount)}/${formatNumber(phase.taskCount)} tasks complete</p>
-        </div>
-      </section>
-      <section class="status-strip phase-metrics">
-        ${metric("Actual", formatMinutes(phase.actualMinutes), "worker actual ledger")}
-        ${metric("Assigned", formatHours(phase.assignedHours), `${formatHours(phase.completedHours)} completed estimate`)}
-        ${metric("Tasks", `${formatNumber(phase.completedTaskCount)}/${formatNumber(phase.taskCount)}`, `${formatNumber(phase.openTaskCount)} open`)}
-        ${metric("Completion", formatPercent(phase.completionPercent), "task row completion")}
-        ${metric("Efficiency", formatPercent(phase.efficiencyPercent), "assigned hours / actual today")}
-        ${metric("Workers", formatNumber(phase.workerCount), "worked or assigned in phase")}
-      </section>
-      <section class="phase-detail-grid">
-        <div class="panel">
+    if (state.phaseView === "tasks") {
+      const summary = taskScopeSummary(phase.phaseKey);
+      return `
+        ${renderNotice()}
+        ${renderPhaseHero(phase, "Task detail", `${phase.phase} tasks`, `${state.date} - all tasks in this phase`)}
+        ${renderTaskScopeMetricStrip(summary)}
+        <section class="panel task-detail-panel">
           <div class="panel-header">
-            <h2 class="panel-title">Workers in phase</h2>
-            ${statusPill(`${phaseWorkerRows(phase.phaseKey).length} workers`, "ok")}
-          </div>
-          <div class="panel-body worker-list">${renderPhaseWorkers(phase.phaseKey)}</div>
-        </div>
-        <div class="panel">
-          <div class="panel-header">
-            <h2 class="panel-title">Task transition view</h2>
-            ${statusPill(`${phaseTaskRows(phase.phaseKey).length} tasks`, "ok")}
+            <h2 class="panel-title">All phase tasks</h2>
+            ${statusPill(`${summary.taskCount} tasks`, "ok")}
           </div>
           <div class="panel-body task-list">
             ${renderTransitionPanel(phase.phaseKey)}
             ${renderPhaseTasks(phase.phaseKey)}
           </div>
+        </section>
+        ${renderDebugPanel()}
+      `;
+    }
+
+    if (state.phaseView === "worker") {
+      const worker = selectedPhaseWorkerRow();
+      if (!worker) {
+        state.phaseView = "workers";
+        state.selectedWorker = "";
+        updateUrl();
+        return renderPhaseDetail();
+      }
+      const summary = taskScopeSummary(phase.phaseKey, worker.workerKey);
+      return `
+        ${renderNotice()}
+        ${renderPhaseHero(phase, "Worker task detail", worker.name, `${state.date} - ${phase.phase} - ${formatNumber(summary.completedTaskCount)}/${formatNumber(summary.taskCount)} tasks complete`)}
+        ${renderTaskScopeMetricStrip(summary)}
+        <section class="panel task-detail-panel">
+          <div class="panel-header">
+            <h2 class="panel-title">Worker tasks</h2>
+            <div class="panel-actions">
+              <button class="btn" type="button" data-action="show-phase-tasks">All phase tasks</button>
+              ${statusPill(`${summary.taskCount} tasks`, "ok")}
+            </div>
+          </div>
+          <div class="panel-body task-list">
+            ${renderTransitionPanel(phase.phaseKey, worker.workerKey)}
+            ${renderPhaseTasks(phase.phaseKey, worker.workerKey)}
+          </div>
+        </section>
+        ${renderDebugPanel()}
+      `;
+    }
+
+    return `
+      ${renderNotice()}
+      ${renderPhaseHero(phase)}
+      ${renderPhaseMetricStrip(phase)}
+      ${renderPhaseRail(phase)}
+      <section class="panel phase-workers-panel">
+        <div class="panel-header">
+          <h2 class="panel-title">Workers in phase</h2>
+          <div class="panel-actions">
+            <button class="btn primary" type="button" data-action="show-phase-tasks">All phase tasks</button>
+            ${statusPill(`${phaseWorkerRows(phase.phaseKey).length} workers`, "ok")}
+          </div>
         </div>
+        <div class="panel-body worker-list">${renderPhaseWorkers(phase.phaseKey)}</div>
       </section>
       ${renderDebugPanel()}
     `;
@@ -510,6 +697,9 @@
     const action = target?.dataset.action;
     if (action === "reload") load();
     if (action === "select-phase") setPhase(target.dataset.phaseKey);
+    if (action === "show-phase-tasks") setPhaseView("tasks");
+    if (action === "select-worker") setWorker(target.dataset.workerKey);
+    if (action === "back-to-phase") setPhaseView("workers");
     if (action === "back-to-day") setPhase("");
   });
 

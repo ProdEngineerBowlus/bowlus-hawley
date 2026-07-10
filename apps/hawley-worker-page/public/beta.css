@@ -127,6 +127,11 @@ a {
   border-color: var(--primary);
 }
 
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
 .date-control {
   padding: 0 10px;
 }
@@ -149,6 +154,7 @@ a {
 .worker-row,
 .phase-card,
 .task-row,
+.rail-tile,
 .debug-box,
 .notice,
 .phase-detail-hero {
@@ -190,7 +196,10 @@ a {
 
 .day-panel,
 .phase-detail-grid,
-.phase-detail-hero {
+.phase-detail-hero,
+.phase-rail-panel,
+.phase-workers-panel,
+.task-detail-panel {
   margin-bottom: 16px;
 }
 
@@ -206,6 +215,15 @@ a {
   align-items: center;
   gap: 16px;
   padding: 18px;
+}
+
+.phase-hero-actions,
+.panel-actions,
+.rail-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .phase-detail-hero h2 {
@@ -268,13 +286,16 @@ a {
 }
 
 .phase-card:hover,
-.phase-card:focus-visible {
+.phase-card:focus-visible,
+.worker-button:hover,
+.worker-button:focus-visible {
   border-color: var(--blue);
   background: rgba(24, 36, 35, 0.98);
   outline: none;
 }
 
-.phase-card:focus-visible {
+.phase-card:focus-visible,
+.worker-button:focus-visible {
   box-shadow:
     0 0 0 3px rgba(115, 199, 242, 0.24),
     var(--shadow),
@@ -283,6 +304,13 @@ a {
 
 .worker-row {
   grid-template-columns: minmax(200px, 1.5fr) repeat(6, minmax(88px, 0.7fr));
+}
+
+.worker-button {
+  width: 100%;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
 }
 
 .task-row {
@@ -308,6 +336,41 @@ a {
 
 .phase-metrics {
   grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.phase-rail {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.rail-tile {
+  min-height: 82px;
+  padding: 12px;
+}
+
+.rail-tile.pending {
+  border-style: dashed;
+  background: rgba(20, 28, 28, 0.88);
+}
+
+.rail-tile span {
+  display: block;
+  color: var(--muted);
+}
+
+.rail-tile strong {
+  display: block;
+  margin-top: 6px;
+  font-size: clamp(1.35rem, 2.2vw, 2rem);
+  line-height: 1;
+}
+
+.rail-tile small {
+  display: block;
+  margin-top: 7px;
+  color: var(--muted);
 }
 
 .transition-grid {
@@ -404,6 +467,7 @@ a {
   .lab-grid,
   .phase-detail-grid,
   .phase-metrics,
+  .phase-rail,
   .transition-grid {
     grid-template-columns: 1fr;
   }

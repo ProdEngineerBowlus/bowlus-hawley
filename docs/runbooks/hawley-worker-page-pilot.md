@@ -201,8 +201,11 @@ giving the shop another active page.
 
 The beta layout is multi-tiered by design. The first screen is the day/line
 bird's-eye view by phase, without a global employee list. Selecting a phase
-opens the drill-in view for that day and phase, including worker performance,
-task rows, efficiency, completion, and transition/review placeholders.
+opens a phase/worker rail view for that day: it shows all workers who worked or
+were assigned in that phase, plus placeholder rail boxes for transition data
+that will come from Hawley's richer utilization ledger. Task rows are one layer
+deeper: use the phase rail to see all phase tasks, or select a worker to see
+that worker's tasks for the phase/day.
 
 Worker pages use the familiar pattern:
 
