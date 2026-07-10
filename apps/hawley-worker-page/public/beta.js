@@ -278,7 +278,7 @@
   }
 
   function taskActualToday(task) {
-    return Number(task.actualTimeOnDateMinutes || 0);
+    return task.completed ? Number(task.actualTimeOnDateMinutes || 0) : 0;
   }
 
   function taskHours(task) {
@@ -560,7 +560,7 @@
         const taskCount = row.taskCount || reportTaskCount;
         const completedTaskCount = row.taskCount ? row.completedTaskCount : reportCompletedTaskCount;
         const assignedHours = row.taskCount ? row.assignedHours : reportEstimatedMinutes / 60;
-        const actualMinutes = row.actualMinutes || reportActualMinutes;
+        const actualMinutes = row.taskCount ? row.actualMinutes : reportActualMinutes;
         const openTaskCount = row.taskCount
           ? row.openTaskCount
           : Math.max(0, reportTaskCount - reportCompletedTaskCount);

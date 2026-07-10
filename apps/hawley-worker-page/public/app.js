@@ -694,20 +694,19 @@
   function renderFreshnessPanel() {
     const syncStatus = state.syncStatus || {};
     const watcher = syncStatus.watcher || {};
-    const workerActualsWatcher = syncStatus.watchers?.workerDailyActuals || {};
+    const nightlyRefresh = syncStatus.watchers?.nightlyRefresh || {};
     const latestRuns = syncStatus.latestRuns || state.latestRuns || {};
     const running = Boolean(watcher.running);
     const intervalMs = Number(watcher.intervalMs || 60000);
-    const workerActualsRunning = Boolean(workerActualsWatcher.running);
-    const workerActualsIntervalMs = Number(workerActualsWatcher.intervalMs || 60000);
+    const nightlyRunning = Boolean(nightlyRefresh.running);
     const watcherTone = running ? "good" : watcher.requested || watcher.enabled ? "warn" : "risk";
-    const workerActualsTone = workerActualsRunning ? "good" : workerActualsWatcher.requested || workerActualsWatcher.enabled ? "warn" : "risk";
+    const nightlyTone = nightlyRunning ? "good" : nightlyRefresh.enabled ? "warn" : "risk";
     const watcherDetail = running
       ? `Every ${formatMinutes(Math.round(intervalMs / 60000))}`
       : watcher.reason || "Not running";
-    const workerActualsDetail = workerActualsRunning
-      ? `Every ${formatMinutes(Math.round(workerActualsIntervalMs / 60000))}`
-      : workerActualsWatcher.reason || "Not running";
+    const nightlyDetail = nightlyRunning
+      ? "Running now"
+      : nightlyRefresh.nextRunAt ? `Next ${formatRelativeTime(nightlyRefresh.nextRunAt)}` : nightlyRefresh.reason || "Not scheduled";
     const refreshedAt = syncStatus.refreshedAt || state.refreshedAt;
 
     return `
@@ -721,12 +720,11 @@
         </div>
         <div class="panel-body freshness-grid">
           ${renderFreshnessMetric("Asana watcher", running ? "Running" : "Off", watcherDetail, watcherTone)}
-          ${renderFreshnessMetric("Worker actuals", workerActualsRunning ? "Running" : "Off", workerActualsDetail, workerActualsTone)}
+          ${renderFreshnessMetric("Nightly HB refresh", nightlyRunning ? "Running" : "Scheduled", nightlyDetail, nightlyTone)}
           ${renderRunFreshness("Asana events", latestRuns.pull_asana_events, 5)}
-          ${renderRunFreshness("Worker actuals", latestRuns.pull_worker_daily_actuals, 5)}
           ${renderRunFreshness("Full Asana", latestRuns.pull_asana, 180)}
           ${renderRunFreshness("DAT mirror", latestRuns.pull_daily_tracker, 60)}
-          ${renderRunFreshness("Legacy Airtable", latestRuns.pull_airtable, 1440)}
+          ${renderRunFreshness("Airtable backfill", latestRuns.backfill_airtable_worker_actuals, 1440)}
         </div>
       </section>
     `;
@@ -928,18 +926,12 @@
   function workerDailyEfficiency(worker, availableMinutes = elapsedScheduledWorkMinutesForDate(state.date)) {
     const scheduledAvailableMinutes = Math.max(0, Number(availableMinutes || 0));
     const loggedMinutes = workerActualLoggedMinutes(worker);
-    const summary = worker.dailyEfficiency || {};
-    const rawSummaryLoggedMinutes = Number(summary.loggedMinutes || 0);
-    const summaryLoggedMinutes = scheduledAvailableMinutes
-      ? Math.min(rawSummaryLoggedMinutes, scheduledAvailableMinutes)
-      : rawSummaryLoggedMinutes;
-    const effectiveLoggedMinutes = Math.max(loggedMinutes, summaryLoggedMinutes);
     const hasWork = Number(worker.assignedHours || 0) > 0 || openTasks(worker.tasks).length || Number(worker.completedTaskCount || 0) > 0;
-    const percent = scheduledAvailableMinutes ? Math.round((effectiveLoggedMinutes / scheduledAvailableMinutes) * 100) : 0;
+    const percent = scheduledAvailableMinutes ? Math.round((loggedMinutes / scheduledAvailableMinutes) * 100) : 0;
     return {
       id: worker.id,
       name: worker.name,
-      loggedMinutes: effectiveLoggedMinutes,
+      loggedMinutes,
       availableMinutes: scheduledAvailableMinutes,
       hasWork,
       percent,
@@ -1261,7 +1253,7 @@
     const canEndSession = managerControlEnabled() && timerSessionOpen;
     const startLabel = timerHasTime ? "Resume timer" : "Start timer";
     const estimateChip = renderEstimateChip(task);
-    const taskActualMinutes = Number(task.actualTimeOnDateMinutes ?? task.actualTimeMinutes ?? 0);
+    const taskActualMinutes = task.completed ? Number(task.actualTimeOnDateMinutes || 0) : 0;
 
     return `
       <article class="task-card${task.completed ? " done" : ""}">
@@ -1553,7 +1545,7 @@
   async function startWorkerTimer(employee, taskId) {
     const activeTask = findActiveTimerTask(taskId);
     if (activeTask) {
-      showToast(`Stop "${activeTask.title}" before starting another task.`);
+      showToast(`Complete "${activeTask.title}" or ask a manager to end that session before starting another task.`);
       return;
     }
 
@@ -1911,21 +1903,10 @@
     return "Watch pace";
   }
 
-  function rawWorkerActualLoggedMinutes(worker) {
-    const taskMinutes = (worker.tasks || []).reduce((sum, task) => {
-      const sourceActual = Number(task.actualTimeOnDateMinutes || 0);
-      const timerActual = task.completed ? 0 : timerElapsedMinutes(getTaskTimer(task));
-      return sum + (task.completed ? sourceActual : Math.max(sourceActual, timerActual));
-    }, 0);
-    const workerMinutes = Math.round(Number(worker.actualTimeLoggedMinutes || Number(worker.actualTimeLoggedHours || worker.actualHours || 0) * 60 || 0));
-
-    return Math.max(taskMinutes, workerMinutes);
-  }
-
   function workerActualLoggedMinutes(worker) {
-    const rawMinutes = rawWorkerActualLoggedMinutes(worker);
-    const availableMinutes = elapsedScheduledWorkMinutesForDate(state.date);
-    return availableMinutes ? Math.min(rawMinutes, availableMinutes) : rawMinutes;
+    return (worker.tasks || []).reduce((sum, task) => (
+      sum + (task.completed ? Number(task.actualTimeOnDateMinutes || 0) : 0)
+    ), 0);
   }
 
   function getWorkerActiveTask(worker) {
@@ -1996,7 +1977,8 @@
 
     return (worker.tasks || []).find((task) => {
       if (task.id === exceptTaskId || task.completed) return false;
-      return Boolean(getTaskTimer(task).startedAt);
+      const timer = getTaskTimer(task);
+      return Boolean(timer.startedAt || timer.accumulatedMinutes);
     });
   }
 

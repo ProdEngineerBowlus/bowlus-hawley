@@ -25,9 +25,10 @@ minutes on today's Hawley row, and leaves the task open. The legacy `Refresh
 tracker` and `Adopt new tasks` buttons remain disabled server-side because
 those belong to the old Daily Assignment Tracker/Airtable write path.
 
-Hawley still does not write to Airtable. The one-minute Airtable
-`Worker Daily Task Actuals` pull is a legacy/readable mirror input and does not
-overwrite Hawley-owned pilot rows with `source_system = 'hawley_worker_live_pilot'`.
+The live Hawley worker app does not read Airtable for worker actuals and does
+not write to Airtable from the web request path. Airtable is downstream legacy
+human-readable output only. Feed it from Hawley with a separate overnight
+backfill/export job after the live day is complete.
 
 ## Read Model
 
@@ -54,21 +55,22 @@ where `project_gid` is the Daily Assignment Tracker project
 assignment rows, for cycle/day comparison, and for parity debugging against the
 current worker app. The worker page must not call the Asana API at runtime.
 
-Daily efficiency also depends on mirrored worker actuals from:
+Worker actuals for the live page come from Hawley-owned rows in:
 
 ```sql
-raw.airtable_worker_daily_actuals
+hb.worker_daily_task_actuals
 ```
 
-Those rows come from Airtable `Worker Daily Task Actuals`. Hawley overlays task
-actuals and daily summary logged minutes from that table so the worker detail
-page does not under-report a person who has same-day WIP or recovered timer
-minutes outside completed source-task time.
+The runtime app filters these rows to `source_system = 'hawley_worker_live_pilot'`
+so legacy Airtable imports cannot change the live Worker Page math.
 
-`Actual today` and the manager `Line daily efficiency` signal must use only
-Hawley's worker actuals ledger (`hb.worker_daily_task_actuals`). Asana task
-`actual_time_minutes` is cumulative over the life of the task, so it should stay
-available as total task context but must not be counted as same-day logged time.
+`Actual today` and the manager `Line utilization` signal must use only completed
+same-day task actuals from Hawley's worker actuals ledger
+(`hb.worker_daily_task_actuals`). Open or running WIP timer minutes may appear on
+the task card as timer state, but they must not roll into aggregate `Actual
+today`. Asana task `actual_time_minutes` is cumulative over the life of the task,
+so it should stay available as total task context but must not be counted as
+same-day logged time.
 Likewise, `Asana Posted Minutes` proves writeback but is not a same-day
 productive-time source for live utilization displays. The production UI should
 not allow live utilization above the elapsed available-time denominator; if raw
@@ -138,22 +140,15 @@ npm run pg:pull:airtable
 npm run pg:normalize
 ```
 
-Refresh only the fast worker logged-time ledger:
+Backfill Hawley worker actuals into Airtable only as a separate overnight export:
 
 ```powershell
-npm run pg:pull:worker-actuals
+npm run pg:backfill:airtable-worker-actuals -- --apply
 ```
 
-This pulls Airtable `Worker Daily Task Actuals` into:
-
-```sql
-raw.airtable_worker_daily_actuals
-hb.worker_daily_task_actuals
-```
-
-By default it refreshes a recent Work Date window, not the full Airtable mirror.
-It is read-only against Airtable and does not write to Airtable, Asana, or the
-current shop worker app.
+That command is dry-run by default. It writes only when
+`HAWLEY_ALLOW_SOURCE_WRITES=true`, `HAWLEY_DRY_RUN=false`, and `--apply` are all
+present. Do not run this as part of the live web service.
 
 The manager `C# day` gauge is intentionally a task-completion gauge. Its percent
 must be `completedTaskCount / taskCount`, matching the adjacent `X/Y tasks
@@ -273,10 +268,10 @@ read-only pilot error because tracker rebuild/adoption belongs to the old Daily
 Assignment Tracker/Airtable write path.
 
 `/api/sync-status` reports HB freshness from Postgres only: the in-process
-Asana event watcher state, the in-process Worker Daily Task Actuals watcher
-state, and latest `sync.run_log` rows. It is the fastest way to confirm that the
-worker page is reading a fresh Hawley Brain instead of silently leaning on
-Airtable or live Asana.
+Asana event watcher state, the nightly HB refresh scheduler, the latest
+Airtable backfill run, and latest `sync.run_log` rows. It is the fastest way to
+confirm that the worker page is reading a fresh Hawley Brain instead of silently
+leaning on Airtable or live Asana.
 
 ## Configuration
 
@@ -286,9 +281,7 @@ HAWLEY_WORKER_PORT=5273
 HAWLEY_DAILY_TRACKER_PROJECT_GID=1214157321063250
 HAWLEY_WORKER_INCLUDE_NO_WORK=false
 HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB=false
-HAWLEY_WORKER_ACTUALS_INTERVAL_MS=60000
-HAWLEY_WORKER_ACTUALS_WINDOW_DAYS=14
-HAWLEY_WORKER_ACTUALS_FUTURE_DAYS=2
+HAWLEY_AIRTABLE_BACKFILL_WINDOW_DAYS=2
 ```
 
 The app uses the same Postgres environment variables as the Hawley sync scripts:
@@ -330,11 +323,11 @@ npm run pg:pull:daily-tracker
 ```
 
 If the DAT project has no snapshot for the selected date, the page falls back to
-mirrored `Task Instances Rev1`. In that fallback mode, a fresh assignment in
-Airtable will not show until `pg:pull:airtable` and `pg:normalize` have run.
+HB assignment rows. A fresh assignment should flow Asana -> Hawley/Postgres
+through the Asana pull/event path and HB rebuild, not through Airtable.
 
-If task lists match but daily efficiency is low, check that
-`raw.airtable_worker_daily_actuals` has current rows for the selected `Work Date`.
-The current Daily Worker App can show higher efficiency than task-only Asana
-minutes because it recovers work from local worker logs/timers and writes those
-summaries into `Worker Daily Task Actuals`.
+If task lists match but `Actual today` is low, check Hawley's own
+`hb.worker_daily_task_actuals` rows for the selected `Work Date` and
+`source_system = 'hawley_worker_live_pilot'`. Do not use
+`raw.airtable_worker_daily_actuals` to fix the live Worker Page; that table is
+legacy/audit input only.

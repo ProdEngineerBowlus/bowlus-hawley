@@ -210,10 +210,7 @@ function shouldStartAsanaEventWatcher() {
 }
 
 function shouldStartWorkerActualsWatcher() {
-  if (process.env.HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB !== undefined) {
-    return booleanEnv("HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB", false);
-  }
-  return process.env.NODE_ENV === "production";
+  return false;
 }
 
 function shouldStartNightlyRefreshScheduler() {
@@ -1652,7 +1649,9 @@ function recalculateSnapshotWorkerCompletion(worker) {
   worker.completedTaskCount = completedTasks.length;
   worker.completedHours = completedTasks.reduce((sum, task) => sum + Number(task.assignedHours || 0), 0);
   worker.remainingHours = Math.max(0, Number(worker.assignedHours || 0) - worker.completedHours);
-  worker.actualTimeLoggedMinutes = (worker.tasks || []).reduce((sum, task) => sum + Number(task.actualTimeOnDateMinutes || 0), 0);
+  worker.actualTimeLoggedMinutes = (worker.tasks || []).reduce((sum, task) => (
+    sum + (task.completed ? Number(task.actualTimeOnDateMinutes || 0) : 0)
+  ), 0);
   worker.actualTimeLoggedHours = round(worker.actualTimeLoggedMinutes / 60);
   worker.actualHours = worker.actualTimeLoggedHours;
   worker.status = worker.taskCount === 0 ? "No Work" : worker.remainingHours > 0 ? "Open" : "Complete";
@@ -1755,7 +1754,6 @@ function workerIdForDailyActual(row) {
 function applyWorkerDailyActualRows(workers, actualRows) {
   const workerById = new Map((workers || []).map(worker => [worker.id, worker]));
   const workerByName = new Map((workers || []).map(worker => [slugify(worker.name), worker]));
-  const summaryMinutesByWorker = new Map();
 
   for (const row of actualRows || []) {
     const workerId = workerIdForDailyActual(row);
@@ -1763,15 +1761,6 @@ function applyWorkerDailyActualRows(workers, actualRows) {
     if (!worker) continue;
 
     if (row.dailySummary || row.taskId === "__daily__") {
-      if (row.dailyLoggedMinutes > 0) {
-        summaryMinutesByWorker.set(worker.id, Math.max(summaryMinutesByWorker.get(worker.id) || 0, row.dailyLoggedMinutes));
-      }
-      worker.dailyEfficiency = {
-        loggedMinutes: row.dailyLoggedMinutes,
-        availableMinutes: row.dailyAvailableMinutes,
-        percent: row.dailyEfficiencyPercent,
-        source: row.source || "Worker Daily Task Actuals"
-      };
       continue;
     }
 
@@ -1825,12 +1814,6 @@ function applyWorkerDailyActualRows(workers, actualRows) {
 
   for (const worker of workers || []) {
     recalculateSnapshotWorkerCompletion(worker);
-    const summaryMinutes = summaryMinutesByWorker.get(worker.id) || 0;
-    if (summaryMinutes > 0) {
-      worker.actualTimeLoggedMinutes = Math.max(Number(worker.actualTimeLoggedMinutes || 0), summaryMinutes);
-      worker.actualTimeLoggedHours = round(worker.actualTimeLoggedMinutes / 60);
-      worker.actualHours = worker.actualTimeLoggedHours;
-    }
   }
 }
 
@@ -2005,7 +1988,7 @@ async function latestImportRuns() {
       records_written,
       error_count
     from sync.run_log
-    where job_name in ('pull_airtable', 'pull_worker_daily_actuals', 'pull_asana', 'pull_asana_events', 'pull_daily_tracker')
+    where job_name in ('pull_airtable', 'pull_worker_daily_actuals', 'pull_asana', 'pull_asana_events', 'pull_daily_tracker', 'backfill_airtable_worker_actuals')
     order by job_name, id desc
   `);
 
@@ -2197,22 +2180,19 @@ async function workerDailyActualRows(date) {
         ) as fields_json
       from hb.worker_daily_task_actuals
       where work_date = $1::date
+        and source_system = $2
       order by
         worker_name nulls last,
         task_name nulls last
     `,
-    [date]
+    [date, LIVE_WORKER_SOURCE]
   );
 
   return result.rows.map(normalizeWorkerDailyActual);
 }
 
 function actualLoggedMinutesFromRaw(row) {
-  return Math.max(
-    Number(row.actual_minutes || 0),
-    Number(row.timer_minutes || 0),
-    Number(row.asana_posted_minutes || 0)
-  );
+  return row.completed ? Number(row.actual_minutes || 0) : 0;
 }
 
 function summarizeTaskActualHistory(rows) {
@@ -2274,12 +2254,13 @@ async function attachWorkerTaskActualHistory(workers) {
       from hb.worker_daily_task_actuals
       where asana_task_gid = any($1::text[])
         and not daily_summary
+        and source_system = $2
       order by
         asana_task_gid,
         work_date,
         worker_name nulls last
     `,
-    [taskIds]
+    [taskIds, LIVE_WORKER_SOURCE]
   );
 
   const byTask = new Map();
@@ -2461,6 +2442,7 @@ function liveTimerFromRow(row) {
   return {
     ledgerKey: row.ledger_key || "",
     taskId: row.asana_task_gid || fields["Asana Task GID"] || "",
+    taskName: row.task_name || fields["Task Name"] || "",
     startedAt: fields["Timer Started At"] || "",
     accumulatedMinutes: Number(row.timer_minutes || fields["Timer Minutes"] || 0),
     actualMinutes: Number(row.actual_minutes || fields["Actual Minutes"] || 0),
@@ -2514,6 +2496,7 @@ async function readLiveActualRow(client, ledgerKey) {
       select
         ledger_key,
         asana_task_gid,
+        task_name,
         actual_minutes,
         timer_minutes,
         asana_posted_minutes,
@@ -2528,12 +2511,13 @@ async function readLiveActualRow(client, ledgerKey) {
   return liveTimerFromRow(result.rows[0]);
 }
 
-async function runningLiveTimerForWorker(client, workerId, date, exceptTaskId = "") {
+async function blockingLiveTimerForWorker(client, workerId, date, exceptTaskId = "") {
   const result = await client.query(
     `
       select
         ledger_key,
         asana_task_gid,
+        task_name,
         actual_minutes,
         timer_minutes,
         asana_posted_minutes,
@@ -2542,14 +2526,37 @@ async function runningLiveTimerForWorker(client, workerId, date, exceptTaskId = 
       from hb.worker_daily_task_actuals
       where worker_key = $1
         and work_date = $2::date
-        and coalesce(fields_json ->> 'Timer Started At', '') <> ''
         and coalesce(asana_task_gid, '') <> $3
-      order by source_synced_at desc nulls last, worker_daily_actual_id desc
+        and coalesce(completed, false) = false
+        and source_system = $4
+        and (
+          coalesce(fields_json ->> 'Timer Started At', '') <> ''
+          or coalesce(timer_minutes, 0) > 0
+        )
+      order by
+        case when coalesce(fields_json ->> 'Timer Started At', '') <> '' then 0 else 1 end,
+        source_synced_at desc nulls last,
+        worker_daily_actual_id desc
       limit 1
     `,
-    [workerId, date, String(exceptTaskId || "")]
+    [workerId, date, String(exceptTaskId || ""), LIVE_WORKER_SOURCE]
   );
   return liveTimerFromRow(result.rows[0]);
+}
+
+async function acquireWorkerDayTimerLock(client, workerId, date) {
+  const key = `hawley-worker-timer::${workerId}::${date}`;
+  await client.query("select pg_advisory_lock(hashtext($1))", [key]);
+  return key;
+}
+
+async function releaseWorkerDayTimerLock(client, key) {
+  if (!key) return;
+  try {
+    await client.query("select pg_advisory_unlock(hashtext($1))", [key]);
+  } catch (error) {
+    console.warn(`Could not release worker timer lock ${key}: ${error.message}`);
+  }
 }
 
 function liveActualFields(worker, task, date, timer, options = {}) {
@@ -3177,8 +3184,10 @@ async function handleWorkerTaskAction(req) {
   const nowIso = now.toISOString();
   const ledgerKey = ledgerKeyForWorkerTask(worker.id, date, task.id);
   const client = await writePool.connect();
+  let workerTimerLockKey = "";
 
   try {
+    workerTimerLockKey = await acquireWorkerDayTimerLock(client, worker.id, date);
     const current = await readLiveActualRow(client, ledgerKey);
 
     if (action === "start") {
@@ -3197,11 +3206,12 @@ async function handleWorkerTaskAction(req) {
         };
       }
 
-      const blocking = await runningLiveTimerForWorker(client, worker.id, date, task.id);
+      const blocking = await blockingLiveTimerForWorker(client, worker.id, date, task.id);
       if (blocking) {
-        throw actionError("Stop the running timer before starting another task.", 409, {
+        throw actionError("Complete the current task, or have a manager use End Session, before starting another task.", 409, {
           code: "TIMER_SESSION_BLOCKED",
-          blockingTaskId: blocking.taskId
+          blockingTaskId: blocking.taskId,
+          blockingTaskName: blocking.taskName || ""
         });
       }
 
@@ -3443,6 +3453,7 @@ async function handleWorkerTaskAction(req) {
       completed: true
     };
   } finally {
+    await releaseWorkerDayTimerLock(client, workerTimerLockKey);
     client.release();
   }
 }

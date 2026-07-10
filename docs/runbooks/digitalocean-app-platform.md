@@ -43,6 +43,7 @@ HAWLEY_ASANA_PORTFOLIO_SCOPE=both
 HAWLEY_ASANA_EVENT_WATCH_IN_WEB=true
 HAWLEY_ASANA_EVENT_INTERVAL_MS=60000
 HAWLEY_ASANA_EVENT_BUILD_HB=true
+HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB=false
 HAWLEY_ASANA_INCLUDE_SUBTASKS=true
 HAWLEY_ASANA_SUBTASK_DEPTH=1
 HAWLEY_ASANA_COMPLETED_SINCE=1970-01-01T00:00:00.000Z
@@ -165,31 +166,18 @@ It reads Asana event streams for the imported portfolio projects, refreshes
 changed task rows in Hawley/Postgres, and rebuilds HB when task changes are
 found. It does not write to Asana or Airtable.
 
-The web service also starts the fast Worker Daily Task Actuals watcher in
-production. It is read-only against Airtable and keeps Hawley's logged-time
-overlay fresher without running the full Airtable bootstrap mirror every minute.
-
-That watcher runs:
-
-```powershell
-node ./apps/postgres-sync/src/pull-worker-daily-actuals.js --loop --interval-ms 60000
-```
-
-It pulls only Airtable `Worker Daily Task Actuals` rows in a recent Work Date
-window into `raw.airtable_worker_daily_actuals` and
-`hb.worker_daily_task_actuals`. This is the bridge path while the current shop
-worker app still writes timer actuals to Airtable first.
+The web service must not start the old Worker Daily Task Actuals Airtable
+puller. Hawley Worker live pages read and write Postgres only. Worker actuals
+on screen come from Hawley-owned rows in `hb.worker_daily_task_actuals` with
+`source_system = 'hawley_worker_live_pilot'`.
 
 Startup rules:
 
 - `NODE_ENV=production` starts the watcher by default.
 - `HAWLEY_ASANA_EVENT_WATCH_IN_WEB=false` disables it.
 - `HAWLEY_ASANA_EVENT_WATCH_IN_WEB=true` enables it explicitly.
-- `HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB=false` disables the Worker Daily Task
-  Actuals watcher.
-- `HAWLEY_WORKER_ACTUALS_INTERVAL_MS=60000` sets its one-minute cadence.
-- `HAWLEY_WORKER_ACTUALS_WINDOW_DAYS=14` limits the past Work Date window.
-- `HAWLEY_WORKER_ACTUALS_FUTURE_DAYS=2` keeps near-future rows in the mirror.
+- `HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB=false` is retained as a safety/env marker;
+  the web service ignores this old Airtable puller path.
 - `ASANA_PAT` and `HAWLEY_SYNC_DATABASE_URL` or
   `HAWLEY_MIGRATION_DATABASE_URL` must be present.
 
@@ -201,8 +189,8 @@ GET /api/sync-status
 ```
 
 `/api/sync-status` returns watcher pid/running states plus the latest
-`sync.run_log` entries for Airtable, Worker Daily Task Actuals, Asana, Asana
-events, and Daily Assignment Tracker mirroring. The manager dashboard also shows
+`sync.run_log` entries for Asana, Asana events, Daily Assignment Tracker
+mirroring, and the overnight Airtable backfill. The manager dashboard also shows
 these signals in the `HB freshness` panel.
 
 Later, after cost/ownership is confirmed, the same watcher can move to a
@@ -212,12 +200,25 @@ separate App Platform Worker component with:
 npm run pg:watch:asana-events
 ```
 
-A nightly legacy Airtable refresh can be added as an App Platform scheduled job
-running:
+A nightly legacy Airtable bootstrap pull can be run separately when historical
+support-table mirrors need refreshing, but it is not part of Worker Page live
+truth:
 
 ```powershell
 npm run pg:refresh-legacy-airtable-bootstrap
 ```
+
+The intended Airtable direction for worker actuals is the opposite: Hawley feeds
+the legacy Airtable `Worker Daily Task Actuals` table overnight for human
+readability. Use a separate scheduled job with explicit write gates:
+
+```powershell
+npm run pg:backfill:airtable-worker-actuals -- --apply
+```
+
+That job writes only when `HAWLEY_ALLOW_SOURCE_WRITES=true` and
+`HAWLEY_DRY_RUN=false`. The web service should keep
+`HAWLEY_ALLOW_SOURCE_WRITES=false` and `HAWLEY_DRY_RUN=true`.
 
 Do not add the Worker component or scheduled job without explicit approval,
 because either can change the App Platform bill or resource layout.
@@ -281,4 +282,4 @@ GET /api/health
 
 Expected after migration/load: `ok: true` plus row counts for the worker read
 model, Daily Assignment Tracker mirror, workforce mirror, HB actuals, and the
-current Asana event and Worker Daily Task Actuals watcher states.
+current Asana event watcher and nightly HB refresh states.
