@@ -187,19 +187,19 @@ Default URL:
 http://127.0.0.1:5273
 ```
 
-Read-only beta/debug page:
+Read-only line view:
 
 ```text
 http://127.0.0.1:5273/beta.html
 ```
 
-The beta page is intentionally not a worker control surface. It only uses GET
-requests against existing Hawley APIs and does not expose Start, Stop, Complete,
-End Session, Refresh tracker, or Adopt tasks. Use it for diagnostics, phase
-summary prototypes, freshness checks, and side-by-side report testing without
-giving the shop another active page.
+The line view is intentionally not a worker control surface. It is available
+from the manager topbar and only uses GET requests against existing Hawley APIs.
+It does not expose Start, Stop, Complete, End Session, Refresh tracker, or Adopt
+tasks. Use it for diagnostics, phase summaries, freshness checks, and
+side-by-side report testing without giving the shop another active page.
 
-The beta layout is multi-tiered by design. The first screen is the day/line
+The line-view layout is multi-tiered by design. The first screen is the day/line
 bird's-eye view by phase, without a global employee list. Selecting a phase
 opens a phase/worker rail view for that day: it shows all workers who worked or
 were assigned in that phase, plus placeholder rail boxes for transition data
@@ -207,7 +207,7 @@ that will come from Hawley's richer utilization ledger. Task rows are one layer
 deeper: use the phase rail to see all phase tasks, or select a worker to see
 that worker's tasks for the phase/day.
 
-The beta phase overview uses canonical operational phase buckets for known
+The line-view phase overview uses canonical operational phase buckets for known
 nomenclature drift. For example, `FAB-B` rolls into `FAB 1-3`, and `Frame-A`
 rolls into `Frames / Phase A`. The original task labels remain in the payload
 for debugging, but the phase list should show the canonical production bucket.
@@ -220,7 +220,7 @@ selected work date only. `Worker total` sums Hawley's
 `Team total` sums all recorded workers on the same Asana task across recorded
 dates. The full task estimate is shown as `Task estimate`; it should not be
 treated as a same-day efficiency denominator for multi-day or team tasks. In the
-beta task list, rows are visually marked as team tasks only when Hawley's
+line-view task list, rows are visually marked as team tasks only when Hawley's
 recorded actuals show more than one worker on that task; solo rows remain
 unmarked and use `Task total` instead of `Team total`.
 

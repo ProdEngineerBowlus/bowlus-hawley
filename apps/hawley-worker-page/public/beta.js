@@ -157,7 +157,7 @@
       }
       updateUrl();
     } catch (error) {
-      state.error = error.message || "Could not load beta diagnostics.";
+      state.error = error.message || "Could not load line view.";
     } finally {
       state.loading = false;
       render();
@@ -439,8 +439,8 @@
         <div class="brand">
           <div class="brand-mark">HB</div>
           <div>
-            <h1>Hawley Beta Lab</h1>
-            <p>Read-only diagnostics and report prototypes</p>
+            <h1>Hawley Line View</h1>
+            <p>Read-only production line reporting</p>
           </div>
         </div>
         <div class="top-actions">
@@ -465,7 +465,7 @@
         ${metric("Actual today", formatMinutes(signals.actualTimeLoggedMinutes || 0), "from worker actual ledger")}
         ${metric("Sync", syncRuns.pull_asana_events?.status || state.sync?.watcher?.lastStatus || "unknown", formatDateTime(syncRuns.pull_asana_events?.ended_at || state.sync?.refreshedAt))}
         <div class="metric">
-          <span>Beta safety</span>
+          <span>Write safety</span>
           <strong>${statusPill("GET only", "ok")}</strong>
           <small>${escapeHtml(writeMode)}</small>
         </div>
@@ -683,7 +683,7 @@
   function renderNotice() {
     return `
       <div class="notice">
-        <strong>Beta page is intentionally not active.</strong>
+        <strong>Read-only line view.</strong>
         This page only uses GET requests. It does not expose Start, Stop, Complete, End Session, Refresh tracker, or Adopt tasks.
       </div>
     `;
@@ -783,7 +783,7 @@
     }
 
     if (state.loading && !state.assignments) {
-      return `<div class="empty">Loading Hawley beta diagnostics...</div>`;
+      return `<div class="empty">Loading Hawley line view...</div>`;
     }
 
     return state.selectedPhase ? renderPhaseDetail() : renderDayView();

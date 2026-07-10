@@ -433,6 +433,7 @@
             locked
               ? ""
               : `<a class="btn ghost" href="${escapeAttr(state.project.url)}" target="_blank" rel="noreferrer">${icons.open}<span>Asana project</span></a>
+                 <a class="btn ghost" href="${escapeAttr(lineViewUrl())}">${icons.open}<span>Line view</span></a>
                  <button class="btn ghost" type="button" data-action="refresh">${icons.refresh}<span>Reload</span></button>
                  ${
                    worker
@@ -2015,6 +2016,12 @@
     if (date && date !== today) {
       url.searchParams.set("date", date);
     }
+    return `${url.pathname}${url.search}`;
+  }
+
+  function lineViewUrl() {
+    const url = new URL("/beta.html", window.location.origin);
+    url.searchParams.set("date", state.date);
     return `${url.pathname}${url.search}`;
   }
 
