@@ -317,6 +317,36 @@ a {
   grid-template-columns: minmax(260px, 1.55fr) repeat(5, minmax(92px, 0.65fr));
 }
 
+.task-title-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.task-title-line strong {
+  min-width: 0;
+}
+
+.team-task .task-title-line strong {
+  color: var(--primary);
+}
+
+.team-badge {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  display: inline-grid;
+  place-items: center;
+  border: 2px solid var(--primary);
+  border-radius: 50%;
+  color: var(--primary);
+  background: rgba(50, 196, 141, 0.08);
+  font-size: 0.86rem;
+  font-weight: 900;
+}
+
 .row-main strong {
   display: block;
 }

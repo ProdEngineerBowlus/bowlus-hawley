@@ -450,25 +450,24 @@
   function renderPhaseTasks(phaseKey, workerKey = "") {
     const rows = phaseTaskRows(phaseKey, workerKey);
     if (!rows.length) return `<div class="empty">No task detail is attached to this phase for ${escapeHtml(state.date)}.</div>`;
-    return rows.map((row) => `
-      <div class="task-row">
+    return rows.map((row) => {
+      const isTeamTask = row.teamWorkerCount > 1;
+      return `
+      <div class="task-row ${isTeamTask ? "team-task" : ""}">
         <div class="row-main">
-          <strong>${escapeHtml(row.taskName)}</strong>
-          <small>${escapeHtml([
-            row.workerName,
-            row.vin ? `VIN ${row.vin}` : "",
-            row.workerHistoryRange ? `worker history ${row.workerHistoryRange}` : "",
-            row.teamWorkerCount > 1 ? `${formatNumber(row.teamWorkerCount)} workers on task` : "",
-            row.sourceTaskGid
-          ].filter(Boolean).join(" - "))}</small>
+          <div class="task-title-line">
+            <strong>${escapeHtml(row.taskName)}</strong>
+            ${isTeamTask ? `<span class="team-badge" title="${escapeHtml(`${formatNumber(row.teamWorkerCount)} workers on task`)}">${escapeHtml(formatNumber(row.teamWorkerCount))}</span>` : ""}
+          </div>
         </div>
         <div class="row-stat"><span>Actual today</span><strong>${formatMinutes(row.actualMinutes)}</strong></div>
         <div class="row-stat"><span>Worker total</span><strong>${formatMinutes(row.workerHistoryMinutes)}</strong></div>
-        <div class="row-stat"><span>Team total</span><strong>${formatMinutes(row.teamHistoryMinutes)}</strong></div>
+        <div class="row-stat"><span>${isTeamTask ? "Team total" : "Task total"}</span><strong>${formatMinutes(row.teamHistoryMinutes)}</strong></div>
         <div class="row-stat"><span>Task estimate</span><strong>${formatHours(row.assignedHours)}</strong></div>
         <div class="row-stat"><span>Status</span><strong>${row.completed ? "Complete" : "Open"}</strong></div>
       </div>
-    `).join("");
+    `;
+    }).join("");
   }
 
   function renderTransitionPanel(phaseKey, workerKey = "") {
