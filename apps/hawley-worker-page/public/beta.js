@@ -142,7 +142,7 @@
     const workersInScope = Math.max(1, Number(workerCount || 0));
     const denominator = elapsedWorkerCapacityMinutes() * workersInScope;
     if (!denominator) return null;
-    return Math.min(100, Math.round((Number(actualMinutes || 0) / denominator) * 100));
+    return Math.round((Number(actualMinutes || 0) / denominator) * 100);
   }
 
   async function fetchJson(url) {
@@ -278,7 +278,32 @@
   }
 
   function taskActualToday(task) {
+    return taskLoggedToday(task) + taskWipToday(task);
+  }
+
+  function taskLoggedToday(task) {
     return task.completed ? Number(task.actualTimeOnDateMinutes || 0) : 0;
+  }
+
+  function taskWipToday(task) {
+    if (task.completed) return 0;
+    return Math.max(Number(task.actualTimeOnDateMinutes || 0), taskTimerMinutes(task));
+  }
+
+  function taskTimerMinutes(task) {
+    const accumulated = Number(task.timerAccumulatedMinutes || task.timerMinutes || 0);
+    const startedAt = task.timerStartedAt || "";
+    if (!startedAt) return accumulated;
+    const started = new Date(startedAt);
+    if (Number.isNaN(started.getTime())) return accumulated;
+    return accumulated + Math.max(1, Math.round((Date.now() - started.getTime()) / 60000));
+  }
+
+  function actualSplitLabel(actual) {
+    const loggedMinutes = Number(actual?.loggedMinutes || 0);
+    const wipMinutes = Number(actual?.wipMinutes || 0);
+    if (wipMinutes <= 0) return `${formatMinutes(loggedMinutes)} logged`;
+    return `${formatMinutes(loggedMinutes)} logged + ${formatMinutes(wipMinutes)} WIP`;
   }
 
   function taskHours(task) {
@@ -503,6 +528,8 @@
             assignedHours: 0,
             completedHours: 0,
             actualMinutes: 0,
+            loggedMinutes: 0,
+            wipMinutes: 0,
             workerIds: new Set(),
             openTaskCount: 0,
           });
@@ -515,6 +542,8 @@
         row.assignedHours += taskHours(task);
         row.completedHours += task.completed ? taskHours(task) : 0;
         row.actualMinutes += taskActualToday(task);
+        row.loggedMinutes += taskLoggedToday(task);
+        row.wipMinutes += taskWipToday(task);
         row.openTaskCount += task.completed ? 0 : 1;
         row.workerIds.add(worker.id || worker.email || worker.name);
       }
@@ -538,6 +567,8 @@
           assignedHours: Number(reportPhase.totalEstimatedMinutes || 0) / 60,
           completedHours: 0,
           actualMinutes: Number(reportPhase.totalActualTaskMinutes || 0),
+          loggedMinutes: Number(reportPhase.totalActualTaskMinutes || 0),
+          wipMinutes: 0,
           workerIds: new Set(),
           openTaskCount: Math.max(0, Number(reportPhase.assignedTaskCount || 0) - Number(reportPhase.completedTaskCount || 0)),
         });
@@ -561,6 +592,8 @@
         const completedTaskCount = row.taskCount ? row.completedTaskCount : reportCompletedTaskCount;
         const assignedHours = row.taskCount ? row.assignedHours : reportEstimatedMinutes / 60;
         const actualMinutes = row.taskCount ? row.actualMinutes : reportActualMinutes;
+        const loggedMinutes = row.taskCount ? row.loggedMinutes : reportActualMinutes;
+        const wipMinutes = row.taskCount ? row.wipMinutes : 0;
         const openTaskCount = row.taskCount
           ? row.openTaskCount
           : Math.max(0, reportTaskCount - reportCompletedTaskCount);
@@ -579,6 +612,8 @@
           completedTaskCount,
           assignedHours,
           actualMinutes,
+          loggedMinutes,
+          wipMinutes,
           openTaskCount,
           workerCount,
           rawPhaseNames: Array.from(row.rawPhaseNames).sort(),
@@ -607,6 +642,8 @@
     if (!rows.length) {
       const workerCount = Number(signals.workersWithWork || signals.workerCount || workers().length || 0);
       const actualMinutes = Number(signals.actualTimeLoggedMinutes || 0);
+      const loggedMinutes = Number(signals.actualTimeCompletedMinutes || actualMinutes);
+      const wipMinutes = Number(signals.actualTimeWipMinutes || 0);
       return {
         assignedHours: Number(line.assignedHours || 0),
         completedHours: Number(line.completedHours || 0),
@@ -615,6 +652,8 @@
         completedTaskCount: Number(line.completedTaskCount || 0),
         openTaskCount: Number(signals.openTaskCount || signals.openTasks || 0),
         actualMinutes,
+        loggedMinutes,
+        wipMinutes,
         workerCount,
         utilizationPercent: utilizationPercent(actualMinutes, workerCount || 1),
       };
@@ -626,6 +665,8 @@
     const completedTaskCount = rows.reduce((sum, row) => sum + Number(row.completedTaskCount || 0), 0);
     const openTaskCount = rows.reduce((sum, row) => sum + Number(row.openTaskCount || 0), 0);
     const actualMinutes = rows.reduce((sum, row) => sum + Number(row.actualMinutes || 0), 0);
+    const loggedMinutes = rows.reduce((sum, row) => sum + Number(row.loggedMinutes || 0), 0);
+    const wipMinutes = rows.reduce((sum, row) => sum + Number(row.wipMinutes || 0), 0);
     const workerCount = Number(signals.workersWithWork || 0) || new Set(
       workers()
         .filter((worker) => Number(worker.actualTimeLoggedMinutes || 0) > 0 || (worker.tasks || []).length > 0)
@@ -641,6 +682,8 @@
       completedTaskCount,
       openTaskCount,
       actualMinutes,
+      loggedMinutes,
+      wipMinutes,
       workerCount,
       utilizationPercent: utilizationPercent(actualMinutes, workerCount || 1),
     };
@@ -664,6 +707,8 @@
       .map((worker) => {
         const tasks = tasksForWorker(worker, phaseKey);
         const actualMinutes = tasks.reduce((sum, task) => sum + taskActualToday(task), 0);
+        const loggedMinutes = tasks.reduce((sum, task) => sum + taskLoggedToday(task), 0);
+        const wipMinutes = tasks.reduce((sum, task) => sum + taskWipToday(task), 0);
         const assignedHours = tasks.reduce((sum, task) => sum + taskHours(task), 0);
         const completedTaskCount = tasks.filter((task) => task.completed).length;
         const completedHours = tasks.reduce((sum, task) => sum + (task.completed ? taskHours(task) : 0), 0);
@@ -680,6 +725,8 @@
           assignedHours,
           completedHours,
           actualMinutes,
+          loggedMinutes,
+          wipMinutes,
           completionPercent: tasks.length ? Math.round((completedTaskCount / tasks.length) * 100) : 0,
           efficiencyPercent: taskPacePercent,
           taskPacePercent,
@@ -699,6 +746,8 @@
       for (const task of tasksForWorker(worker, phaseKey)) {
         const assignedHours = taskHours(task);
         const actualMinutes = taskActualToday(task);
+        const loggedMinutes = taskLoggedToday(task);
+        const wipMinutes = taskWipToday(task);
         rows.push({
           workerName: worker.name || worker.email || "Unknown worker",
           taskName: task.name || task.taskName || task.title || "Untitled task",
@@ -706,6 +755,8 @@
           vin: task.vin || task.vinNumber || task.trailerVin || "",
           assignedHours,
           actualMinutes,
+          loggedMinutes,
+          wipMinutes,
           completed: Boolean(task.completed),
           workerHistoryMinutes: taskWorkerHistoryMinutes(task),
           teamHistoryMinutes: taskTeamHistoryMinutes(task),
@@ -727,6 +778,8 @@
     const completedTaskCount = rows.filter((row) => row.completed).length;
     const assignedHours = rows.reduce((sum, row) => sum + row.assignedHours, 0);
     const actualMinutes = rows.reduce((sum, row) => sum + row.actualMinutes, 0);
+    const loggedMinutes = rows.reduce((sum, row) => sum + row.loggedMinutes, 0);
+    const wipMinutes = rows.reduce((sum, row) => sum + row.wipMinutes, 0);
     const workerHistoryMinutes = rows.reduce((sum, row) => sum + row.workerHistoryMinutes, 0);
     const teamHistoryByTask = new Map();
     for (const row of rows) {
@@ -740,6 +793,8 @@
       openTaskCount: rows.length - completedTaskCount,
       assignedHours,
       actualMinutes,
+      loggedMinutes,
+      wipMinutes,
       workerHistoryMinutes,
       teamHistoryMinutes,
       workerCount: workerNames.size,
@@ -786,12 +841,13 @@
     const syncRuns = state.sync?.latestRuns || {};
     const writeMode = state.auth?.workerWritesEnabled ? "Live writes enabled on main app" : "Main app read-only";
     const visibleLine = lineViewMetrics();
+    const lineSplit = actualSplitLabel(visibleLine);
 
     return `
       <section class="status-strip">
         ${metric("Cycle", line.cycle || "Current", `${formatNumber(visibleLine.completedTaskCount)}/${formatNumber(visibleLine.taskCount)} tasks complete`)}
         ${metric("Assigned", formatHours(visibleLine.assignedHours), `${formatHours(visibleLine.remainingHours)} remaining`)}
-        ${metric("Actual today", formatMinutes(visibleLine.actualMinutes), "from worker actual ledger")}
+        ${metric("Actual today", formatMinutes(visibleLine.actualMinutes), lineSplit)}
         ${metric("Sync", syncRuns.pull_asana_events?.status || state.sync?.watcher?.lastStatus || "unknown", formatDateTime(syncRuns.pull_asana_events?.ended_at || state.sync?.refreshedAt))}
         <div class="metric">
           <span>Write safety</span>
@@ -800,7 +856,7 @@
         </div>
         ${metric("Workers", formatNumber(signals.workerCount || workers().length), `${formatNumber(signals.workersWithWork || 0)} with work`)}
         ${metric("Open tasks", formatNumber(visibleLine.openTaskCount), "visible line rows")}
-        ${metric("Line utilization", formatPercent(visibleLine.utilizationPercent), `${formatNumber(visibleLine.workerCount)} workers elapsed`)}
+        ${metric("Line utilization", formatPercent(visibleLine.utilizationPercent), `${formatNumber(visibleLine.workerCount)} workers elapsed - ${lineSplit}`)}
       </section>
     `;
   }
@@ -814,11 +870,11 @@
           <strong>${escapeHtml(row.phase)}</strong>
           <small>${formatNumber(row.workerCount)} workers active${row.rawPhaseNames.length > 1 ? ` - ${formatNumber(row.rawPhaseNames.length)} labels merged` : ""}</small>
         </div>
-        <div class="row-stat"><span>Actual</span><strong>${formatMinutes(row.actualMinutes)}</strong></div>
+        <div class="row-stat"><span>Actual</span><strong>${formatMinutes(row.actualMinutes)}</strong><small>${escapeHtml(actualSplitLabel(row))}</small></div>
         <div class="row-stat"><span>Assigned</span><strong>${formatHours(row.assignedHours)}</strong></div>
         <div class="row-stat"><span>Tasks</span><strong>${formatNumber(row.completedTaskCount)}/${formatNumber(row.taskCount)}</strong></div>
         <div class="row-stat"><span>Complete</span><strong>${formatPercent(row.completionPercent)}</strong></div>
-        <div class="row-stat"><span>Utilization</span><strong>${formatPercent(row.utilizationPercent)}</strong></div>
+        <div class="row-stat"><span>Utilization</span><strong>${formatPercent(row.utilizationPercent)}</strong><small>${escapeHtml(actualSplitLabel(row))}</small></div>
         <div class="row-stat"><span>Open</span><strong>${formatNumber(row.openTaskCount)}</strong></div>
       </button>
     `).join("");
@@ -833,11 +889,11 @@
           <strong>${escapeHtml(row.name)}</strong>
           <small>${escapeHtml(row.role || "Phase worker")}</small>
         </div>
-        <div class="row-stat"><span>Actual</span><strong>${formatMinutes(row.actualMinutes)}</strong></div>
+        <div class="row-stat"><span>Actual</span><strong>${formatMinutes(row.actualMinutes)}</strong><small>${escapeHtml(actualSplitLabel(row))}</small></div>
         <div class="row-stat"><span>Assigned</span><strong>${formatHours(row.assignedHours)}</strong></div>
         <div class="row-stat"><span>Tasks</span><strong>${formatNumber(row.completedTaskCount)}/${formatNumber(row.taskCount)}</strong></div>
         <div class="row-stat"><span>Complete</span><strong>${formatPercent(row.completionPercent)}</strong></div>
-        <div class="row-stat"><span>Utilization</span><strong>${formatPercent(row.utilizationPercent)}</strong></div>
+        <div class="row-stat"><span>Utilization</span><strong>${formatPercent(row.utilizationPercent)}</strong><small>${escapeHtml(actualSplitLabel(row))}</small></div>
         <div class="row-stat"><span>Open</span><strong>${formatNumber(row.openTasks)}</strong></div>
       </button>
     `).join("");
@@ -856,7 +912,7 @@
             ${isTeamTask ? `<span class="team-badge" title="${escapeHtml(`${formatNumber(row.teamWorkerCount)} workers on task`)}">${escapeHtml(formatNumber(row.teamWorkerCount))}</span>` : ""}
           </div>
         </div>
-        <div class="row-stat"><span>Actual today</span><strong>${formatMinutes(row.actualMinutes)}</strong></div>
+        <div class="row-stat"><span>Actual today</span><strong>${formatMinutes(row.actualMinutes)}</strong><small>${escapeHtml(actualSplitLabel(row))}</small></div>
         <div class="row-stat"><span>Worker total</span><strong>${formatMinutes(row.workerHistoryMinutes)}</strong></div>
         <div class="row-stat"><span>${isTeamTask ? "Team total" : "Task total"}</span><strong>${formatMinutes(row.teamHistoryMinutes)}</strong></div>
         <div class="row-stat"><span>Task estimate</span><strong>${formatHours(row.assignedHours)}</strong></div>
@@ -959,7 +1015,7 @@
       </div>
       <div class="debug-box transition-note">
         <strong>Actual-time and transition composition</strong>
-        <p>Actual today is only the selected work date. Worker total and task total come from Hawley's worker actual ledger across recorded dates. Transition gaps come from Hawley's live session ledger and will be strongest from the point this ledger was enabled forward.</p>
+        <p>Actual today is the selected work date split into completed logged time plus live WIP. Worker total and task total come from Hawley's worker actual ledger across recorded dates. Transition gaps come from Hawley's live session ledger and will be strongest from the point this ledger was enabled forward.</p>
       </div>
     `;
   }
@@ -1031,11 +1087,11 @@
   function renderPhaseMetricStrip(phase) {
     return `
       <section class="status-strip phase-metrics">
-        ${metric("Actual", formatMinutes(phase.actualMinutes), "worker actual ledger")}
+        ${metric("Actual", formatMinutes(phase.actualMinutes), actualSplitLabel(phase))}
         ${metric("Assigned", formatHours(phase.assignedHours), `${formatHours(phase.completedHours)} completed estimate`)}
         ${metric("Tasks", `${formatNumber(phase.completedTaskCount)}/${formatNumber(phase.taskCount)}`, `${formatNumber(phase.openTaskCount)} open`)}
         ${metric("Completion", formatPercent(phase.completionPercent), "task row completion")}
-        ${metric("Utilization", formatPercent(phase.utilizationPercent), "actual / elapsed worker time")}
+        ${metric("Utilization", formatPercent(phase.utilizationPercent), actualSplitLabel(phase))}
         ${metric("Workers", formatNumber(phase.workerCount), "worked or assigned in phase")}
       </section>
     `;
@@ -1044,7 +1100,7 @@
   function renderTaskScopeMetricStrip(summary) {
     return `
       <section class="status-strip phase-metrics">
-        ${metric("Actual today", formatMinutes(summary.actualMinutes), "selected work date")}
+        ${metric("Actual today", formatMinutes(summary.actualMinutes), actualSplitLabel(summary))}
         ${metric("Worker history", formatMinutes(summary.workerHistoryMinutes), "all recorded dates")}
         ${metric("Team history", formatMinutes(summary.teamHistoryMinutes), "all workers, all dates")}
         ${metric("Task estimate", formatHours(summary.assignedHours), "full task estimate")}

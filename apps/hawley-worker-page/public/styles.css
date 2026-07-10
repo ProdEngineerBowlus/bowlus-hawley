@@ -165,6 +165,11 @@ button {
   color: var(--yellow);
 }
 
+.admin-shell .chip.wip {
+  background: rgba(240, 189, 71, 0.18);
+  color: #ffd782;
+}
+
 .admin-shell .chip.green {
   background: var(--green-soft);
   color: var(--primary-strong);
@@ -362,6 +367,11 @@ button {
 .chip.yellow {
   background: var(--yellow-soft);
   color: var(--yellow);
+}
+
+.chip.wip {
+  background: rgba(240, 189, 71, 0.16);
+  color: #9a6b00;
 }
 
 .chip.green {
@@ -1369,6 +1379,13 @@ button {
   line-height: 1.15;
 }
 
+.worker-status-time small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.2;
+}
+
 .worker-status-actions {
   display: flex;
   justify-content: flex-end;
@@ -1692,6 +1709,13 @@ button {
 .metric strong {
   font-size: 20px;
   line-height: 1.1;
+}
+
+.metric small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.2;
 }
 
 .snapshot-detail {

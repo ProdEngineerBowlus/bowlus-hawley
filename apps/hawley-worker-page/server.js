@@ -1023,6 +1023,9 @@ function emptyWorkerFromRow(row) {
     remainingHours: 0,
     actualTimeMinutes: 0,
     actualTimeLoggedMinutes: 0,
+    actualTimeCompletedMinutes: 0,
+    actualTimeWipMinutes: 0,
+    actualTimeTotalMinutes: 0,
     completedTaskCount: 0,
     taskCount: 0,
     lastSyncedAt: null,
@@ -1055,6 +1058,9 @@ function buildWorkers(rows) {
         remainingHours: 0,
         actualTimeMinutes: 0,
         actualTimeLoggedMinutes: 0,
+        actualTimeCompletedMinutes: 0,
+        actualTimeWipMinutes: 0,
+        actualTimeTotalMinutes: 0,
         completedTaskCount: 0,
         taskCount: 0,
         lastSyncedAt: row.source_synced_at || null
@@ -1087,6 +1093,9 @@ function buildWorkers(rows) {
       status: worker.taskCount === 0 ? "No Work" : worker.remainingHours > 0 ? "Open" : "Complete",
       trackerStatus: worker.taskCount === 0 ? "No Work" : worker.remainingHours > 0 ? "Assigned" : "Complete",
       actualTimeLoggedMinutes: 0,
+      actualTimeCompletedMinutes: 0,
+      actualTimeWipMinutes: 0,
+      actualTimeTotalMinutes: 0,
       actualTimeLoggedHours: 0,
       tasks: worker.tasks.sort((a, b) => Number(a.completed) - Number(b.completed) || a.workArea.localeCompare(b.workArea) || a.title.localeCompare(b.title))
     }))
@@ -1171,7 +1180,13 @@ function buildManagerSignals(workers) {
   const openWorkers = workerList.filter(worker => worker.remainingHours > 0);
   const noWorkWorkers = workerList.filter(worker => worker.taskCount === 0);
   const openTasks = workers.reduce((sum, worker) => sum + worker.tasks.filter(task => !task.completed).length, 0);
-  const actualTimeLoggedMinutes = workerList.reduce((sum, worker) => sum + Number(worker.actualTimeLoggedMinutes || 0), 0);
+  const actualTimeCompletedMinutes = workerList.reduce((sum, worker) => (
+    sum + Number(worker.actualTimeCompletedMinutes || 0)
+  ), 0);
+  const actualTimeWipMinutes = workerList.reduce((sum, worker) => (
+    sum + Number(worker.actualTimeWipMinutes || 0)
+  ), 0);
+  const actualTimeLoggedMinutes = actualTimeCompletedMinutes + actualTimeWipMinutes;
   const targetMinutes = workersWithWork.length * 7.5 * 60;
 
   return {
@@ -1185,6 +1200,9 @@ function buildManagerSignals(workers) {
     runningCount: 0,
     remainingHours: round(workerList.reduce((sum, worker) => sum + Number(worker.remainingHours || 0), 0)),
     actualTimeLoggedMinutes,
+    actualTimeCompletedMinutes,
+    actualTimeWipMinutes,
+    actualTimeTotalMinutes: actualTimeLoggedMinutes,
     actualTimeLoggedHours: round(actualTimeLoggedMinutes / 60),
     targetMinutes,
     targetHours: round(targetMinutes / 60),
@@ -1428,6 +1446,9 @@ function snapshotToWorker(snapshot) {
     snapshotActualHours: snapshot.actualHours,
     actualTimeLoggedHours: 0,
     actualTimeLoggedMinutes: 0,
+    actualTimeCompletedMinutes: 0,
+    actualTimeWipMinutes: 0,
+    actualTimeTotalMinutes: 0,
     targetHours: snapshot.targetHours,
     taskCount: snapshot.taskCount || tasks.length,
     completedTaskCount: snapshot.completedTaskCount || tasks.filter(task => task.completed).length,
@@ -1533,6 +1554,9 @@ function createEmptySnapshotWorker(row) {
     actualHours: 0,
     actualTimeLoggedHours: 0,
     actualTimeLoggedMinutes: 0,
+    actualTimeCompletedMinutes: 0,
+    actualTimeWipMinutes: 0,
+    actualTimeTotalMinutes: 0,
     targetHours: Number(row.hours_per_day || 7.5),
     taskCount: 0,
     completedTaskCount: 0,
@@ -1580,6 +1604,9 @@ function emptyJacobRWorker() {
     actualHours: 0,
     actualTimeLoggedHours: 0,
     actualTimeLoggedMinutes: 0,
+    actualTimeCompletedMinutes: 0,
+    actualTimeWipMinutes: 0,
+    actualTimeTotalMinutes: 0,
     targetHours: 7.5,
     taskCount: 0,
     completedTaskCount: 0,
@@ -1632,7 +1659,12 @@ function ensureLivePilotWorkers(workers) {
     mergedById.set(JACOB_R_WORKER_ID, applyLivePilotWorkerFlags(emptyJacobRWorker()));
   }
 
-  return Array.from(mergedById.values()).sort((a, b) => {
+  const mergedWorkers = Array.from(mergedById.values());
+  for (const worker of mergedWorkers) {
+    recalculateSnapshotWorkerCompletion(worker);
+  }
+
+  return mergedWorkers.sort((a, b) => {
     const liveDelta = Number(b.liveWriteEnabled) - Number(a.liveWriteEnabled);
     if (liveDelta) return liveDelta;
     const openDelta = Number(b.remainingHours > 0) - Number(a.remainingHours > 0);
@@ -1645,14 +1677,22 @@ function ensureLivePilotWorkers(workers) {
 
 function recalculateSnapshotWorkerCompletion(worker) {
   const completedTasks = (worker.tasks || []).filter(task => task.completed);
+  const actualTimeCompletedMinutes = (worker.tasks || []).reduce((sum, task) => (
+    sum + (task.completed ? Number(task.actualTimeOnDateMinutes || 0) : 0)
+  ), 0);
+  const actualTimeWipMinutes = (worker.tasks || []).reduce((sum, task) => (
+    sum + (!task.completed ? Number(task.actualTimeOnDateMinutes || 0) : 0)
+  ), 0);
+  const actualTimeTotalMinutes = actualTimeCompletedMinutes + actualTimeWipMinutes;
   worker.taskCount = (worker.tasks || []).length;
   worker.completedTaskCount = completedTasks.length;
   worker.completedHours = completedTasks.reduce((sum, task) => sum + Number(task.assignedHours || 0), 0);
   worker.remainingHours = Math.max(0, Number(worker.assignedHours || 0) - worker.completedHours);
-  worker.actualTimeLoggedMinutes = (worker.tasks || []).reduce((sum, task) => (
-    sum + (task.completed ? Number(task.actualTimeOnDateMinutes || 0) : 0)
-  ), 0);
-  worker.actualTimeLoggedHours = round(worker.actualTimeLoggedMinutes / 60);
+  worker.actualTimeCompletedMinutes = actualTimeCompletedMinutes;
+  worker.actualTimeWipMinutes = actualTimeWipMinutes;
+  worker.actualTimeTotalMinutes = actualTimeTotalMinutes;
+  worker.actualTimeLoggedMinutes = actualTimeTotalMinutes;
+  worker.actualTimeLoggedHours = round(actualTimeTotalMinutes / 60);
   worker.actualHours = worker.actualTimeLoggedHours;
   worker.status = worker.taskCount === 0 ? "No Work" : worker.remainingHours > 0 ? "Open" : "Complete";
   worker.trackerStatus = worker.taskCount === 0 ? "No Work" : worker.remainingHours > 0 ? "Assigned" : "Complete";
@@ -2192,7 +2232,7 @@ async function workerDailyActualRows(date) {
 }
 
 function actualLoggedMinutesFromRaw(row) {
-  return row.completed ? Number(row.actual_minutes || 0) : 0;
+  return Math.max(Number(row.actual_minutes || 0), Number(row.timer_minutes || 0));
 }
 
 function summarizeTaskActualHistory(rows) {

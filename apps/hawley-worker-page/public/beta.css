@@ -457,6 +457,14 @@ a {
   font-size: 1.05rem;
 }
 
+.row-stat small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.2;
+}
+
 .phase-metrics {
   grid-template-columns: repeat(6, minmax(0, 1fr));
 }

@@ -866,8 +866,9 @@
     const selected = days.find((day) => day.selected) || days.find((day) => day.date === state.date) || {};
     const cyclePercentValue = selected.taskCompletionPercent ?? selected.completionPercent ?? 0;
     const cyclePercent = Math.round(Number(cyclePercentValue || 0));
+    const lineBreakdown = totalActualBreakdown();
     const lineDetail = efficiencyRows.length
-      ? `${efficiencyRows.length} worker average - ${belowThresholdCount} below 75%`
+      ? `${efficiencyRows.length} worker average - ${belowThresholdCount} below 75% - ${actualBreakdownLabel(lineBreakdown)}`
       : "No worker time logged yet";
 
     return `
@@ -919,19 +920,21 @@
     const availableMinutes = elapsedScheduledWorkMinutesForDate(state.date);
     return state.workers
       .map((worker) => workerDailyEfficiency(worker, availableMinutes))
-      .filter((row) => row.hasWork || row.loggedMinutes > 0)
-      .sort((a, b) => b.percent - a.percent || b.loggedMinutes - a.loggedMinutes || a.name.localeCompare(b.name));
+      .filter((row) => row.hasWork || row.totalMinutes > 0)
+      .sort((a, b) => b.percent - a.percent || b.totalMinutes - a.totalMinutes || a.name.localeCompare(b.name));
   }
 
   function workerDailyEfficiency(worker, availableMinutes = elapsedScheduledWorkMinutesForDate(state.date)) {
     const scheduledAvailableMinutes = Math.max(0, Number(availableMinutes || 0));
-    const loggedMinutes = workerActualLoggedMinutes(worker);
+    const actual = workerActualBreakdown(worker);
     const hasWork = Number(worker.assignedHours || 0) > 0 || openTasks(worker.tasks).length || Number(worker.completedTaskCount || 0) > 0;
-    const percent = scheduledAvailableMinutes ? Math.round((loggedMinutes / scheduledAvailableMinutes) * 100) : 0;
+    const percent = scheduledAvailableMinutes ? Math.round((actual.totalMinutes / scheduledAvailableMinutes) * 100) : 0;
     return {
       id: worker.id,
       name: worker.name,
-      loggedMinutes,
+      loggedMinutes: actual.loggedMinutes,
+      wipMinutes: actual.wipMinutes,
+      totalMinutes: actual.totalMinutes,
       availableMinutes: scheduledAvailableMinutes,
       hasWork,
       percent,
@@ -1118,6 +1121,7 @@
     const workerStatus = activeTask ? "running" : pausedTask ? "paused" : "idle";
     const task = activeTask || pausedTask;
     const statusText = activeTask ? "Logged in" : pausedTask ? "Paused" : "Not logged in";
+    const actual = workerActualBreakdown(worker);
     const detailText = task
       ? `${task.title} - ${formatTimerState(getTaskTimer(task))}`
       : `${openCount} open task${openCount === 1 ? "" : "s"}`;
@@ -1137,7 +1141,8 @@
         </div>
         <div class="worker-status-time">
           <span class="field-label">${escapeHtml(actualTimeLabel())}</span>
-          <strong>${escapeHtml(formatMinutes(workerActualLoggedMinutes(worker)))}</strong>
+          <strong>${escapeHtml(formatMinutes(actual.totalMinutes))}</strong>
+          <small>${escapeHtml(actualBreakdownLabel(actual))}</small>
         </div>
         <div class="worker-status-actions">
           <button class="btn ghost" type="button" data-worker="${escapeAttr(worker.id)}">Details</button>
@@ -1192,11 +1197,13 @@
 
   function renderWorkerStats(worker) {
     const efficiency = workerDailyEfficiency(worker);
+    const actual = workerActualBreakdown(worker);
+    const splitDetail = actualBreakdownLabel(actual);
     return `
       <div class="metric-grid">
-        ${renderMetric("Daily utilization", efficiency.availableMinutes ? `${efficiency.percent}%` : "--")}
+        ${renderMetric("Daily utilization", efficiency.availableMinutes ? `${efficiency.percent}%` : "--", splitDetail)}
         ${renderMetric("Assigned", formatHours(worker.assignedHours))}
-        ${renderMetric(actualTimeLabel(), formatMinutes(workerActualLoggedMinutes(worker)))}
+        ${renderMetric(actualTimeLabel(), formatMinutes(actual.totalMinutes), splitDetail)}
         ${renderMetric("Complete", formatHours(worker.completedHours))}
         ${renderMetric("Remaining", formatHours(worker.remainingHours))}
         ${renderMetric("Scheduled elapsed", formatMinutes(efficiency.availableMinutes))}
@@ -1246,14 +1253,18 @@
     const hasSop = Boolean(sopUrl);
     const timer = getTaskTimer(task);
     const timerStartedAt = timer.startedAt;
-    const loggedMinutes = timerElapsedMinutes(timer);
+    const timerMinutes = timerElapsedMinutes(timer);
     const timerRunning = Boolean(timerStartedAt) && !task.completed;
-    const timerHasTime = loggedMinutes > 0 && !task.completed;
+    const timerHasTime = timerMinutes > 0 && !task.completed;
     const timerSessionOpen = timerHasTime && (Boolean(timerStartedAt) || Number(task.timerAccumulatedMinutes || 0) > 0);
     const canEndSession = managerControlEnabled() && timerSessionOpen;
     const startLabel = timerHasTime ? "Resume timer" : "Start timer";
     const estimateChip = renderEstimateChip(task);
-    const taskActualMinutes = task.completed ? Number(task.actualTimeOnDateMinutes || 0) : 0;
+    const taskLoggedMinutes = taskActualLoggedMinutes(task);
+    const taskWipMinutes = taskActualWipMinutes(task);
+    const wipLabel = timerHasTime
+      ? `${formatMinutes(taskWipMinutes || timerMinutes)} WIP ${timerStartedAt ? "running" : "paused"}`
+      : `${formatMinutes(taskWipMinutes)} WIP`;
 
     return `
       <article class="task-card${task.completed ? " done" : ""}">
@@ -1266,8 +1277,8 @@
             ${locked ? "" : estimateChip}
             ${!locked && task.workedTimeRecovered ? `<span class="chip yellow">Worked this day</span>` : ""}
             ${!locked && task.ledgerBackfilled ? `<span class="chip yellow">Ledger</span>` : ""}
-            ${!locked && taskActualMinutes ? `<span class="chip green">${formatMinutes(taskActualMinutes)} actual</span>` : ""}
-            ${timerHasTime ? `<span class="chip green">${escapeHtml(formatTimerState(timer))}</span>` : ""}
+            ${taskLoggedMinutes ? `<span class="chip green">${formatMinutes(taskLoggedMinutes)} logged</span>` : ""}
+            ${taskWipMinutes ? `<span class="chip wip">${escapeHtml(wipLabel)}</span>` : ""}
             ${canEndSession ? `<button class="chip action-chip" type="button" data-action="release-timer" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>End session</button>` : ""}
             ${task.phase ? `<span class="chip yellow">${escapeHtml(task.phase)}</span>` : ""}
             ${task.vin ? `<span class="chip">VIN ${escapeHtml(task.vin)}</span>` : ""}
@@ -1306,11 +1317,12 @@
     return `<div class="empty-state">Loading daily assignments...</div>`;
   }
 
-  function renderMetric(label, value) {
+  function renderMetric(label, value, detail = "") {
     return `
       <div class="metric">
         <span>${escapeHtml(label)}</span>
         <strong>${escapeHtml(value || "0")}</strong>
+        ${detail ? `<small>${escapeHtml(detail)}</small>` : ""}
       </div>
     `;
   }
@@ -1754,8 +1766,14 @@
     return state.workers.reduce((sum, worker) => sum + Number(worker.remainingHours || 0), 0);
   }
 
-  function totalActualLoggedMinutes() {
-    return state.workers.reduce((sum, worker) => sum + workerActualLoggedMinutes(worker), 0);
+  function totalActualBreakdown() {
+    return state.workers.reduce((total, worker) => {
+      const workerActual = workerActualBreakdown(worker);
+      total.loggedMinutes += workerActual.loggedMinutes;
+      total.wipMinutes += workerActual.wipMinutes;
+      total.totalMinutes += workerActual.totalMinutes;
+      return total;
+    }, { loggedMinutes: 0, wipMinutes: 0, totalMinutes: 0 });
   }
 
   function managerSignals() {
@@ -1763,7 +1781,8 @@
     const runningCount = countActiveWorkers();
     const openTaskCount = countOpenTasks();
     const remainingHours = state.workers.reduce((sum, worker) => sum + Number(worker.remainingHours || 0), 0);
-    const actualMinutes = totalActualLoggedMinutes();
+    const actual = totalActualBreakdown();
+    const actualMinutes = actual.totalMinutes;
     const targetMinutes = workersWithWork.length * 7.5 * 60;
     const pacingDeltaMinutes = targetMinutes ? actualMinutes - targetMinutes : 0;
     const outliers = visibleOutlierTasks();
@@ -1774,7 +1793,7 @@
       pacingDeltaMinutes,
       pacingLabel: pacingLabel(pacingDeltaMinutes, targetMinutes),
       pacingValue: `${formatMinutes(actualMinutes)} / ${formatMinutes(targetMinutes)}`,
-      pacingDetail: targetMinutes ? `${formatSignedMinutes(pacingDeltaMinutes)} vs 7h 30m per assigned worker` : "No assigned worker target for today",
+      pacingDetail: targetMinutes ? `${formatSignedMinutes(pacingDeltaMinutes)} vs target - ${actualBreakdownLabel(actual)}` : "No assigned worker target for today",
       wipValue: `${openTaskCount} tasks`,
       wipDetail: `${formatHours(remainingHours)} remaining - ${runningCount} running now`,
       outlierValue: String(outliers.length),
@@ -1789,7 +1808,8 @@
   function workerAttentionSignals(workers) {
     return workers
       .flatMap((worker) => {
-        const actual = workerActualLoggedMinutes(worker);
+        const actualBreakdown = workerActualBreakdown(worker);
+        const actual = actualBreakdown.totalMinutes;
         const assigned = Math.round(Number(worker.assignedHours || 0) * 60);
         const open = openTasks(worker.tasks);
         const openCount = open.length;
@@ -1838,7 +1858,7 @@
             releaseTaskId: (pausedTask && pausedTask.id) || "",
             detail: hasConflict
               ? `Running ${runningTask.title || "a task"} while ${pausedTask.title || "another task"} is paused`
-              : `${formatMinutes(actual)} ${actualTimeLabel().toLowerCase()}`,
+              : `${formatMinutes(actual)} ${actualTimeLabel().toLowerCase()} - ${actualBreakdownLabel(actualBreakdown)}`,
           });
         }
         if (efficiency.hasWork && efficiency.availableMinutes && efficiency.percent < 75) {
@@ -1850,7 +1870,7 @@
             label: "Below 75%",
             level: "risk",
             score: 4,
-            detail: `${efficiency.percent}% - ${formatMinutes(efficiency.loggedMinutes)} productive / ${formatMinutes(efficiency.availableMinutes)} scheduled elapsed`,
+            detail: `${efficiency.percent}% - ${formatMinutes(efficiency.totalMinutes)} productive / ${formatMinutes(efficiency.availableMinutes)} scheduled elapsed - ${actualBreakdownLabel(efficiency)}`,
           });
         }
         return signals;
@@ -1903,10 +1923,35 @@
     return "Watch pace";
   }
 
+  function workerActualBreakdown(worker) {
+    return (worker.tasks || []).reduce((total, task) => {
+      const loggedMinutes = taskActualLoggedMinutes(task);
+      const wipMinutes = taskActualWipMinutes(task);
+      total.loggedMinutes += loggedMinutes;
+      total.wipMinutes += wipMinutes;
+      total.totalMinutes += loggedMinutes + wipMinutes;
+      return total;
+    }, { loggedMinutes: 0, wipMinutes: 0, totalMinutes: 0 });
+  }
+
   function workerActualLoggedMinutes(worker) {
-    return (worker.tasks || []).reduce((sum, task) => (
-      sum + (task.completed ? Number(task.actualTimeOnDateMinutes || 0) : 0)
-    ), 0);
+    return workerActualBreakdown(worker).loggedMinutes;
+  }
+
+  function taskActualLoggedMinutes(task) {
+    return task.completed ? Number(task.actualTimeOnDateMinutes || 0) : 0;
+  }
+
+  function taskActualWipMinutes(task) {
+    if (task.completed) return 0;
+    return Math.max(Number(task.actualTimeOnDateMinutes || 0), timerElapsedMinutes(getTaskTimer(task)));
+  }
+
+  function actualBreakdownLabel(actual) {
+    const loggedMinutes = Number(actual?.loggedMinutes || 0);
+    const wipMinutes = Number(actual?.wipMinutes || 0);
+    if (wipMinutes <= 0) return `${formatMinutes(loggedMinutes)} logged`;
+    return `${formatMinutes(loggedMinutes)} logged + ${formatMinutes(wipMinutes)} WIP`;
   }
 
   function getWorkerActiveTask(worker) {
@@ -2304,7 +2349,9 @@
     const normalized = normalizeLocalTimer(timer);
     const accumulated = normalized.accumulatedMinutes;
     if (!normalized.startedAt) return accumulated;
-    const running = Math.max(1, Math.round((Date.now() - new Date(normalized.startedAt).getTime()) / 60000));
+    const startedAt = new Date(normalized.startedAt).getTime();
+    if (!Number.isFinite(startedAt)) return accumulated;
+    const running = Math.max(1, Math.round((Date.now() - startedAt) / 60000));
     return accumulated + running;
   }
 
