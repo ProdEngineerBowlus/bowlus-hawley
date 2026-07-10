@@ -3784,6 +3784,123 @@ async function utilizationReportPayload(url) {
   };
 }
 
+async function postgresWorkerActualsPayload(url) {
+  const date = url.searchParams.get("date") || "";
+  const worker = String(url.searchParams.get("worker") || "").trim();
+  if (!isIsoDate(date)) throw actionError("Date must be YYYY-MM-DD.", 400);
+  if (worker.length < 2) throw actionError("worker must be at least 2 characters.", 400);
+
+  const workerNeedle = `%${worker.toLowerCase()}%`;
+  const actualsResult = await pool.query(
+    `
+      select
+        worker_daily_actual_id::text,
+        airtable_record_id,
+        ledger_key,
+        work_date::text,
+        worker_key,
+        worker_name,
+        worker_email,
+        asana_task_gid,
+        task_name,
+        task_url,
+        vin,
+        cycle_label,
+        phase_label,
+        assigned_hours,
+        allocated_hours,
+        actual_minutes,
+        timer_minutes,
+        asana_posted_minutes,
+        greatest(
+          coalesce(actual_minutes, 0),
+          coalesce(timer_minutes, 0),
+          coalesce(asana_posted_minutes, 0)
+        )::integer as logged_minutes,
+        source_label,
+        was_assigned_in_dat,
+        completed,
+        daily_summary,
+        daily_available_minutes,
+        daily_logged_minutes,
+        daily_efficiency_percent,
+        last_seen_at::text,
+        source_system,
+        source_synced_at::text,
+        normalized_at::text,
+        fields_json ->> 'Timer Started At' as timer_started_at,
+        fields_json ->> 'Completion Pending?' as completion_pending,
+        fields_json ->> 'Time Entry Created?' as time_entry_created
+      from hb.worker_daily_task_actuals
+      where work_date = $1::date
+        and (
+          lower(coalesce(worker_name, '')) like $2
+          or lower(coalesce(worker_key, '')) like $2
+          or lower(coalesce(worker_email, '')) like $2
+        )
+      order by
+        daily_summary,
+        last_seen_at nulls last,
+        source_synced_at nulls last,
+        worker_daily_actual_id
+    `,
+    [date, workerNeedle]
+  );
+
+  const sessionsResult = await pool.query(
+    `
+      select
+        time_session_id::text,
+        session_key,
+        worker_key,
+        worker_name,
+        worker_email,
+        asana_task_gid,
+        task_name,
+        phase_key,
+        phase_name,
+        reporting_phase_key,
+        reporting_phase_name,
+        work_date::text,
+        started_at::text,
+        stopped_at::text,
+        duration_minutes,
+        estimated_minutes,
+        stop_reason,
+        submitted_to_asana,
+        asana_sync_status,
+        asana_time_entry_gid,
+        source,
+        created_at::text,
+        updated_at::text
+      from core.time_sessions
+      where work_date = $1::date
+        and (
+          lower(coalesce(worker_name, '')) like $2
+          or lower(coalesce(worker_key, '')) like $2
+          or lower(coalesce(worker_email, '')) like $2
+        )
+      order by started_at nulls last, time_session_id
+    `,
+    [date, workerNeedle]
+  );
+
+  return {
+    ok: true,
+    source: "postgres",
+    date,
+    worker,
+    tables: {
+      "hb.worker_daily_task_actuals": actualsResult.rows,
+      "core.time_sessions": sessionsResult.rows
+    },
+    counts: {
+      workerDailyTaskActuals: actualsResult.rowCount,
+      coreTimeSessions: sessionsResult.rowCount
+    }
+  };
+}
+
 async function transitionReviewQueuePayload(url) {
   const date = url.searchParams.get("date") || todayIso();
   if (!isIsoDate(date)) throw actionError("Date must be YYYY-MM-DD.", 400);
@@ -3988,6 +4105,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/utilization-report" && req.method === "GET") {
       sendJson(res, 200, await utilizationReportPayload(url));
+      return;
+    }
+
+    if (url.pathname === "/api/postgres-worker-actuals" && req.method === "GET") {
+      sendJson(res, 200, await postgresWorkerActualsPayload(url));
       return;
     }
 
