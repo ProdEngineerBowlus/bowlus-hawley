@@ -1731,7 +1731,7 @@ function normalizeWorkerDailyActual(row) {
     timerMinutes,
     timerStartedAt: fields["Timer Started At"] || "",
     asanaPostedMinutes,
-    loggedMinutes: Math.max(actualMinutes, timerMinutes, asanaPostedMinutes),
+    loggedMinutes: Math.max(actualMinutes, timerMinutes),
     dailyLoggedMinutes: numberFromField(fields["Daily Logged Minutes"]),
     dailyAvailableMinutes: numberFromField(fields["Daily Available Minutes"]),
     dailyEfficiencyPercent: numberFromField(fields["Daily Efficiency Percent"]),

@@ -324,6 +324,10 @@ Implemented pilot behavior:
   transition metrics, and review metrics, while planned assigned hours/tasks
   remain based on the Hawley assignment read model so the visible day totals and
   phase rows use the same denominator.
+- The visible Line View metric is `Utilization`, not task efficiency. It uses
+  actual minutes divided by elapsed available worker minutes for the selected
+  date. Task efficiency or task pace can exceed 100% because it compares task
+  estimates to logged actuals; do not label that as real-time efficiency.
 - The debug payload panel is hidden in normal live use. Append `?debug=1` to the
   line-view URL when raw payload inspection is needed.
 - Manager classification buttons stay hidden until a transition row is selected;

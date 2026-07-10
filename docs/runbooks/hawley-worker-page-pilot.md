@@ -69,6 +69,11 @@ minutes outside completed source-task time.
 Hawley's worker actuals ledger (`hb.worker_daily_task_actuals`). Asana task
 `actual_time_minutes` is cumulative over the life of the task, so it should stay
 available as total task context but must not be counted as same-day logged time.
+Likewise, `Asana Posted Minutes` proves writeback but is not a same-day
+productive-time source for live utilization displays. The production UI should
+not allow live utilization above the elapsed available-time denominator; if raw
+source rows exceed that denominator, treat the source data as invalid for live
+capacity math instead of displaying an impossible over-100% real-time score.
 
 The Hawley Line View should keep the visible day totals congruent with the phase
 rows it renders: planned assigned hours/tasks come from

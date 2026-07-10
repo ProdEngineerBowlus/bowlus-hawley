@@ -12,6 +12,12 @@
   const debugMode = params.get("debug") === "1" || params.get("debug") === "true";
   const validPhaseViews = new Set(["workers", "tasks", "worker", "transitions", "review"]);
   const today = localTodayIso();
+  const standardDailyMinutes = 7.5 * 60;
+  const defaultWorkSchedule = {
+    workStart: "07:00",
+    workEnd: "15:30",
+    pauses: [{ label: "lunch", start: "11:00", end: "11:30" }],
+  };
   const state = {
     date: params.get("date") || today,
     selectedPhase: params.get("phase") || "",
@@ -76,6 +82,67 @@
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return "--";
     return timeFmt.format(date);
+  }
+
+  function dateAtClock(day, clock) {
+    const [hour, minute] = String(clock || "00:00").split(":").map((part) => Number(part));
+    const date = new Date(day);
+    date.setHours(Number.isFinite(hour) ? hour : 0, Number.isFinite(minute) ? minute : 0, 0, 0);
+    return date;
+  }
+
+  function scheduledWorkMinutesBetween(startDate, endDate, schedule = defaultWorkSchedule) {
+    if (!(startDate instanceof Date) || !(endDate instanceof Date) || endDate <= startDate) return 0;
+
+    let windows = [{
+      start: dateAtClock(startDate, schedule.workStart || defaultWorkSchedule.workStart),
+      end: dateAtClock(startDate, schedule.workEnd || defaultWorkSchedule.workEnd),
+    }];
+
+    const pauses = Array.isArray(schedule.pauses) ? schedule.pauses : defaultWorkSchedule.pauses;
+    for (const pause of pauses) {
+      const pauseStart = dateAtClock(startDate, pause.start);
+      const pauseEnd = dateAtClock(startDate, pause.end);
+      const nextWindows = [];
+
+      for (const window of windows) {
+        if (pauseEnd <= window.start || pauseStart >= window.end) {
+          nextWindows.push(window);
+          continue;
+        }
+        if (pauseStart > window.start) nextWindows.push({ start: window.start, end: pauseStart });
+        if (pauseEnd < window.end) nextWindows.push({ start: pauseEnd, end: window.end });
+      }
+
+      windows = nextWindows;
+    }
+
+    return windows.reduce((sum, window) => {
+      const windowStart = new Date(Math.max(window.start.getTime(), startDate.getTime()));
+      const windowEnd = new Date(Math.min(window.end.getTime(), endDate.getTime()));
+      if (windowEnd <= windowStart) return sum;
+      return sum + Math.floor((windowEnd.getTime() - windowStart.getTime()) / 60000);
+    }, 0);
+  }
+
+  function elapsedWorkerCapacityMinutes(isoDate = state.date) {
+    const dateKey = isoDate || today;
+    const day = new Date(`${dateKey}T00:00:00`);
+    if (Number.isNaN(day.getTime())) return 0;
+    if (dateKey > today) return 0;
+    if (dateKey < today) return standardDailyMinutes;
+
+    const start = dateAtClock(day, defaultWorkSchedule.workStart);
+    const end = dateAtClock(day, defaultWorkSchedule.workEnd);
+    const cutoff = new Date(Math.min(Date.now(), end.getTime()));
+    return Math.min(standardDailyMinutes, scheduledWorkMinutesBetween(start, cutoff));
+  }
+
+  function utilizationPercent(actualMinutes, workerCount = 1) {
+    const workersInScope = Math.max(1, Number(workerCount || 0));
+    const denominator = elapsedWorkerCapacityMinutes() * workersInScope;
+    if (!denominator) return null;
+    return Math.min(100, Math.round((Number(actualMinutes || 0) / denominator) * 100));
   }
 
   async function fetchJson(url) {
@@ -504,6 +571,7 @@
         );
         const reportCompletion = reportPhase?.assignedVsCompletedPercent;
         const reportEfficiency = reportPhase?.efficiencyPercent;
+        const taskPacePercent = actualMinutes ? Math.round((assignedHours * 60 / actualMinutes) * 100) : reportEfficiency ?? null;
         return {
           ...row,
           phase: row.phase || reportPhase?.phaseName || "Unspecified",
@@ -516,7 +584,9 @@
           rawPhaseNames: Array.from(row.rawPhaseNames).sort(),
           rawPhaseKeys: Array.from(row.rawPhaseKeys).sort(),
           completionPercent: taskCount ? Math.round((completedTaskCount / taskCount) * 100) : Number(reportCompletion || 0),
-          efficiencyPercent: actualMinutes ? Math.round((assignedHours * 60 / actualMinutes) * 100) : reportEfficiency ?? null,
+          efficiencyPercent: taskPacePercent,
+          taskPacePercent,
+          utilizationPercent: utilizationPercent(actualMinutes, workerCount),
           transitionStats: stats,
           transitionMinutes: stats.totalTransitionMinutes,
           reviewFlags: stats.unreviewedTransitionCount,
@@ -535,6 +605,8 @@
     const line = state.assignments?.lineOverview || {};
     const signals = state.assignments?.managerSignals || {};
     if (!rows.length) {
+      const workerCount = Number(signals.workersWithWork || signals.workerCount || workers().length || 0);
+      const actualMinutes = Number(signals.actualTimeLoggedMinutes || 0);
       return {
         assignedHours: Number(line.assignedHours || 0),
         completedHours: Number(line.completedHours || 0),
@@ -542,7 +614,9 @@
         taskCount: Number(line.taskCount || 0),
         completedTaskCount: Number(line.completedTaskCount || 0),
         openTaskCount: Number(signals.openTaskCount || signals.openTasks || 0),
-        actualMinutes: Number(signals.actualTimeLoggedMinutes || 0),
+        actualMinutes,
+        workerCount,
+        utilizationPercent: utilizationPercent(actualMinutes, workerCount || 1),
       };
     }
 
@@ -552,6 +626,12 @@
     const completedTaskCount = rows.reduce((sum, row) => sum + Number(row.completedTaskCount || 0), 0);
     const openTaskCount = rows.reduce((sum, row) => sum + Number(row.openTaskCount || 0), 0);
     const actualMinutes = rows.reduce((sum, row) => sum + Number(row.actualMinutes || 0), 0);
+    const workerCount = Number(signals.workersWithWork || 0) || new Set(
+      workers()
+        .filter((worker) => Number(worker.actualTimeLoggedMinutes || 0) > 0 || (worker.tasks || []).length > 0)
+        .map((worker) => worker.id || worker.email || worker.name)
+        .filter(Boolean)
+    ).size;
 
     return {
       assignedHours,
@@ -561,6 +641,8 @@
       completedTaskCount,
       openTaskCount,
       actualMinutes,
+      workerCount,
+      utilizationPercent: utilizationPercent(actualMinutes, workerCount || 1),
     };
   }
 
@@ -585,6 +667,7 @@
         const assignedHours = tasks.reduce((sum, task) => sum + taskHours(task), 0);
         const completedTaskCount = tasks.filter((task) => task.completed).length;
         const completedHours = tasks.reduce((sum, task) => sum + (task.completed ? taskHours(task) : 0), 0);
+        const taskPacePercent = actualMinutes ? Math.round((assignedHours * 60 / actualMinutes) * 100) : null;
         return {
           id: worker.id,
           workerKey: workerKeyForWorker(worker),
@@ -598,7 +681,9 @@
           completedHours,
           actualMinutes,
           completionPercent: tasks.length ? Math.round((completedTaskCount / tasks.length) * 100) : 0,
-          efficiencyPercent: actualMinutes ? Math.round((assignedHours * 60 / actualMinutes) * 100) : null,
+          efficiencyPercent: taskPacePercent,
+          taskPacePercent,
+          utilizationPercent: utilizationPercent(actualMinutes, 1),
           liveWriteEnabled: Boolean(worker.liveWriteEnabled),
           transitionStats: transitionStats(transitionsForScope(phaseKey, workerKeyForWorker(worker))),
         };
@@ -715,7 +800,7 @@
         </div>
         ${metric("Workers", formatNumber(signals.workerCount || workers().length), `${formatNumber(signals.workersWithWork || 0)} with work`)}
         ${metric("Open tasks", formatNumber(visibleLine.openTaskCount), "visible line rows")}
-        ${metric("Mode", state.assignments?.mode || "--", `latest tracker ${state.assignments?.latestTrackerDate || "--"}`)}
+        ${metric("Line utilization", formatPercent(visibleLine.utilizationPercent), `${formatNumber(visibleLine.workerCount)} workers elapsed`)}
       </section>
     `;
   }
@@ -733,7 +818,7 @@
         <div class="row-stat"><span>Assigned</span><strong>${formatHours(row.assignedHours)}</strong></div>
         <div class="row-stat"><span>Tasks</span><strong>${formatNumber(row.completedTaskCount)}/${formatNumber(row.taskCount)}</strong></div>
         <div class="row-stat"><span>Complete</span><strong>${formatPercent(row.completionPercent)}</strong></div>
-        <div class="row-stat"><span>Efficiency</span><strong>${formatPercent(row.efficiencyPercent)}</strong></div>
+        <div class="row-stat"><span>Utilization</span><strong>${formatPercent(row.utilizationPercent)}</strong></div>
         <div class="row-stat"><span>Open</span><strong>${formatNumber(row.openTaskCount)}</strong></div>
       </button>
     `).join("");
@@ -752,7 +837,7 @@
         <div class="row-stat"><span>Assigned</span><strong>${formatHours(row.assignedHours)}</strong></div>
         <div class="row-stat"><span>Tasks</span><strong>${formatNumber(row.completedTaskCount)}/${formatNumber(row.taskCount)}</strong></div>
         <div class="row-stat"><span>Complete</span><strong>${formatPercent(row.completionPercent)}</strong></div>
-        <div class="row-stat"><span>Efficiency</span><strong>${formatPercent(row.efficiencyPercent)}</strong></div>
+        <div class="row-stat"><span>Utilization</span><strong>${formatPercent(row.utilizationPercent)}</strong></div>
         <div class="row-stat"><span>Open</span><strong>${formatNumber(row.openTasks)}</strong></div>
       </button>
     `).join("");
@@ -950,7 +1035,7 @@
         ${metric("Assigned", formatHours(phase.assignedHours), `${formatHours(phase.completedHours)} completed estimate`)}
         ${metric("Tasks", `${formatNumber(phase.completedTaskCount)}/${formatNumber(phase.taskCount)}`, `${formatNumber(phase.openTaskCount)} open`)}
         ${metric("Completion", formatPercent(phase.completionPercent), "task row completion")}
-        ${metric("Efficiency", formatPercent(phase.efficiencyPercent), "assigned hours / actual today")}
+        ${metric("Utilization", formatPercent(phase.utilizationPercent), "actual / elapsed worker time")}
         ${metric("Workers", formatNumber(phase.workerCount), "worked or assigned in phase")}
       </section>
     `;

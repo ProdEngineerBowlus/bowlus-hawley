@@ -875,10 +875,10 @@
     return `
       <section class="panel efficiency-panel">
         <div class="panel-header">
-          <h2 class="panel-title">Efficiency signals</h2>
+          <h2 class="panel-title">Utilization signals</h2>
         </div>
         <div class="panel-body efficiency-grid">
-          ${renderEfficiencySignal("Line daily efficiency", efficiencyRows.length ? `${linePercent}%` : "--", lineDetail, linePercent, efficiencyLevel(linePercent, efficiencyRows.length))}
+          ${renderEfficiencySignal("Line utilization", efficiencyRows.length ? `${linePercent}%` : "--", lineDetail, linePercent, efficiencyLevel(linePercent, efficiencyRows.length))}
           ${renderEfficiencySignal(`${cycleDays.cycle || "Cycle"} day`, `${cyclePercent}%`, selected.completeTaskLabel ? `${selected.completeTaskLabel} tasks complete` : "selected day completion", cyclePercent, cyclePercent >= 65 ? "good" : cyclePercent >= 35 ? "warn" : "risk")}
         </div>
       </section>
@@ -929,7 +929,10 @@
     const scheduledAvailableMinutes = Math.max(0, Number(availableMinutes || 0));
     const loggedMinutes = workerActualLoggedMinutes(worker);
     const summary = worker.dailyEfficiency || {};
-    const summaryLoggedMinutes = Number(summary.loggedMinutes || 0);
+    const rawSummaryLoggedMinutes = Number(summary.loggedMinutes || 0);
+    const summaryLoggedMinutes = scheduledAvailableMinutes
+      ? Math.min(rawSummaryLoggedMinutes, scheduledAvailableMinutes)
+      : rawSummaryLoggedMinutes;
     const effectiveLoggedMinutes = Math.max(loggedMinutes, summaryLoggedMinutes);
     const hasWork = Number(worker.assignedHours || 0) > 0 || openTasks(worker.tasks).length || Number(worker.completedTaskCount || 0) > 0;
     const percent = scheduledAvailableMinutes ? Math.round((effectiveLoggedMinutes / scheduledAvailableMinutes) * 100) : 0;
@@ -1199,7 +1202,7 @@
     const efficiency = workerDailyEfficiency(worker);
     return `
       <div class="metric-grid">
-        ${renderMetric("Daily efficiency", efficiency.availableMinutes ? `${efficiency.percent}%` : "--")}
+        ${renderMetric("Daily utilization", efficiency.availableMinutes ? `${efficiency.percent}%` : "--")}
         ${renderMetric("Assigned", formatHours(worker.assignedHours))}
         ${renderMetric(actualTimeLabel(), formatMinutes(workerActualLoggedMinutes(worker)))}
         ${renderMetric("Complete", formatHours(worker.completedHours))}
@@ -1855,7 +1858,7 @@
             label: "Below 75%",
             level: "risk",
             score: 4,
-            detail: `${efficiency.percent}% - ${formatMinutes(efficiency.loggedMinutes)} logged + WIP / ${formatMinutes(efficiency.availableMinutes)} scheduled elapsed`,
+            detail: `${efficiency.percent}% - ${formatMinutes(efficiency.loggedMinutes)} productive / ${formatMinutes(efficiency.availableMinutes)} scheduled elapsed`,
           });
         }
         return signals;
@@ -1908,15 +1911,21 @@
     return "Watch pace";
   }
 
-  function workerActualLoggedMinutes(worker) {
+  function rawWorkerActualLoggedMinutes(worker) {
     const taskMinutes = (worker.tasks || []).reduce((sum, task) => {
-      const sourceActual = Number(task.actualTimeOnDateMinutes ?? task.actualTimeMinutes ?? 0);
+      const sourceActual = Number(task.actualTimeOnDateMinutes || 0);
       const timerActual = task.completed ? 0 : timerElapsedMinutes(getTaskTimer(task));
       return sum + (task.completed ? sourceActual : Math.max(sourceActual, timerActual));
     }, 0);
     const workerMinutes = Math.round(Number(worker.actualTimeLoggedMinutes || Number(worker.actualTimeLoggedHours || worker.actualHours || 0) * 60 || 0));
 
     return Math.max(taskMinutes, workerMinutes);
+  }
+
+  function workerActualLoggedMinutes(worker) {
+    const rawMinutes = rawWorkerActualLoggedMinutes(worker);
+    const availableMinutes = elapsedScheduledWorkMinutesForDate(state.date);
+    return availableMinutes ? Math.min(rawMinutes, availableMinutes) : rawMinutes;
   }
 
   function getWorkerActiveTask(worker) {
