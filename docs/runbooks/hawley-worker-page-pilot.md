@@ -207,6 +207,11 @@ that will come from Hawley's richer utilization ledger. Task rows are one layer
 deeper: use the phase rail to see all phase tasks, or select a worker to see
 that worker's tasks for the phase/day.
 
+The beta phase overview uses canonical operational phase buckets for known
+nomenclature drift. For example, `FAB-B` rolls into `FAB 1-3`, and `Frame-A`
+rolls into `Frames / Phase A`. The original task labels remain in the payload
+for debugging, but the phase list should show the canonical production bucket.
+
 Task drill-ins separate same-day time from task history. `Actual today` is the
 selected work date only. `Worker total` sums Hawley's
 `hb.worker_daily_task_actuals` rows for that worker/task across recorded dates.

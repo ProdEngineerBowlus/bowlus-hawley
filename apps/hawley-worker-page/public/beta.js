@@ -195,8 +195,60 @@
     return Array.isArray(state.assignments?.workers) ? state.assignments.workers : [];
   }
 
+  const phaseAliasGroups = [
+    {
+      key: "fab_1_3",
+      display: "FAB 1-3",
+      aliases: ["fab_1_3", "fab_a", "fab_b", "fab", "fabrication", "fab13", "fab1-3", "fab1 3"],
+    },
+    {
+      key: "frames_phase_a",
+      display: "Frames / Phase A",
+      aliases: ["frames_phase_a", "frame_a", "frame-a", "frames", "framesphasea", "frames phase a", "frames/phasea"],
+    },
+  ];
+
   function phaseNameForTask(task) {
     return task.workArea || task.phase || task.phaseBucket || "Unspecified";
+  }
+
+  function phaseAliasToken(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/&/g, "and")
+      .replace(/[^a-z0-9]+/g, "");
+  }
+
+  function canonicalPhaseForTask(task) {
+    const phase = phaseNameForTask(task);
+    const rawKey = task.workAreaKey || phaseKeyForName(phase);
+    const tokens = new Set([
+      phaseAliasToken(rawKey),
+      phaseAliasToken(phase),
+      phaseAliasToken(task.phase),
+      phaseAliasToken(task.phaseBucket),
+    ].filter(Boolean));
+
+    for (const group of phaseAliasGroups) {
+      const aliases = new Set([group.key, group.display, ...group.aliases].map(phaseAliasToken));
+      for (const token of tokens) {
+        if (aliases.has(token)) {
+          return {
+            phase: group.display,
+            phaseKey: group.key,
+            rawPhase: phase,
+            rawPhaseKey: rawKey,
+          };
+        }
+      }
+    }
+
+    return {
+      phase,
+      phaseKey: phaseKeyForName(phase),
+      rawPhase: phase,
+      rawPhaseKey: rawKey,
+    };
   }
 
   function phaseKeyForName(name) {
@@ -211,7 +263,7 @@
   }
 
   function taskPhaseKey(task) {
-    return phaseKeyForName(phaseNameForTask(task));
+    return canonicalPhaseForTask(task).phaseKey;
   }
 
   function tasksForWorker(worker, phaseKey = "") {
@@ -224,12 +276,14 @@
     const rows = new Map();
     for (const worker of workers()) {
       for (const task of worker.tasks || []) {
-        const phase = phaseNameForTask(task);
-        const phaseKey = phaseKeyForName(phase);
+        const phaseInfo = canonicalPhaseForTask(task);
+        const { phase, phaseKey } = phaseInfo;
         if (!rows.has(phaseKey)) {
           rows.set(phaseKey, {
             phaseKey,
             phase,
+            rawPhaseNames: new Set(),
+            rawPhaseKeys: new Set(),
             taskCount: 0,
             completedTaskCount: 0,
             assignedHours: 0,
@@ -240,6 +294,8 @@
           });
         }
         const row = rows.get(phaseKey);
+        if (phaseInfo.rawPhase) row.rawPhaseNames.add(phaseInfo.rawPhase);
+        if (phaseInfo.rawPhaseKey) row.rawPhaseKeys.add(phaseInfo.rawPhaseKey);
         row.taskCount += 1;
         row.completedTaskCount += task.completed ? 1 : 0;
         row.assignedHours += taskHours(task);
@@ -254,6 +310,8 @@
       .map((row) => ({
         ...row,
         workerCount: row.workerIds.size,
+        rawPhaseNames: Array.from(row.rawPhaseNames).sort(),
+        rawPhaseKeys: Array.from(row.rawPhaseKeys).sort(),
         completionPercent: row.taskCount ? Math.round((row.completedTaskCount / row.taskCount) * 100) : 0,
         efficiencyPercent: row.actualMinutes ? Math.round((row.assignedHours * 60 / row.actualMinutes) * 100) : null,
       }))
@@ -416,7 +474,7 @@
       <button class="phase-card" type="button" data-action="select-phase" data-phase-key="${escapeHtml(row.phaseKey)}">
         <div class="row-main">
           <strong>${escapeHtml(row.phase)}</strong>
-          <small>${formatNumber(row.workerCount)} workers active</small>
+          <small>${formatNumber(row.workerCount)} workers active${row.rawPhaseNames.length > 1 ? ` - ${formatNumber(row.rawPhaseNames.length)} labels merged` : ""}</small>
         </div>
         <div class="row-stat"><span>Actual</span><strong>${formatMinutes(row.actualMinutes)}</strong></div>
         <div class="row-stat"><span>Assigned</span><strong>${formatHours(row.assignedHours)}</strong></div>
