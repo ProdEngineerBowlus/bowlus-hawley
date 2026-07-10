@@ -244,6 +244,32 @@ GET /
 
 Expected: `200 OK` with the Daily Assignments shell.
 
+Read-only beta/debug page:
+
+```text
+GET /beta.html
+```
+
+Expected: `200 OK` with the Hawley Beta Lab. This page is safe for diagnostics
+because it only calls GET endpoints and does not expose worker task controls or
+refresh/adoption controls.
+
+For larger beta work, create a separate App Platform app or component from a
+dedicated Git branch such as `beta`. Keep the staging environment pointed at the
+same database with a read-only/runtime database user, and set:
+
+```text
+HAWLEY_WORKER_WRITES_ENABLED=false
+HAWLEY_WORKER_WRITE_IDS=
+HAWLEY_ALLOW_SOURCE_WRITES=false
+HAWLEY_DRY_RUN=true
+```
+
+Do not reuse the live worker-write settings on staging until a specific write
+test is approved. Staging should be the place to test new reports, hidden
+manager review screens, and page navigation before they move to the active
+worker app.
+
 Database health:
 
 ```text

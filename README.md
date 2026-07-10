@@ -92,6 +92,10 @@ the legacy Daily Assignment Tracker snapshot shape:
 npm run worker:hawley
 ```
 
+The worker web app also includes a read-only beta/debug page at `/beta.html`.
+It is meant for diagnostics and report prototypes; it uses existing GET APIs
+only and does not expose worker task controls.
+
 The production utilization, transition gap, phase reporting, manager review,
 and Asana writeback-queue design is documented in
 `docs/runbooks/worker-utilization-transition-ledger.md`. The first database

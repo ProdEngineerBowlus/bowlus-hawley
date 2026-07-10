@@ -187,6 +187,18 @@ Default URL:
 http://127.0.0.1:5273
 ```
 
+Read-only beta/debug page:
+
+```text
+http://127.0.0.1:5273/beta.html
+```
+
+The beta page is intentionally not a worker control surface. It only uses GET
+requests against existing Hawley APIs and does not expose Start, Stop, Complete,
+End Session, Refresh tracker, or Adopt tasks. Use it for diagnostics, phase
+summary prototypes, freshness checks, and side-by-side report testing without
+giving the shop another active page.
+
 Worker pages use the familiar pattern:
 
 ```text
