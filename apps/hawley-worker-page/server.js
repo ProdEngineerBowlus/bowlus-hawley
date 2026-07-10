@@ -3,6 +3,7 @@ import http from "node:http";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import crypto from "node:crypto";
 import pg from "pg";
 import { getDatabaseConfig } from "../postgres-sync/src/config.js";
 
@@ -25,6 +26,7 @@ const WORKER_ACTUALS_WATCH_RESTART_MS = Number(process.env.HAWLEY_WORKER_ACTUALS
 const NIGHTLY_REFRESH_TIME = process.env.HAWLEY_NIGHTLY_REFRESH_TIME || "01:00";
 const NIGHTLY_REFRESH_TIME_ZONE = process.env.HAWLEY_NIGHTLY_REFRESH_TIME_ZONE || "America/Los_Angeles";
 const NIGHTLY_REFRESH_SCRIPT = process.env.HAWLEY_NIGHTLY_REFRESH_SCRIPT || "pg:refresh-worker-read-model";
+const APPLY_MIGRATIONS_ON_START = booleanEnv("HAWLEY_APPLY_MIGRATIONS_ON_START", process.env.NODE_ENV === "production");
 const JACOB_R_WORKER_ID = process.env.HAWLEY_JACOB_R_WORKER_ID || "asana-asana-bowlus-com";
 const JACOB_R_WORKER_NAME = process.env.HAWLEY_JACOB_R_NAME || "Jacob R";
 const JACOB_R_WORKER_EMAIL = process.env.HAWLEY_JACOB_R_EMAIL || "asana@bowlus.com";
@@ -36,10 +38,13 @@ const WORKER_WRITE_IDS = new Set(
     .map(canonicalWorkerIdForWrites)
     .filter(Boolean)
 );
+const TRANSITION_REVIEWS_ENABLED = booleanEnv("HAWLEY_TRANSITION_REVIEWS_ENABLED", true);
 const LIVE_WORKER_SOURCE = "hawley_worker_live_pilot";
 
 const pool = new Pool(getDatabaseConfig());
 const writePool = new Pool(getDatabaseConfig({ useSyncUrl: true }));
+const migrationsDir = path.join(repoRoot, "db", "migrations");
+const viewsDir = path.join(repoRoot, "db", "views");
 
 const asanaEventWatcherState = {
   enabled: false,
@@ -124,7 +129,7 @@ function sendError(res, status, message, details = {}) {
 
 function publicErrorMessage(error) {
   const message = error.message || "";
-  if (/hawley_worker_page_assignments|hawley_cycle_calendar|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|jsonb_display_text/.test(message)) {
+  if (/hawley_worker_page_assignments|hawley_cycle_calendar|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|jsonb_display_text|task_transition_events|time_sessions|transition_category_catalog/.test(message)) {
     return {
       status: 503,
       message: "Hawley worker read model is not migrated yet. Run npm run pg:migrate."
@@ -731,6 +736,69 @@ async function applyRuntimeReadGrants() {
       await client.query(statement);
     }
     console.log("Hawley runtime read grants verified.");
+  } finally {
+    await client.end();
+  }
+}
+
+async function ensureMigrationTable(client) {
+  await client.query(`
+    create table if not exists sync.schema_migrations (
+      filename text primary key,
+      applied_at timestamptz not null default now()
+    )
+  `);
+}
+
+async function applyStartupMigrations() {
+  if (!APPLY_MIGRATIONS_ON_START) return;
+  if (!syncDatabaseConfigured()) {
+    console.warn("Hawley startup migrations skipped: missing sync database URL.");
+    return;
+  }
+
+  const client = new pg.Client(getDatabaseConfig({ useSyncUrl: true }));
+  await client.connect();
+  await client.query("begin");
+  try {
+    await client.query("create schema if not exists sync");
+    await ensureMigrationTable(client);
+
+    const migrationFiles = (await fs.readdir(migrationsDir))
+      .filter(file => file.endsWith(".sql"))
+      .sort();
+
+    for (const file of migrationFiles) {
+      const alreadyApplied = await client.query(
+        "select 1 from sync.schema_migrations where filename = $1",
+        [file]
+      );
+      if (alreadyApplied.rowCount) continue;
+
+      const sql = await fs.readFile(path.join(migrationsDir, file), "utf8");
+      console.log(`Applying Hawley migration ${file}`);
+      await client.query(sql);
+      await client.query(
+        "insert into sync.schema_migrations (filename) values ($1)",
+        [file]
+      );
+    }
+
+    const viewFiles = (await fs.readdir(viewsDir))
+      .filter(file => file.endsWith(".sql"))
+      .sort();
+
+    for (const file of viewFiles) {
+      const sql = await fs.readFile(path.join(viewsDir, file), "utf8");
+      console.log(`Applying Hawley view ${file}`);
+      await client.query(sql);
+    }
+
+    await client.query("commit");
+    console.log("Hawley startup migrations verified.");
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
   } finally {
     await client.end();
   }
@@ -2374,6 +2442,7 @@ function authStatusPayload() {
     workerWritesEnabled: WORKER_WRITES_ENABLED,
     workerWritesAll: WORKER_WRITES_ALL,
     managerControlEnabled: WORKER_WRITES_ENABLED,
+    transitionReviewsEnabled: TRANSITION_REVIEWS_ENABLED,
     writeWorkerIds: workerWriteIds(),
     writeWorkerNames: WORKER_WRITES_ENABLED && !WORKER_WRITES_ALL ? [JACOB_R_WORKER_NAME] : [],
     liveWriteScope: WORKER_WRITES_ALL
@@ -2667,6 +2736,423 @@ function formatTimerMinutes(minutes) {
   return `${remainder}m`;
 }
 
+function eventKey(prefix) {
+  return `${prefix}:${crypto.randomUUID()}`;
+}
+
+function phaseKeyFromLabel(value) {
+  return String(value || "unspecified")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "unspecified";
+}
+
+function phaseKeyForTask(task) {
+  return task.workAreaKey || phaseKeyFromLabel(task.workArea || task.phase || "Unspecified");
+}
+
+function phaseNameForTask(task) {
+  return formatPhaseName(task.workArea || task.phase || "Unspecified") || "Unspecified";
+}
+
+function estimatedMinutesForTask(task) {
+  return Number(task.estimatedMinutes || 0) || minutesFromHours(task.targetHours || task.assignedHours || task.estimatedHours || 0);
+}
+
+function sessionKeyForWorkerTask(workerId, date, taskId, startedAt) {
+  const timestamp = new Date(startedAt);
+  const safeStartedAt = Number.isNaN(timestamp.getTime()) ? String(startedAt || "") : timestamp.toISOString();
+  return `${workerId}::${date}::${taskId}::${safeStartedAt}`;
+}
+
+function runningSegmentMinutes(timer, now) {
+  if (!timer?.startedAt) return 0;
+  const startedAt = new Date(timer.startedAt);
+  if (Number.isNaN(startedAt.getTime())) return 0;
+  return Math.max(1, Math.round((now.getTime() - startedAt.getTime()) / 60000));
+}
+
+async function recordWorkerTaskEvent(client, worker, task, date, eventType, eventTimestamp, options = {}) {
+  const phaseKey = phaseKeyForTask(task);
+  const phaseName = phaseNameForTask(task);
+  const result = await client.query(
+    `
+      insert into core.worker_task_events (
+        event_key,
+        worker_key,
+        worker_name,
+        worker_email,
+        asana_task_gid,
+        task_instance_id,
+        task_name,
+        phase_key,
+        phase_name,
+        work_date,
+        event_type,
+        event_timestamp,
+        duration_minutes,
+        source,
+        sync_status,
+        payload,
+        notes
+      )
+      values (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date,
+        $11, $12::timestamptz, $13, 'hawley_worker_app', $14, $15::jsonb, $16
+      )
+      returning worker_task_event_id
+    `,
+    [
+      eventKey(`worker-task-${eventType}`),
+      worker.id,
+      worker.name,
+      worker.email || "",
+      String(task.id || ""),
+      task.taskInstanceId || null,
+      task.title || "",
+      phaseKey,
+      phaseName,
+      date,
+      eventType,
+      eventTimestamp,
+      options.durationMinutes ?? null,
+      options.syncStatus || "not_ready",
+      JSON.stringify(options.payload || {}),
+      options.notes || null
+    ]
+  );
+  return result.rows[0];
+}
+
+async function startTimeSession(client, worker, task, date, startedAt, payload = {}) {
+  const phaseKey = phaseKeyForTask(task);
+  const phaseName = phaseNameForTask(task);
+  const result = await client.query(
+    `
+      insert into core.time_sessions (
+        session_key,
+        worker_key,
+        worker_name,
+        worker_email,
+        asana_task_gid,
+        task_instance_id,
+        task_name,
+        phase_key,
+        phase_name,
+        reporting_phase_key,
+        reporting_phase_name,
+        work_date,
+        started_at,
+        estimated_minutes,
+        source,
+        source_payload
+      )
+      values (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $8, $9,
+        $10::date, $11::timestamptz, $12, 'hawley_worker_app', $13::jsonb
+      )
+      on conflict (session_key) do update set
+        worker_name = excluded.worker_name,
+        worker_email = excluded.worker_email,
+        task_name = excluded.task_name,
+        phase_key = excluded.phase_key,
+        phase_name = excluded.phase_name,
+        reporting_phase_key = excluded.reporting_phase_key,
+        reporting_phase_name = excluded.reporting_phase_name,
+        estimated_minutes = excluded.estimated_minutes,
+        source_payload = core.time_sessions.source_payload || excluded.source_payload,
+        updated_at = now()
+      returning *
+    `,
+    [
+      sessionKeyForWorkerTask(worker.id, date, task.id, startedAt),
+      worker.id,
+      worker.name,
+      worker.email || "",
+      String(task.id || ""),
+      task.taskInstanceId || null,
+      task.title || "",
+      phaseKey,
+      phaseName,
+      date,
+      startedAt,
+      estimatedMinutesForTask(task),
+      JSON.stringify(payload)
+    ]
+  );
+  return result.rows[0];
+}
+
+async function closeTimeSession(client, worker, task, date, startedAt, stoppedAt, stopReason, durationMinutes, payload = {}) {
+  if (!startedAt) return null;
+  const sessionKey = sessionKeyForWorkerTask(worker.id, date, task.id, startedAt);
+  const phaseKey = phaseKeyForTask(task);
+  const phaseName = phaseNameForTask(task);
+  const update = await client.query(
+    `
+      update core.time_sessions
+      set
+        stopped_at = $2::timestamptz,
+        duration_minutes = $3,
+        stop_reason = $4,
+        source_payload = source_payload || $5::jsonb,
+        updated_at = now()
+      where session_key = $1
+      returning *
+    `,
+    [sessionKey, stoppedAt, durationMinutes, stopReason, JSON.stringify(payload)]
+  );
+  if (update.rows[0]) return update.rows[0];
+
+  const insert = await client.query(
+    `
+      insert into core.time_sessions (
+        session_key,
+        worker_key,
+        worker_name,
+        worker_email,
+        asana_task_gid,
+        task_instance_id,
+        task_name,
+        phase_key,
+        phase_name,
+        reporting_phase_key,
+        reporting_phase_name,
+        work_date,
+        started_at,
+        stopped_at,
+        duration_minutes,
+        estimated_minutes,
+        stop_reason,
+        source,
+        source_payload
+      )
+      values (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $8, $9,
+        $10::date, $11::timestamptz, $12::timestamptz, $13, $14, $15,
+        'hawley_worker_app', $16::jsonb
+      )
+      on conflict (session_key) do update set
+        stopped_at = excluded.stopped_at,
+        duration_minutes = excluded.duration_minutes,
+        stop_reason = excluded.stop_reason,
+        source_payload = core.time_sessions.source_payload || excluded.source_payload,
+        updated_at = now()
+      returning *
+    `,
+    [
+      sessionKey,
+      worker.id,
+      worker.name,
+      worker.email || "",
+      String(task.id || ""),
+      task.taskInstanceId || null,
+      task.title || "",
+      phaseKey,
+      phaseName,
+      date,
+      startedAt,
+      stoppedAt,
+      durationMinutes,
+      estimatedMinutesForTask(task),
+      stopReason,
+      JSON.stringify(payload)
+    ]
+  );
+  return insert.rows[0];
+}
+
+function transitionBucketKey(minutes) {
+  const value = Number(minutes || 0);
+  if (value < 2) return "micro_transition";
+  if (value < 5) return "normal_transition";
+  if (value < 10) return "extended_transition";
+  if (value < 20) return "alert_transition";
+  if (value < 45) return "material_utilization_gap";
+  return "major_gap";
+}
+
+function transitionAutoCategory(minutes) {
+  return Number(minutes || 0) <= 5 ? "normal_transition" : "unknown_needs_review";
+}
+
+function numericMinutesBetween(start, end) {
+  const startMs = new Date(start).getTime();
+  const endMs = new Date(end).getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return 0;
+  return round(Math.max(0, (endMs - startMs) / 60000), 2);
+}
+
+async function assignmentChangedDuringGap(client, worker, previousEndedAt, nextStartedAt) {
+  if (!worker?.email && !worker?.name) return false;
+  const result = await client.query(
+    `
+      select 1
+      from core.assignment_events
+      where detected_at >= $1::timestamptz
+        and detected_at <= $2::timestamptz
+        and (
+          lower(coalesce(new_assignee_email, '')) = lower($3)
+          or lower(coalesce(previous_assignee_email, '')) = lower($3)
+          or lower(coalesce(new_assignee_name, '')) = lower($4)
+          or lower(coalesce(previous_assignee_name, '')) = lower($4)
+        )
+      limit 1
+    `,
+    [previousEndedAt, nextStartedAt, worker.email || "", worker.name || ""]
+  );
+  return Boolean(result.rowCount);
+}
+
+async function createTransitionForNewSession(client, worker, newSession) {
+  if (!newSession?.started_at) return null;
+  const previousResult = await client.query(
+    `
+      select *
+      from core.time_sessions
+      where worker_key = $1
+        and work_date = $2::date
+        and stopped_at is not null
+        and started_at < $3::timestamptz
+        and time_session_id <> $4
+      order by stopped_at desc, time_session_id desc
+      limit 1
+    `,
+    [newSession.worker_key, newSession.work_date, newSession.started_at, newSession.time_session_id]
+  );
+  const previous = previousResult.rows[0];
+  if (!previous) return null;
+
+  const rawGapMinutes = numericMinutesBetween(previous.stopped_at, newSession.started_at);
+  const allowedTransitionMinutes = 5;
+  const excessGapMinutes = round(Math.max(0, rawGapMinutes - allowedTransitionMinutes), 2);
+  const gapBucket = transitionBucketKey(rawGapMinutes);
+  const assignmentChanged = await assignmentChangedDuringGap(client, worker, previous.stopped_at, newSession.started_at);
+  const previousEstimated = Number(previous.estimated_minutes || 0);
+  const previousActual = Number(previous.duration_minutes || 0);
+  const overEstimate = Boolean(previousEstimated > 0 && previousActual > previousEstimated + 15);
+  const reviewRequired = rawGapMinutes >= 10 || excessGapMinutes > 0 || assignmentChanged || overEstimate;
+  const autoCategory = transitionAutoCategory(rawGapMinutes);
+
+  const result = await client.query(
+    `
+      insert into core.task_transition_events (
+        transition_key,
+        worker_key,
+        worker_name,
+        worker_email,
+        work_date,
+        previous_task_gid,
+        previous_task_name,
+        next_task_gid,
+        next_task_name,
+        previous_phase_key,
+        previous_phase_name,
+        next_phase_key,
+        next_phase_name,
+        reporting_phase_key,
+        reporting_phase_name,
+        previous_task_ended_at,
+        next_task_started_at,
+        raw_gap_minutes,
+        gap_bucket,
+        allowed_transition_minutes,
+        excess_gap_minutes,
+        previous_task_completed,
+        previous_task_estimated_minutes,
+        previous_task_actual_minutes,
+        previous_task_over_estimate,
+        next_task_assigned_before_gap,
+        assignment_changed_during_gap,
+        auto_category,
+        auto_category_reason,
+        review_required,
+        source,
+        source_payload
+      )
+      values (
+        $1, $2, $3, $4, $5::date, $6, $7, $8, $9, $10, $11,
+        $12, $13, $14, $15, $16::timestamptz, $17::timestamptz,
+        $18, $19, $20, $21, $22, $23, $24, $25, true, $26,
+        $27, $28, $29, 'hawley_worker_app', $30::jsonb
+      )
+      on conflict (transition_key) do update set
+        worker_name = excluded.worker_name,
+        worker_email = excluded.worker_email,
+        previous_task_name = excluded.previous_task_name,
+        next_task_name = excluded.next_task_name,
+        previous_phase_key = excluded.previous_phase_key,
+        previous_phase_name = excluded.previous_phase_name,
+        next_phase_key = excluded.next_phase_key,
+        next_phase_name = excluded.next_phase_name,
+        reporting_phase_key = excluded.reporting_phase_key,
+        reporting_phase_name = excluded.reporting_phase_name,
+        raw_gap_minutes = excluded.raw_gap_minutes,
+        gap_bucket = excluded.gap_bucket,
+        excess_gap_minutes = excluded.excess_gap_minutes,
+        previous_task_completed = excluded.previous_task_completed,
+        previous_task_estimated_minutes = excluded.previous_task_estimated_minutes,
+        previous_task_actual_minutes = excluded.previous_task_actual_minutes,
+        previous_task_over_estimate = excluded.previous_task_over_estimate,
+        next_task_assigned_before_gap = excluded.next_task_assigned_before_gap,
+        assignment_changed_during_gap = excluded.assignment_changed_during_gap,
+        auto_category = excluded.auto_category,
+        auto_category_reason = excluded.auto_category_reason,
+        review_required = excluded.review_required,
+        source_payload = core.task_transition_events.source_payload || excluded.source_payload,
+        updated_at = now()
+      returning transition_event_id
+    `,
+    [
+      `${newSession.worker_key}::${newSession.work_date}::${previous.time_session_id}->${newSession.time_session_id}`,
+      newSession.worker_key,
+      newSession.worker_name || previous.worker_name,
+      newSession.worker_email || previous.worker_email,
+      newSession.work_date,
+      previous.asana_task_gid,
+      previous.task_name,
+      newSession.asana_task_gid,
+      newSession.task_name,
+      previous.reporting_phase_key || previous.phase_key,
+      previous.reporting_phase_name || previous.phase_name,
+      newSession.reporting_phase_key || newSession.phase_key,
+      newSession.reporting_phase_name || newSession.phase_name,
+      previous.reporting_phase_key || previous.phase_key,
+      previous.reporting_phase_name || previous.phase_name,
+      previous.stopped_at,
+      newSession.started_at,
+      rawGapMinutes,
+      gapBucket,
+      allowedTransitionMinutes,
+      excessGapMinutes,
+      previous.stop_reason === "complete",
+      previousEstimated || null,
+      previousActual || null,
+      overEstimate,
+      assignmentChanged,
+      autoCategory,
+      rawGapMinutes <= 5 ? "Gap is within expected transition allowance." : "Gap exceeds transition allowance and should be reviewed.",
+      reviewRequired,
+      JSON.stringify({
+        previousSessionId: previous.time_session_id,
+        nextSessionId: newSession.time_session_id
+      })
+    ]
+  );
+
+  return result.rows[0];
+}
+
+async function tryWorkerTransitionLedger(label, callback) {
+  try {
+    return await callback();
+  } catch (error) {
+    console.warn(`Hawley transition ledger skipped ${label}: ${error.message}`);
+    return null;
+  }
+}
+
 async function handleWorkerTaskAction(req) {
   const body = await readJsonBody(req);
   const action = String(body.action || "").trim().toLowerCase();
@@ -2732,6 +3218,21 @@ async function handleWorkerTaskAction(req) {
         sourceLabel: "Hawley timer started",
         seenAt: nowIso
       });
+      await tryWorkerTransitionLedger("start", async () => {
+        await recordWorkerTaskEvent(client, worker, task, date, "start", nowIso, {
+          payload: {
+            startedAt: saved.startedAt,
+            accumulatedMinutes: saved.accumulatedMinutes,
+            ledgerKey
+          }
+        });
+        const session = await startTimeSession(client, worker, task, date, saved.startedAt || nowIso, {
+          action: "start",
+          ledgerKey,
+          accumulatedMinutes: saved.accumulatedMinutes
+        });
+        await createTransitionForNewSession(client, worker, session);
+      });
 
       return {
         ok: true,
@@ -2750,6 +3251,7 @@ async function handleWorkerTaskAction(req) {
 
     const elapsedMinutes = liveTimerElapsedMinutes(current, now);
     const actualMinutes = liveTimerTotalActualMinutes(current, now);
+    const segmentMinutes = runningSegmentMinutes(current, now);
     if (action === "stop") {
       const saved = await upsertLiveWorkerActual(client, worker, task, date, {
         ...current,
@@ -2762,6 +3264,22 @@ async function handleWorkerTaskAction(req) {
         asanaPostedMinutes: current.asanaPostedMinutes,
         sourceLabel: "Hawley timer stopped",
         seenAt: nowIso
+      });
+      await tryWorkerTransitionLedger("stop", async () => {
+        await closeTimeSession(client, worker, task, date, current.startedAt, nowIso, "stop", segmentMinutes, {
+          action: "stop",
+          ledgerKey,
+          elapsedMinutes,
+          actualMinutes
+        });
+        await recordWorkerTaskEvent(client, worker, task, date, "stop", nowIso, {
+          durationMinutes: segmentMinutes || elapsedMinutes,
+          payload: {
+            accumulatedMinutes: saved.accumulatedMinutes,
+            actualMinutes: saved.actualMinutes,
+            ledgerKey
+          }
+        });
       });
 
       return {
@@ -2794,6 +3312,22 @@ async function handleWorkerTaskAction(req) {
         asanaPostedMinutes: current.asanaPostedMinutes,
         sourceLabel: "Hawley timer session ended",
         seenAt: nowIso
+      });
+      await tryWorkerTransitionLedger("release", async () => {
+        await closeTimeSession(client, worker, task, date, current.startedAt, nowIso, "release", segmentMinutes, {
+          action: "release",
+          ledgerKey,
+          elapsedMinutes,
+          actualMinutes
+        });
+        await recordWorkerTaskEvent(client, worker, task, date, "release", nowIso, {
+          durationMinutes: segmentMinutes || elapsedMinutes,
+          payload: {
+            elapsedMinutes,
+            actualMinutes: saved.actualMinutes || actualMinutes,
+            ledgerKey
+          }
+        });
       });
 
       return {
@@ -2841,6 +3375,24 @@ async function handleWorkerTaskAction(req) {
       timeEntryCreated: current.timeEntryCreated,
       sourceLabel: "Hawley completion pending",
       seenAt: nowIso
+    });
+    await tryWorkerTransitionLedger("complete", async () => {
+      await closeTimeSession(client, worker, task, date, current.startedAt, nowIso, "complete", segmentMinutes, {
+        action: "complete",
+        ledgerKey,
+        elapsedMinutes,
+        actualMinutes
+      });
+      await recordWorkerTaskEvent(client, worker, task, date, "complete", nowIso, {
+        durationMinutes: segmentMinutes || elapsedMinutes,
+        syncStatus: "pending",
+        payload: {
+          elapsedMinutes,
+          actualMinutes,
+          unpostedMinutes: Math.max(0, actualMinutes - Number(current.asanaPostedMinutes || 0)),
+          ledgerKey
+        }
+      });
     });
 
     const unpostedMinutes = Math.max(0, actualMinutes - Number(current.asanaPostedMinutes || 0));
@@ -2893,6 +3445,411 @@ async function handleWorkerTaskAction(req) {
   } finally {
     client.release();
   }
+}
+
+function numberField(row, key) {
+  const value = Number(row?.[key]);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function textKey(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function phaseSlug(value) {
+  return String(value || "unspecified")
+    .toLowerCase()
+    .replace(/_/g, "-")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "unspecified";
+}
+
+function phaseMatches(row, phaseFilter) {
+  if (!phaseFilter) return true;
+  const wanted = textKey(phaseFilter);
+  return [
+    row.phase_key,
+    row.phaseKey,
+    row.phaseSlug,
+    row.phase_name,
+    row.phaseName,
+    phaseSlug(row.phase_key || row.phaseKey)
+  ].some(value => textKey(value) === wanted);
+}
+
+function workerMatches(row, workerFilter) {
+  if (!workerFilter) return true;
+  const wanted = textKey(workerFilter);
+  return [
+    row.worker_key,
+    row.workerKey,
+    row.workerSlug,
+    row.worker_email,
+    row.workerEmail,
+    row.worker_name,
+    row.workerName,
+    row.worker_identity,
+    row.workerIdentity
+  ].some(value => textKey(value) === wanted);
+}
+
+function transitionStats(rows) {
+  const transitionRows = Array.isArray(rows) ? rows : [];
+  const taskSwitchCount = transitionRows.filter(row =>
+    String(row.previousTaskGid || "") &&
+    String(row.nextTaskGid || "") &&
+    String(row.previousTaskGid || "") !== String(row.nextTaskGid || "")
+  ).length;
+  const reviewRequiredCount = transitionRows.filter(row => row.reviewRequired).length;
+  const unreviewedCount = transitionRows.filter(row => row.reviewRequired && !row.reviewedAt).length;
+  return {
+    transitionCount: transitionRows.length,
+    taskSwitchCount,
+    handoffGapCount: transitionRows.filter(row => row.previousTaskCompleted || String(row.previousTaskGid || "") !== String(row.nextTaskGid || "")).length,
+    totalTransitionMinutes: round(transitionRows.reduce((sum, row) => sum + Number(row.rawGapMinutes || 0), 0), 2),
+    excessTransitionMinutes: round(transitionRows.reduce((sum, row) => sum + Number(row.excessGapMinutes || 0), 0), 2),
+    reviewRequiredCount,
+    unreviewedTransitionCount: unreviewedCount,
+    reviewedTransitionCount: transitionRows.filter(row => row.reviewedAt).length,
+    maxTransitionMinutes: round(Math.max(0, ...transitionRows.map(row => Number(row.rawGapMinutes || 0))), 2),
+    assignmentChangeCount: transitionRows.filter(row => row.assignmentChangedDuringGap).length
+  };
+}
+
+function categoryPayload(row) {
+  return {
+    categoryKey: row.category_key,
+    displayName: row.display_name,
+    categoryGroup: row.category_group,
+    displayOrder: numberField(row, "display_order"),
+    managerSelectable: Boolean(row.manager_selectable),
+    notes: row.notes || ""
+  };
+}
+
+function transitionPayload(row) {
+  return {
+    transitionEventId: numberField(row, "transition_event_id"),
+    transitionKey: row.transition_key || "",
+    workerKey: row.worker_key || "",
+    workerName: row.worker_name || "",
+    workerEmail: row.worker_email || "",
+    workerIdentity: row.worker_identity || "",
+    workerSlug: slugifyWorker({ workerEmail: row.worker_email, workerName: row.worker_name }),
+    workDate: row.work_date ? String(row.work_date).slice(0, 10) : "",
+    previousTaskGid: row.previous_task_gid || "",
+    previousTaskName: row.previous_task_name || "",
+    nextTaskGid: row.next_task_gid || "",
+    nextTaskName: row.next_task_name || "",
+    previousPhaseKey: row.previous_phase_key || "",
+    previousPhaseName: row.previous_phase_name || "",
+    nextPhaseKey: row.next_phase_key || "",
+    nextPhaseName: row.next_phase_name || "",
+    phaseKey: row.reporting_phase_key || "",
+    phaseName: row.reporting_phase_name || "",
+    phaseSlug: phaseSlug(row.reporting_phase_key),
+    previousTaskEndedAt: row.previous_task_ended_at || "",
+    nextTaskStartedAt: row.next_task_started_at || "",
+    rawGapMinutes: numberField(row, "raw_gap_minutes"),
+    gapBucket: row.gap_bucket || "",
+    gapBucketName: row.gap_bucket_name || row.gap_bucket || "",
+    allowedTransitionMinutes: numberField(row, "allowed_transition_minutes"),
+    excessGapMinutes: numberField(row, "excess_gap_minutes"),
+    previousTaskCompleted: Boolean(row.previous_task_completed),
+    previousTaskEstimatedMinutes: numberField(row, "previous_task_estimated_minutes"),
+    previousTaskActualMinutes: numberField(row, "previous_task_actual_minutes"),
+    previousTaskOverEstimate: Boolean(row.previous_task_over_estimate),
+    nextTaskAssignedBeforeGap: Boolean(row.next_task_assigned_before_gap),
+    assignmentChangedDuringGap: Boolean(row.assignment_changed_during_gap),
+    loggedOutAlertTriggered: Boolean(row.logged_out_alert_triggered),
+    overEstimateAlertTriggered: Boolean(row.over_estimate_alert_triggered),
+    autoCategory: row.auto_category || "",
+    autoCategoryName: row.auto_category_name || "",
+    autoCategoryGroup: row.auto_category_group || "",
+    autoCategoryReason: row.auto_category_reason || "",
+    reviewRequired: Boolean(row.review_required),
+    managerCategory: row.manager_category || "",
+    managerCategoryName: row.manager_category_name || "",
+    managerCategoryGroup: row.manager_category_group || "",
+    managerNotes: row.manager_notes || "",
+    reviewedBy: row.reviewed_by || "",
+    reviewedAt: row.reviewed_at || "",
+    managerFlagged: Boolean(row.manager_flagged),
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || ""
+  };
+}
+
+function phaseSummaryPayload(row, transitions = []) {
+  const stats = transitionStats(transitions);
+  return {
+    workDate: row.work_date ? String(row.work_date).slice(0, 10) : "",
+    phaseKey: row.phase_key || "",
+    phaseName: row.phase_name || row.phase_key || "Unspecified",
+    phaseSlug: phaseSlug(row.phase_key),
+    totalActualTaskMinutes: numberField(row, "total_actual_task_minutes"),
+    totalActualTaskHours: numberField(row, "total_actual_task_hours"),
+    totalTransitionMinutes: numberField(row, "total_transition_minutes") || stats.totalTransitionMinutes,
+    excessTransitionMinutes: numberField(row, "excess_transition_minutes") || stats.excessTransitionMinutes,
+    totalEstimatedMinutes: numberField(row, "total_estimated_minutes"),
+    efficiencyPercent: numberField(row, "efficiency_percent"),
+    assignedTaskCount: numberField(row, "assigned_task_count"),
+    completedTaskCount: numberField(row, "completed_task_count"),
+    assignedVsCompletedPercent: numberField(row, "assigned_vs_completed_percent"),
+    startedTaskCount: numberField(row, "started_task_count"),
+    workerCount: numberField(row, "worker_count"),
+    assignedWorkerCount: numberField(row, "assigned_worker_count"),
+    taskChurnCount: numberField(row, "task_churn_count"),
+    gapsRequiringReviewCount: numberField(row, "gaps_requiring_review_count") || stats.reviewRequiredCount,
+    reviewedGapCount: numberField(row, "reviewed_gap_count") || stats.reviewedTransitionCount,
+    unreviewedGapCount: numberField(row, "unreviewed_gap_count") || stats.unreviewedTransitionCount,
+    transitionStats: stats,
+    topTransitionCategory: row.top_transition_category || "",
+    topManagerCategoryGroup: row.top_manager_category_group || ""
+  };
+}
+
+function workerPhaseSummaryPayload(row, transitions = []) {
+  const stats = transitionStats(transitions);
+  return {
+    workDate: row.work_date ? String(row.work_date).slice(0, 10) : "",
+    workerKey: row.worker_key || "",
+    workerName: row.worker_name || "",
+    workerEmail: row.worker_email || "",
+    workerSlug: slugifyWorker({ workerEmail: row.worker_email, workerName: row.worker_name }),
+    phaseKey: row.phase_key || "",
+    phaseName: row.phase_name || row.phase_key || "Unspecified",
+    phaseSlug: phaseSlug(row.phase_key),
+    actualTaskMinutes: numberField(row, "actual_task_minutes"),
+    actualTaskHours: numberField(row, "actual_task_hours"),
+    estimatedMinutes: numberField(row, "estimated_minutes"),
+    transitionMinutes: numberField(row, "transition_minutes") || stats.totalTransitionMinutes,
+    excessTransitionMinutes: numberField(row, "excess_transition_minutes") || stats.excessTransitionMinutes,
+    efficiencyPercent: numberField(row, "efficiency_percent"),
+    assignedTaskCount: numberField(row, "assigned_task_count"),
+    startedTaskCount: numberField(row, "started_task_count"),
+    completedTaskCount: numberField(row, "completed_task_count"),
+    assignedVsCompletedPercent: numberField(row, "assigned_vs_completed_percent"),
+    taskSessionCount: numberField(row, "task_session_count"),
+    taskChurnCount: numberField(row, "task_churn_count"),
+    gapsRequiringReviewCount: numberField(row, "gaps_requiring_review_count") || stats.reviewRequiredCount,
+    transitionStats: stats,
+    topTransitionCategory: row.top_transition_category || "",
+    topManagerCategoryGroup: row.top_manager_category_group || ""
+  };
+}
+
+async function transitionCategories() {
+  const result = await pool.query(`
+    select
+      category_key,
+      display_name,
+      category_group,
+      display_order,
+      manager_selectable,
+      notes
+    from core.transition_category_catalog
+    where active
+    order by display_order, display_name
+  `);
+  return result.rows.map(categoryPayload);
+}
+
+async function utilizationReportPayload(url) {
+  const date = url.searchParams.get("date") || todayIso();
+  const phaseFilter = url.searchParams.get("phase") || "";
+  const workerFilter = url.searchParams.get("worker") || "";
+  if (!isIsoDate(date)) throw actionError("Date must be YYYY-MM-DD.", 400);
+
+  const [phaseResult, workerPhaseResult, workerDailyResult, transitionResult, categories] = await Promise.all([
+    pool.query("select * from reporting.phase_day_summary where work_date = $1::date order by total_actual_task_minutes desc, total_estimated_minutes desc, phase_name", [date]),
+    pool.query("select * from reporting.worker_phase_day_summary where work_date = $1::date order by actual_task_minutes desc, estimated_minutes desc, worker_name", [date]),
+    pool.query("select * from reporting.worker_daily_utilization where work_date = $1::date order by productive_task_minutes desc, worker_name", [date]),
+    pool.query("select * from reporting.transition_event_detail where work_date = $1::date order by previous_task_ended_at nulls last, next_task_started_at nulls last, transition_event_id", [date]),
+    transitionCategories()
+  ]);
+
+  const transitions = transitionResult.rows
+    .map(transitionPayload)
+    .filter(row => phaseMatches(row, phaseFilter) && workerMatches(row, workerFilter));
+  const phases = phaseResult.rows
+    .filter(row => phaseMatches(row, phaseFilter))
+    .map(row => phaseSummaryPayload(row, transitions.filter(transition => phaseMatches(transition, row.phase_key))));
+  const workerPhases = workerPhaseResult.rows
+    .filter(row => phaseMatches(row, phaseFilter) && workerMatches(row, workerFilter))
+    .map(row => workerPhaseSummaryPayload(
+      row,
+      transitions.filter(transition => phaseMatches(transition, row.phase_key) && workerMatches(transition, row.worker_key))
+    ));
+  const workerDaily = workerDailyResult.rows
+    .filter(row => workerMatches(row, workerFilter))
+    .map(row => ({
+      workDate: row.work_date ? String(row.work_date).slice(0, 10) : "",
+      workerKey: row.worker_key || "",
+      workerName: row.worker_name || "",
+      workerEmail: row.worker_email || "",
+      workerSlug: slugifyWorker({ workerEmail: row.worker_email, workerName: row.worker_name }),
+      scheduledHours: numberField(row, "scheduled_hours"),
+      productiveTaskMinutes: numberField(row, "productive_task_minutes"),
+      estimatedMinutes: numberField(row, "estimated_minutes"),
+      totalTransitionMinutes: numberField(row, "total_transition_minutes"),
+      excessTransitionMinutes: numberField(row, "excess_transition_minutes"),
+      unaccountedMinutes: numberField(row, "unaccounted_minutes"),
+      productiveUtilizationPercent: numberField(row, "productive_utilization_percent"),
+      accountedUtilizationPercent: numberField(row, "accounted_utilization_percent"),
+      taskEfficiencyPercent: numberField(row, "task_efficiency_percent"),
+      assignedTaskCount: numberField(row, "assigned_task_count"),
+      completedTaskCount: numberField(row, "completed_task_count"),
+      taskCountStarted: numberField(row, "task_count_started"),
+      taskSessionCount: numberField(row, "task_session_count"),
+      transitionCount: numberField(row, "transition_count"),
+      reviewRequiredCount: numberField(row, "review_required_count"),
+      unreviewedTransitionCount: numberField(row, "unreviewed_transition_count")
+    }));
+  const stats = transitionStats(transitions);
+
+  return {
+    ok: true,
+    date,
+    phase: phaseFilter || null,
+    worker: workerFilter || null,
+    reviewControlsEnabled: Boolean(TRANSITION_REVIEWS_ENABLED && WORKER_WRITES_ENABLED),
+    categories,
+    summary: {
+      ...stats,
+      phaseCount: phases.length,
+      workerPhaseCount: workerPhases.length,
+      workerCount: new Set(workerPhases.map(row => row.workerKey || row.workerSlug || row.workerName).filter(Boolean)).size
+    },
+    phases,
+    workerPhases,
+    workerDaily,
+    transitions,
+    reviewQueue: transitions.filter(row => row.reviewRequired && !row.reviewedAt),
+    refreshedAt: new Date().toISOString()
+  };
+}
+
+async function transitionReviewQueuePayload(url) {
+  const date = url.searchParams.get("date") || todayIso();
+  if (!isIsoDate(date)) throw actionError("Date must be YYYY-MM-DD.", 400);
+  const [queueResult, categories] = await Promise.all([
+    pool.query("select * from reporting.unreviewed_transition_queue where work_date = $1::date order by raw_gap_minutes desc, previous_task_ended_at nulls last", [date]),
+    transitionCategories()
+  ]);
+  const transitions = queueResult.rows.map(transitionPayload);
+  return {
+    ok: true,
+    date,
+    reviewControlsEnabled: Boolean(TRANSITION_REVIEWS_ENABLED && WORKER_WRITES_ENABLED),
+    categories,
+    transitions,
+    summary: transitionStats(transitions),
+    refreshedAt: new Date().toISOString()
+  };
+}
+
+async function transitionById(transitionEventId) {
+  const result = await pool.query(
+    "select * from reporting.transition_event_detail where transition_event_id = $1",
+    [transitionEventId]
+  );
+  return result.rows[0] ? transitionPayload(result.rows[0]) : null;
+}
+
+async function handleTransitionReview(req) {
+  if (!TRANSITION_REVIEWS_ENABLED || !WORKER_WRITES_ENABLED) {
+    throw actionError("Transition review writes are not enabled for this Hawley app.", 403, {
+      mode: authStatusPayload().mode
+    });
+  }
+
+  const body = await readJsonBody(req);
+  const transitionEventId = Number(body.transitionEventId || body.transition_event_id || 0);
+  const managerCategory = String(body.categoryKey || body.managerCategory || "").trim();
+  const managerNotes = String(body.notes || body.managerNotes || "").trim().slice(0, 4000);
+  const reviewedBy = String(body.reviewedBy || "Hawley manager").trim().slice(0, 200);
+  if (!Number.isInteger(transitionEventId) || transitionEventId <= 0) {
+    throw actionError("transitionEventId is required.", 400);
+  }
+  if (!managerCategory) throw actionError("categoryKey is required.", 400);
+
+  const client = await writePool.connect();
+  try {
+    await client.query("begin");
+    const category = await client.query(
+      `
+        select category_key, category_group
+        from core.transition_category_catalog
+        where category_key = $1
+          and active
+          and manager_selectable
+      `,
+      [managerCategory]
+    );
+    if (!category.rows[0]) {
+      throw actionError("Transition category is not manager-selectable.", 400);
+    }
+
+    const categoryGroup = category.rows[0].category_group;
+    await client.query(
+      `
+        insert into core.transition_reviews (
+          transition_event_id,
+          reviewed_by,
+          manager_category,
+          manager_category_group,
+          manager_notes,
+          confidence,
+          action_required,
+          followup_owner,
+          review_mode
+        )
+        values ($1, $2, $3, $4, $5, $6, $7, $8, 'manager_line_view')
+      `,
+      [
+        transitionEventId,
+        reviewedBy,
+        managerCategory,
+        categoryGroup,
+        managerNotes || null,
+        body.confidence || null,
+        Boolean(body.actionRequired),
+        body.followupOwner || null
+      ]
+    );
+    const update = await client.query(
+      `
+        update core.task_transition_events
+        set
+          manager_category = $2,
+          manager_category_group = $3,
+          manager_notes = $4,
+          reviewed_by = $5,
+          reviewed_at = now(),
+          manager_flagged = coalesce(manager_flagged, false) or $6,
+          updated_at = now()
+        where transition_event_id = $1
+        returning transition_event_id
+      `,
+      [transitionEventId, managerCategory, categoryGroup, managerNotes || null, reviewedBy, Boolean(body.managerFlagged)]
+    );
+    if (!update.rows[0]) throw actionError("Transition event was not found.", 404);
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  return {
+    ok: true,
+    transition: await transitionById(transitionEventId)
+  };
 }
 
 async function healthPayload() {
@@ -2978,6 +3935,21 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/utilization-report" && req.method === "GET") {
+      sendJson(res, 200, await utilizationReportPayload(url));
+      return;
+    }
+
+    if (url.pathname === "/api/transition-review-queue" && req.method === "GET") {
+      sendJson(res, 200, await transitionReviewQueuePayload(url));
+      return;
+    }
+
+    if (url.pathname === "/api/transition-review" && req.method === "POST") {
+      sendJson(res, 200, await handleTransitionReview(req));
+      return;
+    }
+
     if (url.pathname === "/api/auth-status" && req.method === "GET") {
       sendJson(res, 200, authStatusPayload());
       return;
@@ -3047,6 +4019,11 @@ const server = http.createServer(async (req, res) => {
 });
 
 async function startServer() {
+  try {
+    await applyStartupMigrations();
+  } catch (error) {
+    console.error(`Hawley startup migrations failed: ${error.message}`);
+  }
   await applyRuntimeReadGrants();
   startAsanaEventWatcher();
   startWorkerActualsWatcher();

@@ -154,6 +154,7 @@ a {
 .worker-row,
 .phase-card,
 .task-row,
+.transition-row,
 .rail-tile,
 .debug-box,
 .notice,
@@ -315,6 +316,98 @@ a {
 
 .task-row {
   grid-template-columns: minmax(260px, 1.55fr) repeat(5, minmax(92px, 0.65fr));
+}
+
+.transition-row {
+  overflow: hidden;
+}
+
+.transition-row.needs-review {
+  border-color: rgba(240, 189, 71, 0.62);
+}
+
+.transition-row.selected {
+  border-color: var(--blue);
+}
+
+.transition-row-button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(280px, 1.6fr) repeat(5, minmax(96px, 0.65fr));
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.transition-row-button:hover,
+.transition-row-button:focus-visible {
+  background: rgba(24, 36, 35, 0.72);
+  outline: none;
+}
+
+.review-drawer {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-top: 1px solid var(--line);
+  background: rgba(15, 22, 20, 0.82);
+}
+
+.review-drawer p {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.review-notes {
+  width: 100%;
+  resize: vertical;
+  min-height: 74px;
+  padding: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: rgba(10, 14, 10, 0.94);
+  color: var(--ink);
+}
+
+.category-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.category-button {
+  min-height: 64px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(24, 29, 22, 0.96);
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.category-button:hover,
+.category-button:focus-visible,
+.category-button.active {
+  border-color: var(--primary);
+  background: rgba(25, 62, 48, 0.52);
+  outline: none;
+}
+
+.category-button span,
+.category-button small {
+  display: block;
+}
+
+.category-button small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.78rem;
 }
 
 .task-title-line {
@@ -504,7 +597,8 @@ a {
 
   .phase-card,
   .worker-row,
-  .task-row {
+  .task-row,
+  .transition-row-button {
     grid-template-columns: 1fr 1fr;
   }
 
@@ -529,7 +623,12 @@ a {
 
   .phase-card,
   .worker-row,
-  .task-row {
+  .task-row,
+  .transition-row-button {
+    grid-template-columns: 1fr;
+  }
+
+  .category-grid {
     grid-template-columns: 1fr;
   }
 }

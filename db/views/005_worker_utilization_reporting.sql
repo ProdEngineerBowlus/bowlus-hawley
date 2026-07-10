@@ -95,6 +95,15 @@ explicit_sessions as (
     sessions.source_payload,
     sessions.updated_at as source_synced_at
   from core.time_sessions sessions
+  where not exists (
+    select 1
+    from hb.worker_daily_task_actuals actuals
+    where actuals.work_date = sessions.work_date
+      and actuals.worker_key = sessions.worker_key
+      and actuals.asana_task_gid = sessions.asana_task_gid
+      and actuals.source_system = 'hawley_worker_live_pilot'
+      and not actuals.daily_summary
+  )
 )
 select
   session_key,

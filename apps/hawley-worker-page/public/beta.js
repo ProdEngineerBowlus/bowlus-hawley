@@ -9,18 +9,21 @@
 
   const params = new URLSearchParams(window.location.search);
   const initialView = params.get("view");
+  const validPhaseViews = new Set(["workers", "tasks", "worker", "transitions", "review"]);
   const today = localTodayIso();
   const state = {
     date: params.get("date") || today,
     selectedPhase: params.get("phase") || "",
-    phaseView: initialView === "tasks" || initialView === "worker" ? initialView : "workers",
+    phaseView: validPhaseViews.has(initialView) ? initialView : "workers",
     selectedWorker: params.get("worker") || "",
+    selectedTransition: params.get("transition") || "",
     loading: true,
     error: "",
     health: null,
     sync: null,
     auth: null,
     assignments: null,
+    utilization: null,
   };
 
   const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
@@ -67,6 +70,13 @@
     return `${date.toLocaleDateString()} ${timeFmt.format(date)}`;
   }
 
+  function formatClock(value) {
+    if (!value) return "--";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "--";
+    return timeFmt.format(date);
+  }
+
   async function fetchJson(url) {
     const response = await fetch(url, { cache: "no-store" });
     const payload = await response.json().catch(() => ({}));
@@ -74,6 +84,19 @@
       throw new Error(payload.error || payload.message || `Request failed: ${response.status}`);
     }
     return payload;
+  }
+
+  async function postJson(url, payload) {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {}),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(body.error || body.message || `Request failed: ${response.status}`);
+    }
+    return body;
   }
 
   function updateUrl() {
@@ -91,10 +114,16 @@
       } else {
         url.searchParams.delete("worker");
       }
+      if (state.selectedTransition) {
+        url.searchParams.set("transition", state.selectedTransition);
+      } else {
+        url.searchParams.delete("transition");
+      }
     } else {
       url.searchParams.delete("phase");
       url.searchParams.delete("view");
       url.searchParams.delete("worker");
+      url.searchParams.delete("transition");
     }
     window.history.replaceState({}, "", url);
   }
@@ -104,6 +133,7 @@
     state.selectedPhase = "";
     state.phaseView = "workers";
     state.selectedWorker = "";
+    state.selectedTransition = "";
     updateUrl();
     load();
   }
@@ -112,6 +142,7 @@
     state.selectedPhase = phaseKey || "";
     state.phaseView = "workers";
     state.selectedWorker = "";
+    state.selectedTransition = "";
     updateUrl();
     render();
   }
@@ -119,6 +150,7 @@
   function setPhaseView(view) {
     state.phaseView = view || "workers";
     if (state.phaseView !== "worker") state.selectedWorker = "";
+    if (state.phaseView !== "review" && state.phaseView !== "transitions") state.selectedTransition = "";
     updateUrl();
     render();
   }
@@ -126,6 +158,13 @@
   function setWorker(workerKey) {
     state.phaseView = "worker";
     state.selectedWorker = workerKey || "";
+    state.selectedTransition = "";
+    updateUrl();
+    render();
+  }
+
+  function setTransition(transitionId) {
+    state.selectedTransition = transitionId ? String(transitionId) : "";
     updateUrl();
     render();
   }
@@ -137,23 +176,27 @@
 
     const stamp = Date.now();
     try {
-      const [health, sync, auth, assignments] = await Promise.all([
+      const [health, sync, auth, assignments, utilization] = await Promise.all([
         fetchJson(`/api/health?_=${stamp}`),
         fetchJson(`/api/sync-status?_=${stamp}`),
         fetchJson(`/api/auth-status?_=${stamp}`),
         fetchJson(`/api/daily-assignments?date=${encodeURIComponent(state.date)}&includeNoWork=true&_=${stamp}`),
+        fetchJson(`/api/utilization-report?date=${encodeURIComponent(state.date)}&_=${stamp}`),
       ]);
       state.health = health;
       state.sync = sync;
       state.auth = auth;
       state.assignments = assignments;
+      state.utilization = utilization;
       if (state.selectedPhase && !selectedPhaseRow()) state.selectedPhase = "";
       if (!state.selectedPhase) {
         state.phaseView = "workers";
         state.selectedWorker = "";
+        state.selectedTransition = "";
       } else if (state.phaseView === "worker" && !selectedPhaseWorkerRow()) {
         state.phaseView = "workers";
         state.selectedWorker = "";
+        state.selectedTransition = "";
       }
       updateUrl();
     } catch (error) {
@@ -193,6 +236,76 @@
 
   function workers() {
     return Array.isArray(state.assignments?.workers) ? state.assignments.workers : [];
+  }
+
+  function utilization() {
+    return state.utilization || {};
+  }
+
+  function normalizeKey(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "");
+  }
+
+  function phaseKeyMatches(left, right) {
+    return Boolean(left || right) && normalizeKey(left) === normalizeKey(right);
+  }
+
+  function workerKeyMatches(left, right) {
+    return Boolean(left || right) && normalizeKey(left) === normalizeKey(right);
+  }
+
+  function reportPhases() {
+    return Array.isArray(utilization().phases) ? utilization().phases : [];
+  }
+
+  function reportWorkerPhases() {
+    return Array.isArray(utilization().workerPhases) ? utilization().workerPhases : [];
+  }
+
+  function reportTransitions() {
+    return Array.isArray(utilization().transitions) ? utilization().transitions : [];
+  }
+
+  function reportCategories() {
+    return Array.isArray(utilization().categories) ? utilization().categories : [];
+  }
+
+  function reviewControlsEnabled() {
+    return Boolean(state.auth?.managerControlEnabled && utilization().reviewControlsEnabled);
+  }
+
+  function transitionsForScope(phaseKey = "", workerKey = "", reviewOnly = false) {
+    return reportTransitions().filter((transition) => {
+      const phaseMatch = !phaseKey || phaseKeyMatches(transition.phaseKey, phaseKey) || phaseKeyMatches(transition.phaseSlug, phaseKey);
+      const workerMatch = !workerKey || workerKeyMatches(transition.workerKey, workerKey) || workerKeyMatches(transition.workerSlug, workerKey);
+      const reviewMatch = !reviewOnly || (transition.reviewRequired && !transition.reviewedAt);
+      return phaseMatch && workerMatch && reviewMatch;
+    });
+  }
+
+  function selectedTransitionRow(phaseKey = "", workerKey = "") {
+    if (!state.selectedTransition) return null;
+    return transitionsForScope(phaseKey, workerKey).find((transition) => String(transition.transitionEventId) === String(state.selectedTransition)) || null;
+  }
+
+  function transitionStats(rows) {
+    const list = Array.isArray(rows) ? rows : [];
+    const taskSwitchCount = list.filter((row) =>
+      row.previousTaskGid &&
+      row.nextTaskGid &&
+      String(row.previousTaskGid) !== String(row.nextTaskGid)
+    ).length;
+    return {
+      transitionCount: list.length,
+      taskSwitchCount,
+      handoffGapCount: list.filter((row) => row.previousTaskCompleted || String(row.previousTaskGid || "") !== String(row.nextTaskGid || "")).length,
+      totalTransitionMinutes: list.reduce((sum, row) => sum + Number(row.rawGapMinutes || 0), 0),
+      excessTransitionMinutes: list.reduce((sum, row) => sum + Number(row.excessGapMinutes || 0), 0),
+      reviewRequiredCount: list.filter((row) => row.reviewRequired).length,
+      unreviewedTransitionCount: list.filter((row) => row.reviewRequired && !row.reviewedAt).length,
+    };
   }
 
   const phaseAliasGroups = [
@@ -306,15 +419,52 @@
       }
     }
 
+    for (const reportPhase of reportPhases()) {
+      const matchingKey = Array.from(rows.keys()).find((key) =>
+        phaseKeyMatches(key, reportPhase.phaseKey) ||
+        phaseKeyMatches(key, reportPhase.phaseSlug) ||
+        phaseKeyMatches(key, reportPhase.phaseName)
+      );
+      const key = matchingKey || reportPhase.phaseKey || reportPhase.phaseSlug || phaseKeyForName(reportPhase.phaseName);
+      if (!rows.has(key)) {
+        rows.set(key, {
+          phaseKey: key,
+          phase: reportPhase.phaseName || reportPhase.phaseKey || "Unspecified",
+          rawPhaseNames: new Set(),
+          rawPhaseKeys: new Set(),
+          taskCount: Number(reportPhase.assignedTaskCount || 0),
+          completedTaskCount: Number(reportPhase.completedTaskCount || 0),
+          assignedHours: Number(reportPhase.totalEstimatedMinutes || 0) / 60,
+          completedHours: 0,
+          actualMinutes: Number(reportPhase.totalActualTaskMinutes || 0),
+          workerIds: new Set(),
+          openTaskCount: Math.max(0, Number(reportPhase.assignedTaskCount || 0) - Number(reportPhase.completedTaskCount || 0)),
+        });
+      }
+    }
+
     return Array.from(rows.values())
-      .map((row) => ({
-        ...row,
-        workerCount: row.workerIds.size,
-        rawPhaseNames: Array.from(row.rawPhaseNames).sort(),
-        rawPhaseKeys: Array.from(row.rawPhaseKeys).sort(),
-        completionPercent: row.taskCount ? Math.round((row.completedTaskCount / row.taskCount) * 100) : 0,
-        efficiencyPercent: row.actualMinutes ? Math.round((row.assignedHours * 60 / row.actualMinutes) * 100) : null,
-      }))
+      .map((row) => {
+        const transitions = transitionsForScope(row.phaseKey);
+        const stats = transitionStats(transitions);
+        const reportPhase = reportPhases().find((item) =>
+          phaseKeyMatches(item.phaseKey, row.phaseKey) ||
+          phaseKeyMatches(item.phaseSlug, row.phaseKey) ||
+          phaseKeyMatches(item.phaseName, row.phase)
+        );
+        return {
+          ...row,
+          workerCount: row.workerIds.size || Number(reportPhase?.workerCount || reportPhase?.assignedWorkerCount || 0),
+          rawPhaseNames: Array.from(row.rawPhaseNames).sort(),
+          rawPhaseKeys: Array.from(row.rawPhaseKeys).sort(),
+          completionPercent: row.taskCount ? Math.round((row.completedTaskCount / row.taskCount) * 100) : Number(reportPhase?.assignedVsCompletedPercent || 0),
+          efficiencyPercent: row.actualMinutes ? Math.round((row.assignedHours * 60 / row.actualMinutes) * 100) : reportPhase?.efficiencyPercent ?? null,
+          transitionStats: stats,
+          transitionMinutes: stats.totalTransitionMinutes,
+          reviewFlags: stats.unreviewedTransitionCount,
+          taskSwitches: stats.taskSwitchCount,
+        };
+      })
       .sort((a, b) => b.assignedHours - a.assignedHours || a.phase.localeCompare(b.phase));
   }
 
@@ -358,6 +508,7 @@
           completionPercent: tasks.length ? Math.round((completedTaskCount / tasks.length) * 100) : 0,
           efficiencyPercent: actualMinutes ? Math.round((assignedHours * 60 / actualMinutes) * 100) : null,
           liveWriteEnabled: Boolean(worker.liveWriteEnabled),
+          transitionStats: transitionStats(transitionsForScope(phaseKey, workerKeyForWorker(worker))),
         };
       })
       .filter((row) => row.taskCount > 0 || row.actualMinutes > 0)
@@ -440,7 +591,7 @@
           <div class="brand-mark">HB</div>
           <div>
             <h1>Hawley Line View</h1>
-            <p>Read-only production line reporting</p>
+            <p>Task-safe production line reporting</p>
           </div>
         </div>
         <div class="top-actions">
@@ -466,8 +617,8 @@
         ${metric("Sync", syncRuns.pull_asana_events?.status || state.sync?.watcher?.lastStatus || "unknown", formatDateTime(syncRuns.pull_asana_events?.ended_at || state.sync?.refreshedAt))}
         <div class="metric">
           <span>Write safety</span>
-          <strong>${statusPill("GET only", "ok")}</strong>
-          <small>${escapeHtml(writeMode)}</small>
+          <strong>${statusPill("No task controls", "ok")}</strong>
+          <small>${escapeHtml(reviewControlsEnabled() ? "Transition reviews write only to Hawley" : writeMode)}</small>
         </div>
         ${metric("Workers", formatNumber(signals.workerCount || workers().length), `${formatNumber(signals.workersWithWork || 0)} with work`)}
         ${metric("Open tasks", formatNumber(signals.openTaskCount || signals.openTasks || 0), "manager payload")}
@@ -537,8 +688,84 @@
     }).join("");
   }
 
+  function transitionTitle(row) {
+    const previous = row.previousTaskName || row.previousTaskGid || "Previous task";
+    const next = row.nextTaskName || row.nextTaskGid || "Next task";
+    return `${previous} -> ${next}`;
+  }
+
+  function renderTransitionReviewControls(row) {
+    if (!row) return "";
+    if (!reviewControlsEnabled()) {
+      return `
+        <div class="review-drawer">
+          <strong>Review controls hidden</strong>
+          <p>Manager review writes are not enabled for this app session.</p>
+        </div>
+      `;
+    }
+
+    const categories = reportCategories().filter((category) => category.managerSelectable);
+    if (!categories.length) {
+      return `
+        <div class="review-drawer">
+          <strong>No review categories loaded</strong>
+          <p>Run Hawley migrations if this remains empty.</p>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="review-drawer" data-transition-review="${escapeHtml(row.transitionEventId)}">
+        <div>
+          <strong>Classify transition gap</strong>
+          <p>${escapeHtml(formatMinutes(row.rawGapMinutes))} gap - ${escapeHtml(row.gapBucketName || "Unbucketed")} - ${escapeHtml(row.workerName || "Worker")}</p>
+        </div>
+        <textarea class="review-notes" rows="3" placeholder="Optional manager note" data-review-notes="${escapeHtml(row.transitionEventId)}">${escapeHtml(row.managerNotes || "")}</textarea>
+        <div class="category-grid">
+          ${categories.map((category) => `
+            <button class="category-button${row.managerCategory === category.categoryKey ? " active" : ""}" type="button" data-action="save-transition-review" data-transition-id="${escapeHtml(row.transitionEventId)}" data-category-key="${escapeHtml(category.categoryKey)}">
+              <span>${escapeHtml(category.displayName)}</span>
+              <small>${escapeHtml(category.categoryGroup.replace(/_/g, " "))}</small>
+            </button>
+          `).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderTransitionRows(phaseKey, workerKey = "", reviewOnly = false) {
+    const rows = transitionsForScope(phaseKey, workerKey, reviewOnly);
+    if (!rows.length) {
+      return `<div class="empty">No recorded transition gaps for this scope yet. New start/stop/switch activity will populate this ledger from here forward.</div>`;
+    }
+
+    return rows.map((row) => {
+      const selected = String(row.transitionEventId) === String(state.selectedTransition);
+      const reviewed = Boolean(row.reviewedAt);
+      return `
+        <div class="transition-row${selected ? " selected" : ""}${row.reviewRequired && !reviewed ? " needs-review" : ""}">
+          <button class="transition-row-button" type="button" data-action="select-transition" data-transition-id="${escapeHtml(row.transitionEventId)}">
+            <div class="row-main">
+              <strong>${escapeHtml(transitionTitle(row))}</strong>
+              <small>${escapeHtml(row.workerName || "Worker")} - ${escapeHtml(row.previousPhaseName || row.phaseName || "Phase")} to ${escapeHtml(row.nextPhaseName || "Next phase")}</small>
+            </div>
+            <div class="row-stat"><span>Gap</span><strong>${formatMinutes(row.rawGapMinutes)}</strong></div>
+            <div class="row-stat"><span>Excess</span><strong>${formatMinutes(row.excessGapMinutes)}</strong></div>
+            <div class="row-stat"><span>When</span><strong>${escapeHtml(formatClock(row.previousTaskEndedAt))}</strong><small>to ${escapeHtml(formatClock(row.nextTaskStartedAt))}</small></div>
+            <div class="row-stat"><span>Bucket</span><strong>${escapeHtml(row.gapBucketName || "--")}</strong></div>
+            <div class="row-stat"><span>Review</span><strong>${reviewed ? "Reviewed" : row.reviewRequired ? "Needed" : "No"}</strong></div>
+          </button>
+          ${selected ? renderTransitionReviewControls(row) : ""}
+        </div>
+      `;
+    }).join("");
+  }
+
   function renderTransitionPanel(phaseKey, workerKey = "") {
     const taskRows = phaseTaskRows(phaseKey, workerKey);
+    const transitionRows = transitionsForScope(phaseKey, workerKey);
+    const stats = transitionStats(transitionRows);
     const actualTasks = taskRows.filter((row) => row.actualMinutes > 0).length;
     const completedTasks = taskRows.filter((row) => row.completed).length;
     const staleRows = taskRows.filter((row) => !row.actualMinutes && !row.completed).length;
@@ -548,10 +775,13 @@
         ${metric("Tasks touched", formatNumber(actualTasks), "logged time today")}
         ${metric("Completed", formatNumber(completedTasks), "completed task rows")}
         ${metric("Open without actual", formatNumber(staleRows), "review candidates")}
+        ${metric("Task switches", formatNumber(stats.taskSwitchCount), `${formatNumber(stats.transitionCount)} transition gaps`)}
+        ${metric("Transition time", formatMinutes(stats.totalTransitionMinutes), `${formatMinutes(stats.excessTransitionMinutes)} excess`)}
+        ${metric("Review flags", formatNumber(stats.unreviewedTransitionCount), `${formatNumber(stats.reviewRequiredCount)} requiring review`)}
       </div>
       <div class="debug-box transition-note">
-        <strong>Actual-time composition</strong>
-        <p>Actual today is only the selected work date. Worker total and team total come from Hawley's worker actual ledger across all recorded dates for the same Asana task. If the work happened before the ledger existed, history will be incomplete and the row should stay in review.</p>
+        <strong>Actual-time and transition composition</strong>
+        <p>Actual today is only the selected work date. Worker total and task total come from Hawley's worker actual ledger across recorded dates. Transition gaps come from Hawley's live session ledger and will be strongest from the point this ledger was enabled forward.</p>
       </div>
     `;
   }
@@ -571,6 +801,8 @@
     const workerRows = phaseWorkerRows(phase.phaseKey);
     const touchedWorkers = workerRows.filter((row) => row.actualMinutes > 0).length;
     const touchedTasks = phaseTaskRows(phase.phaseKey).filter((row) => row.actualMinutes > 0).length;
+    const transitions = transitionsForScope(phase.phaseKey);
+    const stats = transitionStats(transitions);
 
     return `
       <section class="panel phase-rail-panel">
@@ -583,14 +815,14 @@
             ${railTile("Workers touched", formatNumber(touchedWorkers), `${formatNumber(workerRows.length)} assigned or active`)}
             ${railTile("Tasks touched", formatNumber(touchedTasks), `${formatNumber(summary.taskCount)} total in phase`)}
             ${railTile("Completed", formatNumber(summary.completedTaskCount), `${formatNumber(summary.openTaskCount)} open`)}
-            ${railTile("Task switches", "--", "coming from transition ledger", true)}
-            ${railTile("Handoff gaps", "--", "coming from transition ledger", true)}
-            ${railTile("Review flags", "--", "coming from manager review layer", true)}
+            ${railTile("Task switches", formatNumber(stats.taskSwitchCount), `${formatNumber(stats.transitionCount)} transition gaps`)}
+            ${railTile("Handoff gaps", formatMinutes(stats.totalTransitionMinutes), `${formatMinutes(stats.excessTransitionMinutes)} excess`)}
+            ${railTile("Review flags", formatNumber(stats.unreviewedTransitionCount), `${formatNumber(stats.reviewRequiredCount)} total flags`)}
           </div>
           <div class="rail-actions">
             <button class="btn primary" type="button" data-action="show-phase-tasks">All phase tasks</button>
-            <button class="btn" type="button" disabled>Transitions soon</button>
-            <button class="btn" type="button" disabled>Review queue soon</button>
+            <button class="btn" type="button" data-action="show-transitions">Transitions</button>
+            <button class="btn" type="button" data-action="show-review-queue" ${stats.unreviewedTransitionCount ? "" : "disabled"}>Review queue</button>
           </div>
         </div>
       </section>
@@ -683,8 +915,8 @@
   function renderNotice() {
     return `
       <div class="notice">
-        <strong>Read-only line view.</strong>
-        This page only uses GET requests. It does not expose Start, Stop, Complete, End Session, Refresh tracker, or Adopt tasks.
+        <strong>Task-control safe line view.</strong>
+        This page does not expose Start, Stop, Complete, End Session, Refresh tracker, or Adopt tasks. Manager transition review controls appear only after selecting a transition gap and write only to Hawley's review layer.
       </div>
     `;
   }
@@ -707,6 +939,36 @@
   function renderPhaseDetail() {
     const phase = selectedPhaseRow();
     if (!phase) return renderDayView();
+
+    if (state.phaseView === "transitions" || state.phaseView === "review") {
+      const reviewOnly = state.phaseView === "review";
+      const transitions = transitionsForScope(phase.phaseKey, "", reviewOnly);
+      return `
+        ${renderNotice()}
+        ${renderPhaseHero(
+          phase,
+          reviewOnly ? "Review queue" : "Transition detail",
+          reviewOnly ? `${phase.phase} review queue` : `${phase.phase} transitions`,
+          `${state.date} - ${formatNumber(transitions.length)} ${reviewOnly ? "unreviewed gaps" : "transition gaps"}`
+        )}
+        ${renderPhaseMetricStrip(phase)}
+        <section class="panel task-detail-panel">
+          <div class="panel-header">
+            <h2 class="panel-title">${reviewOnly ? "Gaps requiring review" : "Transition gaps"}</h2>
+            <div class="panel-actions">
+              <button class="btn" type="button" data-action="show-phase-tasks">All phase tasks</button>
+              <button class="btn" type="button" data-action="show-transitions">All transitions</button>
+              ${statusPill(`${transitions.length} gaps`, transitions.some((row) => row.reviewRequired && !row.reviewedAt) ? "warn" : "ok")}
+            </div>
+          </div>
+          <div class="panel-body task-list">
+            ${renderTransitionPanel(phase.phaseKey)}
+            ${renderTransitionRows(phase.phaseKey, "", reviewOnly)}
+          </div>
+        </section>
+        ${renderDebugPanel()}
+      `;
+    }
 
     if (state.phaseView === "tasks") {
       const summary = taskScopeSummary(phase.phaseKey);
@@ -751,6 +1013,7 @@
           </div>
           <div class="panel-body task-list">
             ${renderTransitionPanel(phase.phaseKey, worker.workerKey)}
+            ${renderTransitionRows(phase.phaseKey, worker.workerKey)}
             ${renderPhaseTasks(phase.phaseKey, worker.workerKey)}
           </div>
         </section>
@@ -798,13 +1061,47 @@
     `;
   }
 
-  root.addEventListener("click", (event) => {
+  async function saveTransitionReview(button) {
+    const transitionId = button.dataset.transitionId || "";
+    const categoryKey = button.dataset.categoryKey || "";
+    const notes = Array.from(document.querySelectorAll("[data-review-notes]"))
+      .find((item) => String(item.dataset.reviewNotes) === String(transitionId))
+      ?.value || "";
+    if (!transitionId || !categoryKey) return;
+
+    button.disabled = true;
+    try {
+      const payload = await postJson("/api/transition-review", {
+        transitionEventId: Number(transitionId),
+        categoryKey,
+        notes,
+      });
+      const updated = payload.transition;
+      if (updated && state.utilization?.transitions) {
+        state.utilization.transitions = state.utilization.transitions.map((row) =>
+          String(row.transitionEventId) === String(updated.transitionEventId) ? updated : row
+        );
+        state.utilization.reviewQueue = state.utilization.transitions.filter((row) => row.reviewRequired && !row.reviewedAt);
+      }
+      state.selectedTransition = String(transitionId);
+      render();
+    } catch (error) {
+      button.disabled = false;
+      window.alert(error.message || "Could not save transition review.");
+    }
+  }
+
+  root.addEventListener("click", async (event) => {
     const target = event.target.closest("[data-action]");
     const action = target?.dataset.action;
     if (action === "reload") load();
     if (action === "select-phase") setPhase(target.dataset.phaseKey);
     if (action === "show-phase-tasks") setPhaseView("tasks");
+    if (action === "show-transitions") setPhaseView("transitions");
+    if (action === "show-review-queue") setPhaseView("review");
     if (action === "select-worker") setWorker(target.dataset.workerKey);
+    if (action === "select-transition") setTransition(target.dataset.transitionId);
+    if (action === "save-transition-review") await saveTransitionReview(target);
     if (action === "back-to-phase") setPhaseView("workers");
     if (action === "back-to-day") setPhase("");
   });

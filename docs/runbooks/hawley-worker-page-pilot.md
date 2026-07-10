@@ -187,17 +187,21 @@ Default URL:
 http://127.0.0.1:5273
 ```
 
-Read-only line view:
+Task-control safe line view:
 
 ```text
 http://127.0.0.1:5273/beta.html
 ```
 
 The line view is intentionally not a worker control surface. It is available
-from the manager topbar and only uses GET requests against existing Hawley APIs.
-It does not expose Start, Stop, Complete, End Session, Refresh tracker, or Adopt
-tasks. Use it for diagnostics, phase summaries, freshness checks, and
-side-by-side report testing without giving the shop another active page.
+from the manager topbar and does not expose Start, Stop, Complete, End Session,
+Refresh tracker, or Adopt tasks. Most of the page uses GET requests against
+existing Hawley APIs. When manager transition reviews are enabled, a selected
+transition gap can be classified with buttons that write only to Hawley's
+`core.transition_reviews` and `core.task_transition_events` review fields.
+Use it for diagnostics, phase summaries, freshness checks, transition review,
+and side-by-side report testing without giving the shop another active task
+control page.
 
 The line-view layout is multi-tiered by design. The first screen is the day/line
 bird's-eye view by phase, without a global employee list. Selecting a phase
@@ -206,6 +210,12 @@ were assigned in that phase, plus placeholder rail boxes for transition data
 that will come from Hawley's richer utilization ledger. Task rows are one layer
 deeper: use the phase rail to see all phase tasks, or select a worker to see
 that worker's tasks for the phase/day.
+
+The phase rail reads Hawley's utilization report for transition fields. `Task
+switches`, `Handoff gaps`, and `Review flags` are generated from
+`core.time_sessions` and `core.task_transition_events`. The numbers become
+trustworthy from the point Hawley live worker actions started writing session
+events forward; older actual rows may still lack exact start/stop boundaries.
 
 The line-view phase overview uses canonical operational phase buckets for known
 nomenclature drift. For example, `FAB-B` rolls into `FAB 1-3`, and `Frame-A`

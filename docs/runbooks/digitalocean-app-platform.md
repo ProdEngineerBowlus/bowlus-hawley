@@ -244,17 +244,18 @@ GET /
 
 Expected: `200 OK` with the Daily Assignments shell.
 
-Read-only line view:
+Task-control safe line view:
 
 ```text
 GET /beta.html
 ```
 
-Expected: `200 OK` with the Hawley Line View. This page is safe for diagnostics
-because it only calls GET endpoints and does not expose worker task controls or
+Expected: `200 OK` with the Hawley Line View. This page is safe as a task
+control surface because it does not expose worker task controls or
 refresh/adoption controls. It is linked from the manager topbar. Its first
-screen is a day/line phase overview; worker and task detail appears only after
-selecting a phase.
+screen is a day/line phase overview; worker, task, transition, and review detail
+appears only after selecting a phase. Transition review buttons, when enabled,
+write only to Hawley's Postgres review tables.
 
 For larger beta work, create a separate App Platform app or component from a
 dedicated Git branch such as `beta`. Keep the staging environment pointed at the

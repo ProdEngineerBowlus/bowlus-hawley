@@ -311,6 +311,25 @@ Build the first prototype around these endpoints:
 - `GET /api/transition-review-queue?date=YYYY-MM-DD`
 - `POST /api/transition-review`
 
+Implemented pilot behavior:
+
+- Hawley worker `start` writes `core.worker_task_events` and opens
+  `core.time_sessions`.
+- Hawley worker `stop`, `release`, and `complete` close the current
+  `core.time_sessions` row when a live start timestamp is present.
+- The next `start` for the same worker/day creates a
+  `core.task_transition_events` gap from the previous stopped session to the
+  new session.
+- The line view reads `/api/utilization-report` for phase, worker, transition,
+  and review metrics.
+- Manager classification buttons stay hidden until a transition row is selected;
+  reviews write only to Hawley's review tables and do not write to Asana or
+  Airtable.
+- The reporting view excludes live Hawley app `core.time_sessions` rows from
+  productive-time rollups when a matching `hb.worker_daily_task_actuals` row
+  exists, preventing double-counting. Transition rows still use the session
+  ledger for gap timing.
+
 The first screen should answer:
 
 ```text
