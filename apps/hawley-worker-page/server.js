@@ -22,6 +22,9 @@ const ASANA_EVENT_WATCH_INTERVAL_MS = Number(process.env.HAWLEY_ASANA_EVENT_INTE
 const ASANA_EVENT_WATCH_RESTART_MS = Number(process.env.HAWLEY_ASANA_EVENT_WATCH_RESTART_MS || 30000);
 const WORKER_ACTUALS_WATCH_INTERVAL_MS = Number(process.env.HAWLEY_WORKER_ACTUALS_INTERVAL_MS || 60000);
 const WORKER_ACTUALS_WATCH_RESTART_MS = Number(process.env.HAWLEY_WORKER_ACTUALS_WATCH_RESTART_MS || 30000);
+const NIGHTLY_REFRESH_TIME = process.env.HAWLEY_NIGHTLY_REFRESH_TIME || "01:00";
+const NIGHTLY_REFRESH_TIME_ZONE = process.env.HAWLEY_NIGHTLY_REFRESH_TIME_ZONE || "America/Los_Angeles";
+const NIGHTLY_REFRESH_SCRIPT = process.env.HAWLEY_NIGHTLY_REFRESH_SCRIPT || "pg:refresh-worker-read-model";
 const JACOB_R_WORKER_ID = process.env.HAWLEY_JACOB_R_WORKER_ID || "asana-asana-bowlus-com";
 const JACOB_R_WORKER_NAME = process.env.HAWLEY_JACOB_R_NAME || "Jacob R";
 const JACOB_R_WORKER_EMAIL = process.env.HAWLEY_JACOB_R_EMAIL || "asana@bowlus.com";
@@ -73,6 +76,26 @@ const workerActualsWatcherState = {
 let workerActualsWatcherProcess = null;
 let workerActualsWatcherRestartTimer = null;
 let workerActualsWatcherStopping = false;
+
+const nightlyRefreshState = {
+  enabled: false,
+  requested: false,
+  running: false,
+  pid: null,
+  scheduleTime: NIGHTLY_REFRESH_TIME,
+  timeZone: NIGHTLY_REFRESH_TIME_ZONE,
+  script: NIGHTLY_REFRESH_SCRIPT,
+  nextRunAt: "",
+  startedAt: "",
+  lastOutputAt: "",
+  lastExit: null,
+  lastError: "",
+  mode: "web-service-sidecar",
+  reason: ""
+};
+let nightlyRefreshProcess = null;
+let nightlyRefreshTimer = null;
+let nightlyRefreshStopping = false;
 
 const CONTENT_TYPES = Object.freeze({
   ".html": "text/html; charset=utf-8",
@@ -188,6 +211,13 @@ function shouldStartWorkerActualsWatcher() {
   return process.env.NODE_ENV === "production";
 }
 
+function shouldStartNightlyRefreshScheduler() {
+  if (process.env.HAWLEY_NIGHTLY_REFRESH_ENABLED !== undefined) {
+    return booleanEnv("HAWLEY_NIGHTLY_REFRESH_ENABLED", false);
+  }
+  return process.env.NODE_ENV === "production";
+}
+
 function syncDatabaseConfigured() {
   return Boolean(process.env.HAWLEY_SYNC_DATABASE_URL || process.env.HAWLEY_MIGRATION_DATABASE_URL);
 }
@@ -200,10 +230,15 @@ function workerActualsWatcherStatus() {
   return { ...workerActualsWatcherState };
 }
 
+function nightlyRefreshStatus() {
+  return { ...nightlyRefreshState };
+}
+
 function watcherStatuses() {
   return {
     asanaEvents: asanaEventWatcherStatus(),
-    workerDailyActuals: workerActualsWatcherStatus()
+    workerDailyActuals: workerActualsWatcherStatus(),
+    nightlyRefresh: nightlyRefreshStatus()
   };
 }
 
@@ -442,6 +477,239 @@ function stopWorkerActualsWatcher(signal = "SIGTERM") {
   }
   if (workerActualsWatcherProcess && !workerActualsWatcherProcess.killed) {
     workerActualsWatcherProcess.kill(signal);
+  }
+}
+
+function parseNightlyRefreshTime(value) {
+  const match = String(value || "").trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  return { hour, minute };
+}
+
+function localDateTimeParts(date, timeZone) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour12: false,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+  const parts = Object.fromEntries(formatter.formatToParts(date).map(part => [part.type, part.value]));
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+    second: Number(parts.second)
+  };
+}
+
+function addLocalCalendarDays(parts, days) {
+  const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + days));
+  return {
+    year: date.getUTCFullYear(),
+    month: date.getUTCMonth() + 1,
+    day: date.getUTCDate()
+  };
+}
+
+function timeZoneOffsetMs(timeZone, date) {
+  const parts = localDateTimeParts(date, timeZone);
+  const localAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return localAsUtc - Math.floor(date.getTime() / 1000) * 1000;
+}
+
+function localTimeToUtc(parts, timeZone) {
+  const localAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second || 0);
+  const firstOffset = timeZoneOffsetMs(timeZone, new Date(localAsUtc));
+  let candidate = new Date(localAsUtc - firstOffset);
+  const secondOffset = timeZoneOffsetMs(timeZone, candidate);
+  if (secondOffset !== firstOffset) {
+    candidate = new Date(localAsUtc - secondOffset);
+  }
+  return candidate;
+}
+
+function nextNightlyRefreshAt(now = new Date()) {
+  const schedule = parseNightlyRefreshTime(NIGHTLY_REFRESH_TIME);
+  if (!schedule) return null;
+
+  const localNow = localDateTimeParts(now, NIGHTLY_REFRESH_TIME_ZONE);
+  let localDate = {
+    year: localNow.year,
+    month: localNow.month,
+    day: localNow.day
+  };
+  let next = localTimeToUtc({
+    ...localDate,
+    hour: schedule.hour,
+    minute: schedule.minute,
+    second: 0
+  }, NIGHTLY_REFRESH_TIME_ZONE);
+
+  if (next.getTime() <= now.getTime() + 1000) {
+    localDate = addLocalCalendarDays(localDate, 1);
+    next = localTimeToUtc({
+      ...localDate,
+      hour: schedule.hour,
+      minute: schedule.minute,
+      second: 0
+    }, NIGHTLY_REFRESH_TIME_ZONE);
+  }
+
+  return next;
+}
+
+function npmCommand() {
+  return process.platform === "win32" ? "npm.cmd" : "npm";
+}
+
+function logNightlyRefreshStream(streamName, chunk) {
+  const lines = String(chunk)
+    .split(/\r?\n/)
+    .filter(Boolean);
+  for (const line of lines) {
+    nightlyRefreshState.lastOutputAt = new Date().toISOString();
+    if (streamName === "stderr") {
+      nightlyRefreshState.lastError = line.slice(0, 1000);
+      console.error(`[hawley-nightly-refresh] ${line}`);
+    } else {
+      console.log(`[hawley-nightly-refresh] ${line}`);
+    }
+  }
+}
+
+function scheduleNextNightlyRefresh() {
+  if (nightlyRefreshStopping || !nightlyRefreshState.enabled) return;
+  if (nightlyRefreshTimer) {
+    clearTimeout(nightlyRefreshTimer);
+    nightlyRefreshTimer = null;
+  }
+
+  const nextRunAt = nextNightlyRefreshAt();
+  if (!nextRunAt) {
+    nightlyRefreshState.enabled = false;
+    nightlyRefreshState.reason = "invalid HAWLEY_NIGHTLY_REFRESH_TIME";
+    nightlyRefreshState.nextRunAt = "";
+    console.warn("Hawley nightly refresh disabled: invalid HAWLEY_NIGHTLY_REFRESH_TIME.");
+    return;
+  }
+
+  nightlyRefreshState.nextRunAt = nextRunAt.toISOString();
+  const delayMs = Math.max(1000, Math.min(nextRunAt.getTime() - Date.now(), 2147483647));
+  nightlyRefreshTimer = setTimeout(() => {
+    nightlyRefreshTimer = null;
+    runNightlyRefresh();
+  }, delayMs);
+  nightlyRefreshTimer.unref?.();
+}
+
+function runNightlyRefresh() {
+  if (nightlyRefreshStopping || !nightlyRefreshState.enabled) return;
+  if (nightlyRefreshProcess) {
+    nightlyRefreshState.reason = "already running";
+    scheduleNextNightlyRefresh();
+    return;
+  }
+
+  const child = spawn(npmCommand(), ["run", NIGHTLY_REFRESH_SCRIPT], {
+    cwd: repoRoot,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true
+  });
+
+  nightlyRefreshProcess = child;
+  nightlyRefreshState.running = true;
+  nightlyRefreshState.pid = child.pid || null;
+  nightlyRefreshState.startedAt = new Date().toISOString();
+  nightlyRefreshState.lastExit = null;
+  nightlyRefreshState.lastError = "";
+  nightlyRefreshState.reason = "running";
+
+  child.stdout.on("data", chunk => logNightlyRefreshStream("stdout", chunk));
+  child.stderr.on("data", chunk => logNightlyRefreshStream("stderr", chunk));
+  child.on("error", error => {
+    nightlyRefreshState.lastError = error.message;
+    nightlyRefreshState.reason = "spawn failed";
+    console.error(`Hawley nightly refresh failed to start: ${error.message}`);
+  });
+  child.on("exit", (code, signal) => {
+    nightlyRefreshProcess = null;
+    nightlyRefreshState.running = false;
+    nightlyRefreshState.pid = null;
+    nightlyRefreshState.lastExit = {
+      code,
+      signal,
+      at: new Date().toISOString()
+    };
+
+    if (nightlyRefreshStopping || !nightlyRefreshState.enabled) {
+      nightlyRefreshState.reason = "stopped";
+      return;
+    }
+
+    nightlyRefreshState.reason = code === 0 ? "scheduled" : "failed";
+    scheduleNextNightlyRefresh();
+  });
+}
+
+function startNightlyRefreshScheduler() {
+  nightlyRefreshState.requested = shouldStartNightlyRefreshScheduler();
+  nightlyRefreshState.enabled = false;
+  nightlyRefreshState.reason = "";
+
+  if (!nightlyRefreshState.requested) {
+    nightlyRefreshState.reason = "disabled";
+    return;
+  }
+
+  if (!process.env.ASANA_PAT) {
+    nightlyRefreshState.reason = "missing ASANA_PAT";
+    console.warn("Hawley nightly refresh disabled: missing ASANA_PAT.");
+    return;
+  }
+
+  if (!syncDatabaseConfigured()) {
+    nightlyRefreshState.reason = "missing HAWLEY_SYNC_DATABASE_URL or HAWLEY_MIGRATION_DATABASE_URL";
+    console.warn("Hawley nightly refresh disabled: missing sync database URL.");
+    return;
+  }
+
+  try {
+    if (!nextNightlyRefreshAt()) {
+      nightlyRefreshState.reason = "invalid HAWLEY_NIGHTLY_REFRESH_TIME";
+      console.warn("Hawley nightly refresh disabled: invalid HAWLEY_NIGHTLY_REFRESH_TIME.");
+      return;
+    }
+  } catch (error) {
+    nightlyRefreshState.reason = "invalid HAWLEY_NIGHTLY_REFRESH_TIME_ZONE";
+    nightlyRefreshState.lastError = error.message;
+    console.warn(`Hawley nightly refresh disabled: ${error.message}`);
+    return;
+  }
+
+  nightlyRefreshState.enabled = true;
+  nightlyRefreshState.reason = "scheduled";
+  scheduleNextNightlyRefresh();
+}
+
+function stopNightlyRefreshScheduler(signal = "SIGTERM") {
+  nightlyRefreshStopping = true;
+  if (nightlyRefreshTimer) {
+    clearTimeout(nightlyRefreshTimer);
+    nightlyRefreshTimer = null;
+  }
+  if (nightlyRefreshProcess && !nightlyRefreshProcess.killed) {
+    nightlyRefreshProcess.kill(signal);
   }
 }
 
@@ -2665,6 +2933,7 @@ async function startServer() {
   await applyRuntimeReadGrants();
   startAsanaEventWatcher();
   startWorkerActualsWatcher();
+  startNightlyRefreshScheduler();
   server.listen(PORT, HOST, () => {
     console.log(`Hawley worker pilot listening on http://${HOST}:${PORT}`);
   });
@@ -2673,6 +2942,7 @@ async function startServer() {
 function shutdown(signal) {
   stopAsanaEventWatcher(signal);
   stopWorkerActualsWatcher(signal);
+  stopNightlyRefreshScheduler(signal);
   server.close(() => {
     Promise.all([
       pool.end(),

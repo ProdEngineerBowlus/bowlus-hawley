@@ -46,6 +46,10 @@ HAWLEY_ASANA_EVENT_BUILD_HB=true
 HAWLEY_ASANA_INCLUDE_SUBTASKS=true
 HAWLEY_ASANA_SUBTASK_DEPTH=1
 HAWLEY_ASANA_COMPLETED_SINCE=1970-01-01T00:00:00.000Z
+HAWLEY_NIGHTLY_REFRESH_ENABLED=true
+HAWLEY_NIGHTLY_REFRESH_TIME=01:00
+HAWLEY_NIGHTLY_REFRESH_TIME_ZONE=America/Los_Angeles
+HAWLEY_NIGHTLY_REFRESH_SCRIPT=pg:refresh-worker-read-model
 ```
 
 Do not commit real token values. Use the Shop Ops `.env` only as a local
@@ -217,6 +221,18 @@ npm run pg:refresh-legacy-airtable-bootstrap
 
 Do not add the Worker component or scheduled job without explicit approval,
 because either can change the App Platform bill or resource layout.
+
+The web service also schedules a nightly Hawley worker read-model refresh at
+1:00 AM Pacific by default in production:
+
+```powershell
+npm run pg:refresh-worker-read-model
+```
+
+That refresh runs `pg:pull:asana`, `pg:build:hb`, and `pg:pull:daily-tracker`.
+It writes only to Hawley/Postgres mirror and read-model tables; it does not
+write to Asana or Airtable. `/api/sync-status` reports the scheduler state under
+`watchers.nightlyRefresh`, including the next scheduled run time.
 
 ## Health Checks
 
