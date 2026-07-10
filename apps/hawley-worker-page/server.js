@@ -1763,10 +1763,13 @@ async function cycleCalendar(cycleName, selectedDate) {
 }
 
 async function cycleDays(date) {
+  const dateCalendar = await cycleCalendar("", date);
+  const calendarCycle = dateCalendar?.cycle || null;
   const result = await pool.query(
     `
       with selected as (
         select coalesce(
+          $2::text,
           (select cycle_name from reporting.hawley_worker_page_assignments where assigned_on = $1::date and cycle_name is not null limit 1),
           (select cycle_name from reporting.hawley_worker_page_assignments where cycle_name is not null order by assigned_on desc limit 1)
         ) as cycle_name
@@ -1790,11 +1793,11 @@ async function cycleDays(date) {
       group by assigned_on, cycle_name
       order by assigned_on
     `,
-    [date]
+    [date, calendarCycle]
   );
 
   const selectedRow = result.rows.find(row => row.assigned_on === date) || result.rows.find(row => row.cycle_name);
-  const calendar = await cycleCalendar(formatCycleName(selectedRow?.cycle_name), date);
+  const calendar = dateCalendar || await cycleCalendar(formatCycleName(selectedRow?.cycle_name), date);
   return buildCycleDaysFromRows(result.rows, date, calendar);
 }
 
