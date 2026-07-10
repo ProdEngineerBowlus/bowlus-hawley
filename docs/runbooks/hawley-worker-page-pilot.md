@@ -199,6 +199,11 @@ End Session, Refresh tracker, or Adopt tasks. Use it for diagnostics, phase
 summary prototypes, freshness checks, and side-by-side report testing without
 giving the shop another active page.
 
+The beta layout is multi-tiered by design. The first screen is the day/line
+bird's-eye view by phase, without a global employee list. Selecting a phase
+opens the drill-in view for that day and phase, including worker performance,
+task rows, efficiency, completion, and transition/review placeholders.
+
 Worker pages use the familiar pattern:
 
 ```text

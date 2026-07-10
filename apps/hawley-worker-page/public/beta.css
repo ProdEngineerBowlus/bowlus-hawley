@@ -147,9 +147,11 @@ a {
 .panel,
 .metric,
 .worker-row,
-.phase-row,
+.phase-card,
+.task-row,
 .debug-box,
-.notice {
+.notice,
+.phase-detail-hero {
   background: rgba(24, 29, 22, 0.96);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -186,6 +188,37 @@ a {
   gap: 16px;
 }
 
+.day-panel,
+.phase-detail-grid,
+.phase-detail-hero {
+  margin-bottom: 16px;
+}
+
+.phase-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(440px, 0.85fr) minmax(0, 1.15fr);
+  gap: 16px;
+}
+
+.phase-detail-hero {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  padding: 18px;
+}
+
+.phase-detail-hero h2 {
+  margin: 4px 0 4px;
+  font-size: clamp(1.8rem, 3vw, 3rem);
+  line-height: 1;
+}
+
+.phase-detail-hero p {
+  margin: 0;
+  color: var(--muted);
+}
+
 .panel {
   min-width: 0;
   overflow: hidden;
@@ -211,22 +244,49 @@ a {
 
 .phase-list,
 .worker-list,
-.debug-list {
+.debug-list,
+.task-list {
   display: grid;
   gap: 10px;
 }
 
-.phase-row,
-.worker-row {
+.phase-card,
+.worker-row,
+.task-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1.3fr) repeat(5, minmax(92px, 0.7fr));
+  grid-template-columns: minmax(180px, 1.3fr) repeat(6, minmax(92px, 0.7fr));
   gap: 12px;
   align-items: center;
   padding: 12px;
 }
 
+.phase-card {
+  width: 100%;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.phase-card:hover,
+.phase-card:focus-visible {
+  border-color: var(--blue);
+  background: rgba(24, 36, 35, 0.98);
+  outline: none;
+}
+
+.phase-card:focus-visible {
+  box-shadow:
+    0 0 0 3px rgba(115, 199, 242, 0.24),
+    var(--shadow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
 .worker-row {
-  grid-template-columns: minmax(200px, 1.5fr) repeat(5, minmax(88px, 0.7fr));
+  grid-template-columns: minmax(200px, 1.5fr) repeat(6, minmax(88px, 0.7fr));
+}
+
+.task-row {
+  grid-template-columns: minmax(240px, 1.7fr) repeat(4, minmax(86px, 0.65fr));
 }
 
 .row-main strong {
@@ -244,6 +304,31 @@ a {
   display: block;
   margin-top: 3px;
   font-size: 1.05rem;
+}
+
+.phase-metrics {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.transition-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.transition-grid .metric {
+  min-height: 78px;
+  padding: 12px;
+}
+
+.transition-grid .metric strong {
+  font-size: clamp(1.25rem, 2vw, 1.8rem);
+}
+
+.transition-note p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  line-height: 1.45;
 }
 
 .pill {
@@ -316,12 +401,16 @@ a {
 
 @media (max-width: 1100px) {
   .status-strip,
-  .lab-grid {
+  .lab-grid,
+  .phase-detail-grid,
+  .phase-metrics,
+  .transition-grid {
     grid-template-columns: 1fr;
   }
 
-  .phase-row,
-  .worker-row {
+  .phase-card,
+  .worker-row,
+  .task-row {
     grid-template-columns: 1fr 1fr;
   }
 
@@ -340,8 +429,13 @@ a {
     padding: 16px 12px 28px;
   }
 
-  .phase-row,
-  .worker-row {
+  .phase-detail-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .phase-card,
+  .worker-row,
+  .task-row {
     grid-template-columns: 1fr;
   }
 }

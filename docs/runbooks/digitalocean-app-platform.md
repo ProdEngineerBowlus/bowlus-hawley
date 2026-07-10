@@ -252,7 +252,8 @@ GET /beta.html
 
 Expected: `200 OK` with the Hawley Beta Lab. This page is safe for diagnostics
 because it only calls GET endpoints and does not expose worker task controls or
-refresh/adoption controls.
+refresh/adoption controls. Its first screen is a day/line phase overview; worker
+and task detail appears only after selecting a phase.
 
 For larger beta work, create a separate App Platform app or component from a
 dedicated Git branch such as `beta`. Keep the staging environment pointed at the
