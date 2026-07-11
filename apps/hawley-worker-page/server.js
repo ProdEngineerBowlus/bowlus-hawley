@@ -74,6 +74,10 @@ const OVER_CAPACITY_FLAG = "over_daily_capacity";
 
 const pool = new Pool(getDatabaseConfig());
 const writePool = new Pool(getDatabaseConfig({ useSyncUrl: true }));
+const authPool = new Pool({
+  ...getDatabaseConfig(),
+  connectionTimeoutMillis: Number(process.env.HAWLEY_AUTH_DB_CONNECT_TIMEOUT_MS || 5000)
+});
 const migrationsDir = path.join(repoRoot, "db", "migrations");
 const viewsDir = path.join(repoRoot, "db", "views");
 
@@ -3243,7 +3247,7 @@ async function authActorFromRequest(req) {
   const token = parseCookies(req)[APP_AUTH_COOKIE_NAME];
   if (!token) return null;
   const tokenHash = sessionTokenHash(token);
-  const client = await writePool.connect();
+  const client = await authPool.connect();
   try {
     const result = await client.query(
       `
@@ -5165,7 +5169,7 @@ async function handleAuthLogin(req, res) {
   const body = await readJsonBody(req);
   const username = normalizeEmail(body.username || body.email);
   const password = String(body.password || "");
-  const client = await writePool.connect();
+  const client = await authPool.connect();
   try {
     const result = await client.query(
       `
@@ -5269,7 +5273,7 @@ async function handleAuthLogin(req, res) {
 async function handleAuthLogout(req, res) {
   const token = parseCookies(req)[APP_AUTH_COOKIE_NAME];
   if (APP_AUTH_ACTIVE && token) {
-    const client = await writePool.connect();
+    const client = await authPool.connect();
     try {
       await client.query(
         "update core.app_sessions set revoked_at = now() where session_token_hash = $1 and revoked_at is null",
@@ -5618,7 +5622,8 @@ function shutdown(signal) {
   server.close(() => {
     Promise.all([
       pool.end(),
-      writePool.end()
+      writePool.end(),
+      authPool.end()
     ])
       .catch(() => {})
       .finally(() => process.exit(0));
