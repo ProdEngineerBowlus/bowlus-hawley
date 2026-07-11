@@ -77,7 +77,7 @@ not allow live utilization above the elapsed available-time denominator; if raw
 source rows exceed that denominator, treat the source data as invalid for live
 capacity math instead of displaying an impossible over-100% real-time score.
 
-The Hawley Line View should keep the visible day totals congruent with the phase
+The Hawley Reporting View should keep the visible day totals congruent with the phase
 rows it renders: planned assigned hours/tasks come from
 `reporting.hawley_worker_page_assignments`, while actual time and transition
 signals come from Hawley's worker actual/session reporting views. The raw debug
@@ -193,13 +193,13 @@ Default URL:
 http://127.0.0.1:5273
 ```
 
-Task-control safe line view:
+Task-control safe reporting view:
 
 ```text
 http://127.0.0.1:5273/beta.html
 ```
 
-The line view is intentionally not a worker control surface. It is available
+The reporting view is intentionally not a worker control surface. It is available
 from the manager topbar and does not expose Start, Stop, Complete, End Session,
 Refresh tracker, or Adopt tasks. Most of the page uses GET requests against
 existing Hawley APIs. When manager transition reviews are enabled, a selected
@@ -209,7 +209,7 @@ Use it for diagnostics, phase summaries, freshness checks, transition review,
 and side-by-side report testing without giving the shop another active task
 control page.
 
-The line-view layout is multi-tiered by design. The first screen is the day/line
+The reporting-view layout is multi-tiered by design. The first screen is the day/line
 bird's-eye view by phase, without a global employee list. Selecting a phase
 opens a phase/worker rail view for that day: it shows all workers who worked or
 were assigned in that phase, plus placeholder rail boxes for transition data
@@ -223,7 +223,7 @@ switches`, `Handoff gaps`, and `Review flags` are generated from
 trustworthy from the point Hawley live worker actions started writing session
 events forward; older actual rows may still lack exact start/stop boundaries.
 
-The line-view phase overview uses canonical operational phase buckets for known
+The reporting-view phase overview uses canonical operational phase buckets for known
 nomenclature drift. For example, `FAB-B` rolls into `FAB 1-3`, and `Frame-A`
 rolls into `Frames / Phase A`. The original task labels remain in the payload
 for debugging, but the phase list should show the canonical production bucket.
@@ -236,7 +236,7 @@ selected work date only. `Worker total` sums Hawley's
 `Team total` sums all recorded workers on the same Asana task across recorded
 dates. The full task estimate is shown as `Task estimate`; it should not be
 treated as a same-day efficiency denominator for multi-day or team tasks. In the
-line-view task list, rows are visually marked as team tasks only when Hawley's
+reporting-view task list, rows are visually marked as team tasks only when Hawley's
 recorded actuals show more than one worker on that task; solo rows remain
 unmarked and use `Task total` instead of `Team total`.
 

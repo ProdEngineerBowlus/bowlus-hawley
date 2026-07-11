@@ -245,13 +245,13 @@ GET /
 
 Expected: `200 OK` with the Daily Assignments shell.
 
-Task-control safe line view:
+Task-control safe reporting view:
 
 ```text
 GET /beta.html
 ```
 
-Expected: `200 OK` with the Hawley Line View. This page is safe as a task
+Expected: `200 OK` with the Hawley Reporting View. This page is safe as a task
 control surface because it does not expose worker task controls or
 refresh/adoption controls. It is linked from the manager topbar. Its first
 screen is a day/line phase overview; worker, task, transition, and review detail

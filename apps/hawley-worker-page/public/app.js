@@ -438,7 +438,7 @@
             locked
               ? ""
               : `<a class="btn ghost" href="${escapeAttr(state.project.url)}" target="_blank" rel="noreferrer">${icons.open}<span>Asana project</span></a>
-                 <a class="btn ghost" href="${escapeAttr(lineViewUrl())}">${icons.open}<span>Line view</span></a>
+                 <a class="btn ghost" href="${escapeAttr(lineViewUrl())}">${icons.open}<span>Reporting View</span></a>
                  <button class="btn ghost" type="button" data-action="refresh">${icons.refresh}<span>Reload</span></button>
                  ${
                    worker
@@ -531,7 +531,7 @@
     return `
       <section class="panel">
         <div class="panel-header">
-          <h2 class="panel-title">Line overview</h2>
+          <h2 class="panel-title">Reporting overview</h2>
         </div>
         <div class="panel-body metric-grid">
           ${renderMetric("Cycle", line.cycle || "Current")}

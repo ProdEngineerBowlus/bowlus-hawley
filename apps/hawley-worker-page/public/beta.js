@@ -35,6 +35,9 @@
     auth: null,
     assignments: null,
     utilization: null,
+    utilizationLoading: false,
+    utilizationError: "",
+    loadToken: 0,
   };
 
   const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
@@ -242,43 +245,77 @@
     render();
   }
 
+  function reconcileSelection() {
+    const matchedPhase = selectedPhaseRow();
+    if (state.selectedPhase && !matchedPhase) state.selectedPhase = "";
+    if (matchedPhase && state.selectedPhase !== matchedPhase.phaseKey) state.selectedPhase = matchedPhase.phaseKey;
+    if (!state.selectedPhase) {
+      state.phaseView = "workers";
+      state.selectedWorker = "";
+      state.selectedTransition = "";
+    } else if (state.phaseView === "worker" && !selectedPhaseWorkerRow()) {
+      state.phaseView = "workers";
+      state.selectedWorker = "";
+      state.selectedTransition = "";
+    }
+  }
+
   async function load() {
+    const stamp = Date.now();
+    const requestedDate = state.date;
+    state.loadToken = stamp;
     state.loading = true;
     state.error = "";
+    state.assignments = null;
+    state.utilization = null;
+    state.utilizationLoading = true;
+    state.utilizationError = "";
     render();
 
-    const stamp = Date.now();
+    const utilizationPromise = fetchJson(`/api/utilization-report?date=${encodeURIComponent(requestedDate)}&_=${stamp}`)
+      .then((payload) => ({ payload }))
+      .catch((error) => ({ error }));
+
     try {
-      const [health, sync, auth, assignments, utilization] = await Promise.all([
+      const [health, sync, auth, assignments] = await Promise.all([
         fetchJson(`/api/health?_=${stamp}`),
         fetchJson(`/api/sync-status?_=${stamp}`),
         fetchJson(`/api/auth-status?_=${stamp}`),
-        fetchJson(`/api/daily-assignments?date=${encodeURIComponent(state.date)}&includeNoWork=true&_=${stamp}`),
-        fetchJson(`/api/utilization-report?date=${encodeURIComponent(state.date)}&_=${stamp}`),
+        fetchJson(`/api/daily-assignments?date=${encodeURIComponent(requestedDate)}&includeNoWork=true&_=${stamp}`),
       ]);
+      if (state.loadToken !== stamp || state.date !== requestedDate) return;
       state.health = health;
       state.sync = sync;
       state.auth = auth;
       state.assignments = assignments;
-      state.utilization = utilization;
-      const matchedPhase = selectedPhaseRow();
-      if (state.selectedPhase && !matchedPhase) state.selectedPhase = "";
-      if (matchedPhase && state.selectedPhase !== matchedPhase.phaseKey) state.selectedPhase = matchedPhase.phaseKey;
-      if (!state.selectedPhase) {
-        state.phaseView = "workers";
-        state.selectedWorker = "";
-        state.selectedTransition = "";
-      } else if (state.phaseView === "worker" && !selectedPhaseWorkerRow()) {
-        state.phaseView = "workers";
-        state.selectedWorker = "";
-        state.selectedTransition = "";
-      }
+      state.loading = false;
+      reconcileSelection();
+      updateUrl();
+      render();
+    } catch (error) {
+      if (state.loadToken !== stamp || state.date !== requestedDate) return;
+      state.error = error.message || "Could not load reporting view.";
+      state.loading = false;
+      state.utilizationLoading = false;
+      render();
+      return;
+    }
+
+    try {
+      const utilizationResult = await utilizationPromise;
+      if (state.loadToken !== stamp || state.date !== requestedDate) return;
+      if (utilizationResult.error) throw utilizationResult.error;
+      state.utilization = utilizationResult.payload;
+      reconcileSelection();
       updateUrl();
     } catch (error) {
-      state.error = error.message || "Could not load line view.";
+      if (state.loadToken !== stamp || state.date !== requestedDate) return;
+      state.utilizationError = error.message || "Could not load reporting metrics.";
     } finally {
-      state.loading = false;
-      render();
+      if (state.loadToken === stamp && state.date === requestedDate) {
+        state.utilizationLoading = false;
+        render();
+      }
     }
   }
 
@@ -827,7 +864,7 @@
         <div class="brand">
           <div class="brand-mark">HB</div>
           <div>
-            <h1>Hawley Line View</h1>
+            <h1>Hawley Reporting View</h1>
             <p>Task-safe production line reporting</p>
           </div>
         </div>
@@ -976,6 +1013,12 @@
   function renderTransitionRows(phaseKey, workerKey = "", reviewOnly = false) {
     const rows = transitionsForScope(phaseKey, workerKey, reviewOnly);
     if (!rows.length) {
+      if (state.utilizationLoading) {
+        return `<div class="empty">Loading transition metrics...</div>`;
+      }
+      if (state.utilizationError) {
+        return `<div class="empty">Transition metrics unavailable.</div>`;
+      }
       return `<div class="empty">No recorded transition gaps for this scope yet. New start/stop/switch activity will populate this ledger from here forward.</div>`;
     }
 
@@ -1047,7 +1090,7 @@
       <section class="panel phase-rail-panel">
         <div class="panel-header">
           <h2 class="panel-title">Phase rail</h2>
-          ${statusPill("preview layer", "warn")}
+          ${state.utilizationLoading ? statusPill("metrics loading", "warn") : statusPill("preview layer", "warn")}
         </div>
         <div class="panel-body">
           <div class="phase-rail">
@@ -1157,7 +1200,7 @@
   function renderNotice() {
     return `
       <div class="notice">
-        <strong>Task-control safe line view.</strong>
+        <strong>Task-control safe reporting view.</strong>
         This page does not expose Start, Stop, Complete, End Session, Refresh tracker, or Adopt tasks. Manager transition review controls appear only after selecting a transition gap and write only to Hawley's review layer.
       </div>
     `;
@@ -1170,7 +1213,11 @@
       <section class="panel day-panel">
         <div class="panel-header">
           <h2 class="panel-title">Day phase overview</h2>
-          ${statusPill(`${phaseRows().length} phases`, "ok")}
+          <div class="panel-actions">
+            ${state.utilizationLoading ? statusPill("metrics loading", "warn") : ""}
+            ${state.utilizationError ? statusPill("metrics limited", "warn") : ""}
+            ${statusPill(`${phaseRows().length} phases`, "ok")}
+          </div>
         </div>
         <div class="panel-body phase-list">${renderPhaseCards()}</div>
       </section>
@@ -1288,7 +1335,7 @@
     }
 
     if (state.loading && !state.assignments) {
-      return `<div class="empty">Loading Hawley line view...</div>`;
+      return `<div class="empty">Loading Hawley reporting view...</div>`;
     }
 
     return state.selectedPhase ? renderPhaseDetail() : renderDayView();
