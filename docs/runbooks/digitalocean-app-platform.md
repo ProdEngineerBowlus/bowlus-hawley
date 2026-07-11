@@ -51,6 +51,14 @@ HAWLEY_NIGHTLY_REFRESH_ENABLED=true
 HAWLEY_NIGHTLY_REFRESH_TIME=01:00
 HAWLEY_NIGHTLY_REFRESH_TIME_ZONE=America/Los_Angeles
 HAWLEY_NIGHTLY_REFRESH_SCRIPT=pg:refresh-worker-read-model
+HAWLEY_AUTH_ACTIVE=false
+HAWLEY_AUTH_SEED_ROSTER_ON_START=true
+HAWLEY_AUTH_SESSION_TTL_HOURS=12
+HAWLEY_AUTH_MANAGER_EMAILS=
+HAWLEY_AUTH_ADMIN_EMAILS=
+HAWLEY_AUTH_BOOTSTRAP_ENABLED=false
+HAWLEY_AUTH_BOOTSTRAP_EMAIL=
+HAWLEY_AUTH_BOOTSTRAP_PASSWORD=
 ```
 
 Do not commit real token values. Use the Shop Ops `.env` only as a local
@@ -64,6 +72,21 @@ should point at a database user that can create schemas/tables and write mirror
 data during bootstrap, such as the DigitalOcean admin user or a properly granted
 `bowlus_sync` user. Store it as an encrypted App Platform variable. Do not paste
 the value into chat or commit it.
+
+`HAWLEY_AUTH_ACTIVE=false` keeps the installed employee login system inactive.
+When ready to test account login, set `HAWLEY_AUTH_ACTIVE=true`, configure
+`HAWLEY_AUTH_MANAGER_EMAILS` or `HAWLEY_AUTH_ADMIN_EMAILS`, and use the
+`HAWLEY_AUTH_BOOTSTRAP_*` values only long enough to create the first active
+admin password. Remove the bootstrap password env value after the first admin
+login works.
+
+Employee accounts seeded from `hb.work_force` remain inactive until activated.
+Use `npm run pg:hawley-auth-user -- list` to inspect users, and set
+`HAWLEY_AUTH_PASSWORD` before running this for a test employee:
+
+```powershell
+npm run pg:hawley-auth-user -- set-password <email> --active --role=worker
+```
 
 ## Database URL Binding
 

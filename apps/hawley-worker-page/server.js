@@ -4,10 +4,12 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
+import { promisify } from "node:util";
 import pg from "pg";
 import { getDatabaseConfig } from "../postgres-sync/src/config.js";
 
 const { Pool } = pg;
+const scryptAsync = promisify(crypto.scrypt);
 
 const __filename = fileURLToPath(import.meta.url);
 const appDir = path.dirname(__filename);
@@ -40,6 +42,15 @@ const WORKER_WRITE_IDS = new Set(
 );
 const TRANSITION_REVIEWS_ENABLED = booleanEnv("HAWLEY_TRANSITION_REVIEWS_ENABLED", true);
 const LIVE_WORKER_SOURCE = "hawley_worker_live_pilot";
+const APP_AUTH_ACTIVE = booleanEnv("HAWLEY_AUTH_ACTIVE", false);
+const APP_AUTH_SEED_ROSTER_ON_START = booleanEnv("HAWLEY_AUTH_SEED_ROSTER_ON_START", true);
+const APP_AUTH_BOOTSTRAP_ENABLED = booleanEnv("HAWLEY_AUTH_BOOTSTRAP_ENABLED", false);
+const APP_AUTH_BOOTSTRAP_EMAIL = String(process.env.HAWLEY_AUTH_BOOTSTRAP_EMAIL || "").trim().toLowerCase();
+const APP_AUTH_BOOTSTRAP_PASSWORD = String(process.env.HAWLEY_AUTH_BOOTSTRAP_PASSWORD || "");
+const APP_AUTH_COOKIE_NAME = process.env.HAWLEY_AUTH_COOKIE_NAME || "hawley_session";
+const APP_AUTH_SESSION_TTL_HOURS = Number(process.env.HAWLEY_AUTH_SESSION_TTL_HOURS || 12);
+const APP_AUTH_MANAGER_EMAILS = new Set(envList(process.env.HAWLEY_AUTH_MANAGER_EMAILS).map(normalizeEmail).filter(Boolean));
+const APP_AUTH_ADMIN_EMAILS = new Set(envList(process.env.HAWLEY_AUTH_ADMIN_EMAILS).map(normalizeEmail).filter(Boolean));
 const SHOP_TIME_ZONE = "America/Los_Angeles";
 const SHOP_WORK_START = "07:00";
 const SHOP_WORK_END = "15:30";
@@ -143,11 +154,12 @@ const CONTENT_TYPES = Object.freeze({
   ".svg": "image/svg+xml"
 });
 
-function sendJson(res, status, payload) {
+function sendJson(res, status, payload, headers = {}) {
   const body = JSON.stringify(payload, null, 2);
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "no-store"
+    "Cache-Control": "no-store",
+    ...headers
   });
   res.end(body);
 }
@@ -162,7 +174,7 @@ function sendError(res, status, message, details = {}) {
 
 function publicErrorMessage(error) {
   const message = error.message || "";
-  if (/hawley_worker_page_assignments|hawley_cycle_calendar|hawley_reporting_day_summary|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|jsonb_display_text|task_transition_events|time_sessions|transition_category_catalog/.test(message)) {
+  if (/hawley_worker_page_assignments|hawley_cycle_calendar|hawley_reporting_day_summary|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|jsonb_display_text|task_transition_events|time_sessions|transition_category_catalog|app_users|app_sessions|app_auth_events/.test(message)) {
     return {
       status: 503,
       message: "Hawley worker read model is not migrated yet. Run npm run pg:migrate."
@@ -207,6 +219,43 @@ function envList(value) {
     .split(",")
     .map(item => item.trim())
     .filter(Boolean);
+}
+
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function requestIp(req) {
+  return String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "")
+    .split(",")[0]
+    .trim();
+}
+
+function parseCookies(req) {
+  return Object.fromEntries(
+    String(req.headers.cookie || "")
+      .split(";")
+      .map(part => part.trim())
+      .filter(Boolean)
+      .map(part => {
+        const index = part.indexOf("=");
+        if (index === -1) return [part, ""];
+        return [decodeURIComponent(part.slice(0, index)), decodeURIComponent(part.slice(index + 1))];
+      })
+  );
+}
+
+function cookieHeader(name, value, options = {}) {
+  const parts = [
+    `${encodeURIComponent(name)}=${encodeURIComponent(value || "")}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax"
+  ];
+  if (process.env.NODE_ENV === "production") parts.push("Secure");
+  if (options.maxAge !== undefined) parts.push(`Max-Age=${Math.max(0, Number(options.maxAge || 0))}`);
+  if (options.expires) parts.push(`Expires=${options.expires.toUTCString()}`);
+  return parts.join("; ");
 }
 
 function canonicalWorkerIdForWrites(value) {
@@ -2612,9 +2661,19 @@ async function attachWorkerTaskActualHistory(workers) {
   }
 }
 
-async function dailyAssignmentsPayload(url) {
+async function dailyAssignmentsPayload(url, authActor = null) {
   const date = url.searchParams.get("date") || todayIso();
-  const requestedEmployee = url.searchParams.get("employee") || "";
+  let requestedEmployee = url.searchParams.get("employee") || "";
+  if (APP_AUTH_ACTIVE) {
+    if (!authActor) throw actionError("Sign in to Hawley to load assignments.", 401, { code: "AUTH_REQUIRED" });
+    if (!actorIsManager(authActor)) {
+      const requestedWorker = requestedEmployee ? canonicalWorkerIdForWrites(requestedEmployee) : authActor.workerKey;
+      if (requestedWorker && requestedWorker !== authActor.workerKey) {
+        throw actionError("This login is not allowed to load that worker page.", 403, { code: "WORKER_ACCESS_DENIED" });
+      }
+      requestedEmployee = authActor.workerKey;
+    }
+  }
   const employee = requestedEmployee ? canonicalWorkerIdForWrites(requestedEmployee) : "";
   const includeNoWork = INCLUDE_NO_WORK_WORKERS || booleanQuery(url.searchParams.get("includeNoWork"));
   if (!isIsoDate(date)) {
@@ -2736,7 +2795,30 @@ async function readJsonBody(req) {
   }
 }
 
-function authStatusPayload() {
+function accountRoleForEmail(email, fallback = "worker") {
+  const normalized = normalizeEmail(email);
+  if (APP_AUTH_ADMIN_EMAILS.has(normalized)) return "admin";
+  if (APP_AUTH_MANAGER_EMAILS.has(normalized)) return "manager";
+  return fallback;
+}
+
+function appAuthBaseStatus(user = null) {
+  return {
+    installed: true,
+    active: APP_AUTH_ACTIVE,
+    sessionRequired: APP_AUTH_ACTIVE,
+    authenticated: Boolean(user),
+    user,
+    cookieName: APP_AUTH_COOKIE_NAME,
+    sessionTtlHours: Number.isFinite(APP_AUTH_SESSION_TTL_HOURS) ? APP_AUTH_SESSION_TTL_HOURS : 12,
+    rosterSeedOnStart: APP_AUTH_SEED_ROSTER_ON_START,
+    bootstrapEnabled: APP_AUTH_BOOTSTRAP_ENABLED,
+    managerEmailsConfigured: APP_AUTH_MANAGER_EMAILS.size,
+    adminEmailsConfigured: APP_AUTH_ADMIN_EMAILS.size
+  };
+}
+
+function authStatusPayload(user = null) {
   return {
     writePinRequired: false,
     mode: WORKER_WRITES_ENABLED ? "hawley-live-worker-writes" : "hawley-read-only-pilot",
@@ -2748,8 +2830,302 @@ function authStatusPayload() {
     writeWorkerNames: WORKER_WRITES_ENABLED && !WORKER_WRITES_ALL ? [JACOB_R_WORKER_NAME] : [],
     liveWriteScope: WORKER_WRITES_ALL
       ? "timer rows in Hawley plus Asana completion for assigned worker tasks"
-      : "timer rows in Hawley plus Asana completion for approved pilot workers only"
+      : "timer rows in Hawley plus Asana completion for approved pilot workers only",
+    accountAuth: appAuthBaseStatus(user)
   };
+}
+
+function authSessionTtlSeconds() {
+  const hours = Number.isFinite(APP_AUTH_SESSION_TTL_HOURS) && APP_AUTH_SESSION_TTL_HOURS > 0
+    ? APP_AUTH_SESSION_TTL_HOURS
+    : 12;
+  return Math.round(hours * 60 * 60);
+}
+
+function sessionTokenHash(token) {
+  return crypto.createHash("sha256").update(String(token || "")).digest("hex");
+}
+
+async function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const key = await scryptAsync(String(password || ""), salt, 64);
+  return `scrypt$1$${salt}$${Buffer.from(key).toString("hex")}`;
+}
+
+async function verifyPassword(password, storedHash) {
+  const [scheme, version, salt, keyHex] = String(storedHash || "").split("$");
+  if (scheme !== "scrypt" || version !== "1" || !salt || !keyHex) return false;
+  const expected = Buffer.from(keyHex, "hex");
+  const actual = Buffer.from(await scryptAsync(String(password || ""), salt, expected.length));
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
+
+function authUserPayload(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.app_user_id || 0),
+    username: row.username || "",
+    displayName: row.display_name || row.worker_name || row.username || "",
+    email: row.email || row.worker_email || "",
+    role: row.role || "worker",
+    active: Boolean(row.active),
+    workerKey: row.worker_key || "",
+    workerName: row.worker_name || "",
+    workerEmail: row.worker_email || "",
+    temporaryPassword: Boolean(row.temporary_password)
+  };
+}
+
+function actorIsManager(actor) {
+  return Boolean(actor && ["manager", "admin"].includes(actor.role));
+}
+
+function authActorSummary(actor) {
+  if (!actor) return null;
+  return {
+    appUserId: actor.id,
+    username: actor.username,
+    displayName: actor.displayName,
+    email: actor.email,
+    role: actor.role,
+    workerKey: actor.workerKey,
+    workerName: actor.workerName,
+    workerEmail: actor.workerEmail
+  };
+}
+
+function actorAuditPayload(actor, actingForWorkerKey = "") {
+  const summary = authActorSummary(actor);
+  if (!summary) return {};
+  return {
+    authActor: summary,
+    authActingForWorkerKey: actingForWorkerKey || "",
+    authActingForAnotherWorker: Boolean(actingForWorkerKey && actingForWorkerKey !== summary.workerKey)
+  };
+}
+
+async function recordAuthEvent(client, eventType, details = {}) {
+  await client.query(
+    `
+      insert into core.app_auth_events (
+        event_type,
+        app_user_id,
+        username,
+        worker_key,
+        role,
+        success,
+        reason,
+        ip_address,
+        user_agent,
+        payload
+      )
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+    `,
+    [
+      eventType,
+      details.user?.id || details.appUserId || null,
+      details.username || details.user?.username || null,
+      details.user?.workerKey || null,
+      details.user?.role || null,
+      Boolean(details.success),
+      details.reason || null,
+      details.ipAddress || null,
+      details.userAgent || null,
+      JSON.stringify(details.payload || {})
+    ]
+  );
+}
+
+async function seedInactiveAuthUsersFromWorkForce() {
+  if (!APP_AUTH_SEED_ROSTER_ON_START || !syncDatabaseConfigured()) return;
+  const client = new pg.Client(getDatabaseConfig({ useSyncUrl: true }));
+  await client.connect();
+  try {
+    await client.query(
+      `
+        insert into core.app_users (
+          username,
+          display_name,
+          email,
+          worker_key,
+          worker_name,
+          worker_email,
+          role,
+          active,
+          source_system,
+          source_synced_at
+        )
+        select
+          lower(nullif(worker_email, '')) as username,
+          worker_name,
+          lower(nullif(worker_email, '')) as email,
+          'asana-' || trim(both '-' from regexp_replace(
+            case
+              when lower(nullif(worker_email, '')) like 'asana+%' then substring(lower(nullif(worker_email, '')) from 7)
+              else lower(nullif(worker_email, ''))
+            end,
+            '[^a-z0-9]+',
+            '-',
+            'g'
+          )) as worker_key,
+          worker_name,
+          lower(nullif(worker_email, '')) as worker_email,
+          'worker',
+          false,
+          'hawley_work_force',
+          source_synced_at
+        from (
+          select distinct on (lower(nullif(worker_email, ''))) *
+          from hb.work_force
+          where actively_employed
+            and nullif(worker_email, '') is not null
+          order by lower(nullif(worker_email, '')), source_synced_at desc nulls last, worker_name
+        ) workforce
+        on conflict (username) do update set
+          display_name = excluded.display_name,
+          email = excluded.email,
+          worker_key = excluded.worker_key,
+          worker_name = excluded.worker_name,
+          worker_email = excluded.worker_email,
+          source_system = excluded.source_system,
+          source_synced_at = excluded.source_synced_at,
+          updated_at = now()
+      `
+    );
+
+    for (const email of new Set([...APP_AUTH_MANAGER_EMAILS, ...APP_AUTH_ADMIN_EMAILS])) {
+      await client.query(
+        `
+          update core.app_users
+          set role = $2, updated_at = now()
+          where username = $1
+        `,
+        [email, accountRoleForEmail(email)]
+      );
+    }
+  } catch (error) {
+    console.warn(`Hawley auth roster seed skipped: ${error.message}`);
+  } finally {
+    await client.end();
+  }
+}
+
+async function applyBootstrapAdminUser() {
+  if (!APP_AUTH_BOOTSTRAP_ENABLED) return;
+  if (!APP_AUTH_BOOTSTRAP_EMAIL || !APP_AUTH_BOOTSTRAP_PASSWORD) {
+    console.warn("Hawley auth bootstrap skipped: missing HAWLEY_AUTH_BOOTSTRAP_EMAIL or HAWLEY_AUTH_BOOTSTRAP_PASSWORD.");
+    return;
+  }
+
+  const client = new pg.Client(getDatabaseConfig({ useSyncUrl: true }));
+  await client.connect();
+  try {
+    const passwordHash = await hashPassword(APP_AUTH_BOOTSTRAP_PASSWORD);
+    await client.query(
+      `
+        insert into core.app_users (
+          username,
+          display_name,
+          email,
+          worker_key,
+          worker_name,
+          worker_email,
+          role,
+          active,
+          password_hash,
+          password_set_at,
+          temporary_password,
+          source_system
+        )
+        select
+          $1,
+          coalesce(worker_name, $1),
+          $1,
+          coalesce('asana-' || trim(both '-' from regexp_replace(
+            case
+              when lower(nullif(worker_email, '')) like 'asana+%' then substring(lower(nullif(worker_email, '')) from 7)
+              else lower(nullif(worker_email, ''))
+            end,
+            '[^a-z0-9]+',
+            '-',
+            'g'
+          )), ''),
+          worker_name,
+          lower(worker_email),
+          'admin',
+          true,
+          $2,
+          now(),
+          true,
+          'hawley_auth_bootstrap'
+        from (select * from hb.work_force where lower(worker_email) = $1 limit 1) wf
+        right join (select 1) one on true
+        on conflict (username) do update set
+          role = 'admin',
+          active = true,
+          password_hash = excluded.password_hash,
+          password_set_at = now(),
+          temporary_password = true,
+          updated_at = now()
+      `,
+      [APP_AUTH_BOOTSTRAP_EMAIL, passwordHash]
+    );
+    console.log("Hawley auth bootstrap admin user verified.");
+  } catch (error) {
+    console.warn(`Hawley auth bootstrap skipped: ${error.message}`);
+  } finally {
+    await client.end();
+  }
+}
+
+async function authActorFromRequest(req) {
+  if (!APP_AUTH_ACTIVE) return null;
+  const token = parseCookies(req)[APP_AUTH_COOKIE_NAME];
+  if (!token) return null;
+  const tokenHash = sessionTokenHash(token);
+  const client = await writePool.connect();
+  try {
+    const result = await client.query(
+      `
+        select
+          users.*
+        from core.app_sessions sessions
+        join core.app_users users on users.app_user_id = sessions.app_user_id
+        where sessions.session_token_hash = $1
+          and sessions.revoked_at is null
+          and sessions.expires_at > now()
+          and users.active
+        limit 1
+      `,
+      [tokenHash]
+    );
+    if (!result.rows[0]) return null;
+    await client.query(
+      "update core.app_sessions set last_seen_at = now() where session_token_hash = $1",
+      [tokenHash]
+    );
+    return authUserPayload(result.rows[0]);
+  } finally {
+    client.release();
+  }
+}
+
+async function requireAuthActor(req) {
+  const actor = await authActorFromRequest(req);
+  if (!actor) throw actionError("Sign in to Hawley to continue.", 401, { code: "AUTH_REQUIRED" });
+  return actor;
+}
+
+function requireManagerActor(actor) {
+  if (!APP_AUTH_ACTIVE) return;
+  if (!actorIsManager(actor)) throw actionError("Manager access is required.", 403, { code: "MANAGER_REQUIRED" });
+}
+
+function requireWorkerAccess(actor, workerKey) {
+  if (!APP_AUTH_ACTIVE) return;
+  if (actorIsManager(actor)) return;
+  if (actor?.workerKey && workerKey && actor.workerKey === workerKey) return;
+  throw actionError("This login is not allowed to use that worker page.", 403, { code: "WORKER_ACCESS_DENIED" });
 }
 
 function ledgerKeyForWorkerTask(workerId, date, taskId) {
@@ -2791,12 +3167,12 @@ function liveTimerTotalActualMinutes(timer, now, workDate = "") {
   return liveTimerBaseActualMinutes(timer) + liveTimerElapsedMinutes(timer, now, workDate);
 }
 
-async function assignedWorkerTaskForWrite(employee, date, taskId) {
+async function assignedWorkerTaskForWrite(employee, date, taskId, authActor = null) {
   const assignmentUrl = new URL("http://hawley.local/api/daily-assignments");
   assignmentUrl.searchParams.set("date", date);
   assignmentUrl.searchParams.set("employee", employee);
   assignmentUrl.searchParams.set("includeNoWork", "true");
-  const payload = await dailyAssignmentsPayload(assignmentUrl);
+  const payload = await dailyAssignmentsPayload(assignmentUrl, authActor);
   const worker = (payload.workers || []).find(item => item.id === employee);
   if (!worker) {
     throw actionError("Worker profile is not available in Hawley for this date.", 404);
@@ -2884,6 +3260,7 @@ function liveActualFields(worker, task, date, timer, options = {}) {
   const timerMinutes = Number(options.timerMinutes ?? timer.accumulatedMinutes ?? 0);
   const asanaPostedMinutes = Number(options.asanaPostedMinutes ?? timer.asanaPostedMinutes ?? 0);
   const completed = Boolean(options.completed);
+  const authAudit = actorAuditPayload(options.authActor, worker.id);
   return {
     "Work Date": date,
     "Worker Key": worker.id,
@@ -2906,7 +3283,14 @@ function liveActualFields(worker, task, date, timer, options = {}) {
     "Completion Pending?": Boolean(options.completionPending),
     "Time Entry Created?": Boolean(options.timeEntryCreated),
     "Last Seen At": options.seenAt || new Date().toISOString(),
-    "Was Assigned In DAT?": true
+    "Was Assigned In DAT?": true,
+    ...(authAudit.authActor ? {
+      "Auth Actor User ID": authAudit.authActor.appUserId,
+      "Auth Actor Email": authAudit.authActor.email,
+      "Auth Actor Role": authAudit.authActor.role,
+      "Auth Acting For Worker Key": authAudit.authActingForWorkerKey,
+      "Auth Acting For Another Worker?": authAudit.authActingForAnotherWorker
+    } : {})
   };
 }
 
@@ -3103,6 +3487,10 @@ function runningSegmentMinutes(timer, now, workDate = "") {
 async function recordWorkerTaskEvent(client, worker, task, date, eventType, eventTimestamp, options = {}) {
   const phaseKey = phaseKeyForTask(task);
   const phaseName = phaseNameForTask(task);
+  const payload = {
+    ...actorAuditPayload(options.authActor, worker.id),
+    ...(options.payload || {})
+  };
   const result = await client.query(
     `
       insert into core.worker_task_events (
@@ -3145,7 +3533,7 @@ async function recordWorkerTaskEvent(client, worker, task, date, eventType, even
       eventTimestamp,
       options.durationMinutes ?? null,
       options.syncStatus || "not_ready",
-      JSON.stringify(options.payload || {}),
+      JSON.stringify(payload),
       options.notes || null
     ]
   );
@@ -3920,10 +4308,12 @@ async function handleWorkerTaskAction(req) {
   const employee = canonicalWorkerIdForWrites(body.employee || "");
   const taskId = String(body.taskId || "").trim();
   const date = String(body.date || todayIso()).trim();
+  const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
 
   if (!["start", "stop", "release", "complete"].includes(action)) {
     throw actionError("Action must be start, stop, release, or complete.", 400);
   }
+  requireWorkerAccess(authActor, employee);
   if (!employee || !workerWritesAllowed(employee)) {
     throw actionError("Live worker writes are not enabled for this employee.", 403, {
       mode: authStatusPayload().mode,
@@ -3937,7 +4327,8 @@ async function handleWorkerTaskAction(req) {
     await autoCloseScheduledTimersForDate(date);
   }
 
-  const { worker, task } = await assignedWorkerTaskForWrite(employee, date, taskId);
+  const { worker, task } = await assignedWorkerTaskForWrite(employee, date, taskId, authActor);
+  const authAudit = actorAuditPayload(authActor, worker.id);
   const now = new Date();
   const nowIso = now.toISOString();
   const ledgerKey = ledgerKeyForWorkerTask(worker.id, date, task.id);
@@ -3990,11 +4381,14 @@ async function handleWorkerTaskAction(req) {
         timerMinutes: timer.accumulatedMinutes,
         asanaPostedMinutes: timer.asanaPostedMinutes,
         sourceLabel: "Hawley timer started",
-        seenAt: nowIso
+        seenAt: nowIso,
+        authActor
       });
       await tryWorkerTransitionLedger("start", async () => {
         await recordWorkerTaskEvent(client, worker, task, date, "start", nowIso, {
+          authActor,
           payload: {
+            ...authAudit,
             startedAt: saved.startedAt,
             accumulatedMinutes: saved.accumulatedMinutes,
             ledgerKey
@@ -4002,6 +4396,7 @@ async function handleWorkerTaskAction(req) {
         });
         const session = await startTimeSession(client, worker, task, date, saved.startedAt || nowIso, {
           action: "start",
+          ...authAudit,
           ledgerKey,
           accumulatedMinutes: saved.accumulatedMinutes
         });
@@ -4039,18 +4434,22 @@ async function handleWorkerTaskAction(req) {
         timerMinutes: elapsedMinutes,
         asanaPostedMinutes: current.asanaPostedMinutes,
         sourceLabel: "Hawley timer stopped",
-        seenAt: eventIso
+        seenAt: eventIso,
+        authActor
       });
       await tryWorkerTransitionLedger("stop", async () => {
         await closeTimeSession(client, worker, task, date, current.startedAt, eventIso, "stop", segmentMinutes, {
           action: "stop",
+          ...authAudit,
           ledgerKey,
           elapsedMinutes,
           actualMinutes
         });
         await recordWorkerTaskEvent(client, worker, task, date, "stop", eventIso, {
+          authActor,
           durationMinutes: segmentMinutes || elapsedMinutes,
           payload: {
+            ...authAudit,
             accumulatedMinutes: saved.accumulatedMinutes,
             actualMinutes: saved.actualMinutes,
             ledgerKey
@@ -4087,18 +4486,22 @@ async function handleWorkerTaskAction(req) {
         timerMinutes: 0,
         asanaPostedMinutes: current.asanaPostedMinutes,
         sourceLabel: "Hawley timer session ended",
-        seenAt: eventIso
+        seenAt: eventIso,
+        authActor
       });
       await tryWorkerTransitionLedger("release", async () => {
         await closeTimeSession(client, worker, task, date, current.startedAt, eventIso, "release", segmentMinutes, {
           action: "release",
+          ...authAudit,
           ledgerKey,
           elapsedMinutes,
           actualMinutes
         });
         await recordWorkerTaskEvent(client, worker, task, date, "release", eventIso, {
+          authActor,
           durationMinutes: segmentMinutes || elapsedMinutes,
           payload: {
+            ...authAudit,
             elapsedMinutes,
             actualMinutes: saved.actualMinutes || actualMinutes,
             ledgerKey
@@ -4150,19 +4553,23 @@ async function handleWorkerTaskAction(req) {
       completionPending: true,
       timeEntryCreated: current.timeEntryCreated,
       sourceLabel: "Hawley completion pending",
-      seenAt: eventIso
+      seenAt: eventIso,
+      authActor
     });
     await tryWorkerTransitionLedger("complete", async () => {
       await closeTimeSession(client, worker, task, date, current.startedAt, eventIso, "complete", segmentMinutes, {
         action: "complete",
+        ...authAudit,
         ledgerKey,
         elapsedMinutes,
         actualMinutes
       });
       await recordWorkerTaskEvent(client, worker, task, date, "complete", eventIso, {
+        authActor,
         durationMinutes: segmentMinutes || elapsedMinutes,
         syncStatus: "pending",
         payload: {
+          ...authAudit,
           elapsedMinutes,
           actualMinutes,
           unpostedMinutes: Math.max(0, actualMinutes - Number(current.asanaPostedMinutes || 0)),
@@ -4188,7 +4595,8 @@ async function handleWorkerTaskAction(req) {
         completionPending: true,
         timeEntryCreated: true,
         sourceLabel: "Hawley Asana time posted",
-        seenAt: eventIso
+        seenAt: eventIso,
+        authActor
       });
     }
 
@@ -4208,7 +4616,8 @@ async function handleWorkerTaskAction(req) {
       completionPending: false,
       timeEntryCreated: true,
       sourceLabel: "Hawley task completed",
-      seenAt: eventIso
+      seenAt: eventIso,
+      authActor
     });
 
     return {
@@ -4575,6 +4984,157 @@ async function reportingNavigationPayload(url) {
   return reportingNavigation(isIsoDate(requestedDate) ? requestedDate : todayIso());
 }
 
+async function authMePayload(req) {
+  const user = await authActorFromRequest(req);
+  return {
+    ok: true,
+    accountAuth: appAuthBaseStatus(user),
+    user,
+    authenticated: Boolean(user)
+  };
+}
+
+async function handleAuthLogin(req, res) {
+  if (!APP_AUTH_ACTIVE) {
+    sendError(res, 409, "Hawley account login is installed but not active.", {
+      accountAuth: appAuthBaseStatus()
+    });
+    return;
+  }
+
+  const body = await readJsonBody(req);
+  const username = normalizeEmail(body.username || body.email);
+  const password = String(body.password || "");
+  const client = await writePool.connect();
+  try {
+    const result = await client.query(
+      `
+        select *
+        from core.app_users
+        where username = $1 or lower(email) = $1
+        limit 1
+      `,
+      [username]
+    );
+    const row = result.rows[0];
+    const user = authUserPayload(row);
+    const genericReason = "Invalid login or inactive account.";
+    const requestDetails = {
+      username,
+      ipAddress: requestIp(req),
+      userAgent: String(req.headers["user-agent"] || "")
+    };
+
+    if (!row || !row.active || !row.password_hash || (row.locked_until && new Date(row.locked_until) > new Date())) {
+      await recordAuthEvent(client, "login", {
+        ...requestDetails,
+        user,
+        success: false,
+        reason: !row ? "not_found" : !row.active ? "inactive" : !row.password_hash ? "password_not_set" : "locked"
+      });
+      throw actionError(genericReason, 401, { code: "LOGIN_FAILED" });
+    }
+
+    const validPassword = await verifyPassword(password, row.password_hash);
+    if (!validPassword) {
+      await client.query(
+        `
+          update core.app_users
+          set
+            failed_login_count = failed_login_count + 1,
+            locked_until = case when failed_login_count + 1 >= 10 then now() + interval '15 minutes' else locked_until end,
+            updated_at = now()
+          where app_user_id = $1
+        `,
+        [row.app_user_id]
+      );
+      await recordAuthEvent(client, "login", {
+        ...requestDetails,
+        user,
+        success: false,
+        reason: "bad_password"
+      });
+      throw actionError(genericReason, 401, { code: "LOGIN_FAILED" });
+    }
+
+    const token = crypto.randomBytes(32).toString("base64url");
+    const tokenHash = sessionTokenHash(token);
+    const ttlSeconds = authSessionTtlSeconds();
+    const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    await client.query(
+      `
+        insert into core.app_sessions (
+          session_token_hash,
+          app_user_id,
+          expires_at,
+          ip_address,
+          user_agent
+        )
+        values ($1, $2, $3::timestamptz, $4, $5)
+      `,
+      [tokenHash, row.app_user_id, expiresAt, requestIp(req), String(req.headers["user-agent"] || "")]
+    );
+    await client.query(
+      `
+        update core.app_users
+        set
+          last_login_at = now(),
+          failed_login_count = 0,
+          locked_until = null,
+          updated_at = now()
+        where app_user_id = $1
+      `,
+      [row.app_user_id]
+    );
+    await recordAuthEvent(client, "login", {
+      ...requestDetails,
+      user,
+      success: true,
+      reason: "ok"
+    });
+
+    sendJson(res, 200, {
+      ok: true,
+      accountAuth: appAuthBaseStatus(user),
+      user,
+      authenticated: true
+    }, {
+      "Set-Cookie": cookieHeader(APP_AUTH_COOKIE_NAME, token, { maxAge: ttlSeconds })
+    });
+  } finally {
+    client.release();
+  }
+}
+
+async function handleAuthLogout(req, res) {
+  const token = parseCookies(req)[APP_AUTH_COOKIE_NAME];
+  if (APP_AUTH_ACTIVE && token) {
+    const client = await writePool.connect();
+    try {
+      await client.query(
+        "update core.app_sessions set revoked_at = now() where session_token_hash = $1 and revoked_at is null",
+        [sessionTokenHash(token)]
+      );
+      await recordAuthEvent(client, "logout", {
+        success: true,
+        reason: "user_logout",
+        ipAddress: requestIp(req),
+        userAgent: String(req.headers["user-agent"] || "")
+      });
+    } finally {
+      client.release();
+    }
+  }
+
+  sendJson(res, 200, {
+    ok: true,
+    accountAuth: appAuthBaseStatus(),
+    authenticated: false
+  }, {
+    "Set-Cookie": cookieHeader(APP_AUTH_COOKIE_NAME, "", { maxAge: 0, expires: new Date(0) })
+  });
+}
+
 async function transitionById(transitionEventId) {
   const result = await pool.query(
     "select * from reporting.transition_event_detail where transition_event_id = $1",
@@ -4589,12 +5149,14 @@ async function handleTransitionReview(req) {
       mode: authStatusPayload().mode
     });
   }
+  const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireManagerActor(authActor);
 
   const body = await readJsonBody(req);
   const transitionEventId = Number(body.transitionEventId || body.transition_event_id || 0);
   const managerCategory = String(body.categoryKey || body.managerCategory || "").trim();
   const managerNotes = String(body.notes || body.managerNotes || "").trim().slice(0, 4000);
-  const reviewedBy = String(body.reviewedBy || "Hawley manager").trim().slice(0, 200);
+  const reviewedBy = String(authActor?.displayName || authActor?.email || body.reviewedBy || "Hawley manager").trim().slice(0, 200);
   if (!Number.isInteger(transitionEventId) || transitionEventId <= 0) {
     throw actionError("transitionEventId is required.", 400);
   }
@@ -4750,38 +5312,62 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/auth-status" && req.method === "GET") {
+      sendJson(res, 200, authStatusPayload(await authActorFromRequest(req)));
+      return;
+    }
+
+    if (url.pathname === "/api/auth/me" && req.method === "GET") {
+      sendJson(res, 200, await authMePayload(req));
+      return;
+    }
+
+    if (url.pathname === "/api/auth/login" && req.method === "POST") {
+      await handleAuthLogin(req, res);
+      return;
+    }
+
+    if (url.pathname === "/api/auth/logout" && req.method === "POST") {
+      await handleAuthLogout(req, res);
+      return;
+    }
+
     if (url.pathname === "/api/sync-status") {
+      const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+      requireManagerActor(authActor);
       sendJson(res, 200, await syncStatusPayload());
       return;
     }
 
     if (url.pathname === "/api/daily-assignments" || url.pathname === "/api/assignments") {
-      sendJson(res, 200, await dailyAssignmentsPayload(url));
+      const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+      sendJson(res, 200, await dailyAssignmentsPayload(url, authActor));
       return;
     }
 
     if (url.pathname === "/api/utilization-report" && req.method === "GET") {
+      const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+      requireManagerActor(authActor);
       sendJson(res, 200, await utilizationReportPayload(url));
       return;
     }
 
     if (url.pathname === "/api/reporting-navigation" && req.method === "GET") {
+      const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+      requireManagerActor(authActor);
       sendJson(res, 200, await reportingNavigationPayload(url));
       return;
     }
 
     if (url.pathname === "/api/transition-review-queue" && req.method === "GET") {
+      const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+      requireManagerActor(authActor);
       sendJson(res, 200, await transitionReviewQueuePayload(url));
       return;
     }
 
     if (url.pathname === "/api/transition-review" && req.method === "POST") {
       sendJson(res, 200, await handleTransitionReview(req));
-      return;
-    }
-
-    if (url.pathname === "/api/auth-status" && req.method === "GET") {
-      sendJson(res, 200, authStatusPayload());
       return;
     }
 
@@ -4807,6 +5393,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/refresh-daily-tracker" && req.method === "GET") {
+      const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+      requireManagerActor(authActor);
       sendJson(res, 200, {
         running: false,
         message: "",
@@ -4819,6 +5407,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/refresh-daily-tracker" && req.method === "POST") {
+      const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+      requireManagerActor(authActor);
       sendError(res, 409, "Hawley worker pilot is read-only. Tracker refresh writes are not enabled here.", {
         mode: "hawley-read-only-pilot"
       });
@@ -4851,6 +5441,8 @@ async function startServer() {
     console.error(`Hawley startup migrations failed: ${error.message}`);
   }
   await applyRuntimeReadGrants();
+  await seedInactiveAuthUsersFromWorkForce();
+  await applyBootstrapAdminUser();
   startAsanaEventWatcher();
   startWorkerActualsWatcher();
   startNightlyRefreshScheduler();

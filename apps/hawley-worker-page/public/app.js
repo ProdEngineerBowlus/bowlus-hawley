@@ -7,6 +7,7 @@
   const queryEmployee = getEmployeeFromUrl();
   const queryDate = queryEmployee ? "" : getDateFromUrl();
   const selectedDate = queryDate || today;
+  let autoRefreshStarted = false;
 
   const state = {
     loading: true,
@@ -25,6 +26,20 @@
       workerWritesEnabled: false,
       writeWorkerIds: [],
       managerControlEnabled: false,
+      accountAuth: {
+        installed: false,
+        active: false,
+        authenticated: false,
+        user: null,
+      },
+    },
+    auth: {
+      loaded: false,
+      active: false,
+      authenticated: false,
+      user: null,
+      loginPending: false,
+      loginError: "",
     },
     alertStatus: {
       enabled: false,
@@ -273,27 +288,48 @@
   };
 
   render();
-  loadAuthStatus();
-  loadAssignments();
-  loadAlertStatus();
-  if (!queryEmployee) {
-    loadRefreshStatus();
-    loadSyncStatus();
+  initialize();
+
+  async function initialize() {
+    await loadAuthStatus();
+    if (authLoginRequired()) {
+      state.loading = false;
+      render();
+      return;
+    }
+
+    await loadAssignments();
+    loadAlertStatus();
+    if (!workerPageLocked()) {
+      loadRefreshStatus();
+      loadSyncStatus();
+    }
+    startAutoRefresh();
   }
-  window.setInterval(() => {
-    if (hasVisibleRunningTimer()) render();
-  }, 30000);
-  window.setInterval(() => {
-    if (!state.actionTaskId) loadAssignments({ silent: true });
-  }, ASSIGNMENT_AUTO_REFRESH_MS);
-  if (!queryEmployee) {
+
+  function startAutoRefresh() {
+    if (autoRefreshStarted) return;
+    autoRefreshStarted = true;
     window.setInterval(() => {
-      loadSyncStatus({ silent: true });
-    }, SYNC_STATUS_REFRESH_MS);
+      if (hasVisibleRunningTimer()) render();
+    }, 30000);
+    window.setInterval(() => {
+      if (!state.actionTaskId && !authLoginRequired()) loadAssignments({ silent: true });
+    }, ASSIGNMENT_AUTO_REFRESH_MS);
+    if (!workerPageLocked()) {
+      window.setInterval(() => {
+        if (!authLoginRequired()) loadSyncStatus({ silent: true });
+      }, SYNC_STATUS_REFRESH_MS);
+    }
   }
 
   async function loadAssignments(options = {}) {
     const silent = Boolean(options.silent);
+    if (authLoginRequired()) {
+      state.loading = false;
+      render();
+      return;
+    }
     const freshToday = getTodayIso();
     if (freshToday !== today) {
       today = freshToday;
@@ -315,6 +351,12 @@
       params.set("includeNoWork", "true");
       if (queryEmployee) params.set("employee", queryEmployee);
       const response = await fetch(`/api/daily-assignments?${params.toString()}`);
+      if (response.status === 401) {
+        await loadAuthStatus();
+        state.loading = false;
+        render();
+        return;
+      }
       if (!response.ok) throw new Error(`Asana API returned ${response.status}`);
       const payload = await response.json();
       applyAssignments(payload, "asana");
@@ -324,7 +366,7 @@
         render();
         return;
       }
-      if (queryEmployee) {
+      if (workerPageLocked()) {
         applyAssignments({ source: "error", date: state.date, workers: [], error: "Could not load live worker assignments. Ask a manager to check the Daily Assignment app server." }, "error");
       } else {
         applyAssignments(sampleAssignments, "sample");
@@ -377,10 +419,19 @@
     try {
       const response = await fetch("/api/auth-status");
       if (!response.ok) return;
-      state.authStatus = await response.json();
+      applyAuthStatus(await response.json());
     } catch (error) {
       // If this fails, write actions will still handle a 401 by prompting.
     }
+  }
+
+  function applyAuthStatus(payload) {
+    state.authStatus = payload || state.authStatus;
+    const account = state.authStatus.accountAuth || {};
+    state.auth.loaded = true;
+    state.auth.active = Boolean(account.active);
+    state.auth.authenticated = !state.auth.active || Boolean(account.authenticated);
+    state.auth.user = account.user || null;
   }
 
   function applyAssignments(payload, source) {
@@ -394,14 +445,21 @@
     state.refreshedAt = payload.refreshedAt || "";
     state.cycleDays = payload.cycleDays || null;
     const workers = Array.isArray(payload.workers) ? payload.workers : [];
-    state.workers = queryEmployee ? workers.filter((worker) => worker.id === queryEmployee) : workers;
+    const lockedWorkerId = lockedWorkerIdForPage();
+    state.workers = lockedWorkerId ? workers.filter((worker) => worker.id === lockedWorkerId) : workers;
     state.error = payload.error || "";
   }
 
   function render() {
     const app = document.getElementById("app");
     const selectedWorker = getSelectedWorker();
-    const locked = Boolean(queryEmployee);
+    const locked = workerPageLocked();
+
+    if (authLoginRequired()) {
+      app.innerHTML = renderLoginScreen();
+      bindAuthEvents();
+      return;
+    }
 
     app.innerHTML = `
       <div class="app-shell ${locked ? "worker-shell" : "admin-shell"}">
@@ -420,9 +478,99 @@
     bindEvents();
   }
 
+  function renderLoginScreen() {
+    const account = state.authStatus.accountAuth || {};
+    const statusText = account.active
+      ? "Sign in with your Hawley account"
+      : "Employee accounts are installed but inactive";
+    return `
+      <div class="app-shell auth-shell">
+        <main class="auth-card" aria-label="Hawley sign in">
+          <div class="brand auth-brand">
+            <div class="brand-mark">HW</div>
+            <div>
+              <h1>Hawley Worker</h1>
+              <p>${escapeHtml(statusText)}</p>
+            </div>
+          </div>
+          <form class="auth-form" data-auth-form>
+            <label class="field">
+              <span>Email</span>
+              <input type="email" name="username" autocomplete="username" required ${state.auth.loginPending ? "disabled" : ""} />
+            </label>
+            <label class="field">
+              <span>Password</span>
+              <input type="password" name="password" autocomplete="current-password" required ${state.auth.loginPending ? "disabled" : ""} />
+            </label>
+            ${state.auth.loginError ? `<div class="auth-error" role="alert">${escapeHtml(state.auth.loginError)}</div>` : ""}
+            <button class="btn primary auth-submit" type="submit" ${state.auth.loginPending ? "disabled" : ""}>
+              <span>${state.auth.loginPending ? "Signing in..." : "Sign in"}</span>
+            </button>
+          </form>
+        </main>
+      </div>
+    `;
+  }
+
+  function bindAuthEvents() {
+    document.querySelector("[data-auth-form]")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const data = new FormData(form);
+      await login(data.get("username"), data.get("password"));
+    });
+  }
+
+  async function login(username, password) {
+    state.auth.loginPending = true;
+    state.auth.loginError = "";
+    render();
+    try {
+      const response = await postJson("/api/auth/login", {
+        username: String(username || "").trim(),
+        password: String(password || ""),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || `Login failed with ${response.status}`);
+      applyAuthStatus({ ...state.authStatus, accountAuth: payload.accountAuth });
+      state.auth.loginPending = false;
+      state.auth.loginError = "";
+      await loadAssignments();
+      loadAlertStatus();
+      if (!workerPageLocked()) {
+        loadRefreshStatus();
+        loadSyncStatus();
+      }
+      startAutoRefresh();
+      render();
+    } catch (error) {
+      state.auth.loginPending = false;
+      state.auth.loginError = error.message || "Could not sign in.";
+      render();
+    }
+  }
+
+  async function logout() {
+    try {
+      await postJson("/api/auth/logout", {});
+    } finally {
+      state.auth.authenticated = false;
+      state.auth.user = null;
+      state.auth.loginError = "";
+      state.workers = [];
+      state.lineOverview = null;
+      render();
+    }
+  }
+
   function renderTopbar(worker, locked) {
     const scope = locked ? worker ? worker.name : "Worker" : "Admin";
     const sourceLabel = state.source === "asana" ? "Live Asana" : state.source === "sample" ? "Sample" : state.source === "error" ? "Error" : "Loading";
+    const user = state.auth.user;
+    const accountBadge = state.auth.active && user
+      ? `<span class="account-badge">${escapeHtml(user.displayName || user.email || "Signed in")} - ${escapeHtml(user.role || "worker")}</span>
+         <button class="btn ghost" type="button" data-action="logout"><span>Logout</span></button>`
+      : "";
 
     return `
       <header class="topbar">
@@ -445,6 +593,7 @@
                      : ""
                  }`
           }
+          ${accountBadge}
         </div>
       </header>
     `;
@@ -1187,7 +1336,7 @@
       return `<div class="empty-state">No worker assignment snapshot matched this link.${latest}</div>`;
     }
 
-    if (queryEmployee) {
+    if (workerPageLocked()) {
       return `
         <section class="worker-focus">
           ${renderDailyProgress(worker)}
@@ -1426,6 +1575,7 @@
     });
 
     document.querySelector("[data-action='refresh']")?.addEventListener("click", loadAssignments);
+    document.querySelector("[data-action='logout']")?.addEventListener("click", logout);
 
     document.querySelectorAll("[data-action='refresh-tracker']").forEach((button) => {
       button.addEventListener("click", () => startTrackerRefresh("fast", getSelectedWorker()));
@@ -1614,13 +1764,31 @@
   }
 
   function managerControlEnabled() {
-    return Boolean(state.authStatus.managerControlEnabled && !queryEmployee);
+    return Boolean(state.authStatus.managerControlEnabled && !workerPageLocked());
   }
 
   function serverWritesEnabledFor(employee) {
     if (state.source === "asana") return true;
     const ids = Array.isArray(state.authStatus.writeWorkerIds) ? state.authStatus.writeWorkerIds : [];
     return Boolean(state.authStatus.workerWritesEnabled && (ids.includes("*") || ids.includes(employee)));
+  }
+
+  function authLoginRequired() {
+    return Boolean(state.auth.active && !state.auth.authenticated);
+  }
+
+  function signedInWorkerKey() {
+    const user = state.auth.user || {};
+    if (!state.auth.active || ["manager", "admin"].includes(user.role)) return "";
+    return user.workerKey || "";
+  }
+
+  function lockedWorkerIdForPage() {
+    return queryEmployee || signedInWorkerKey();
+  }
+
+  function workerPageLocked() {
+    return Boolean(lockedWorkerIdForPage());
   }
 
   async function startWorkerTimer(employee, taskId) {
@@ -2045,7 +2213,7 @@
   }
 
   function hasVisibleRunningTimer() {
-    if (queryEmployee && getSelectedWorker()) return true;
+    if (workerPageLocked() && getSelectedWorker()) return true;
     return state.workers.some(getWorkerActiveTask);
   }
 
@@ -2101,7 +2269,7 @@
 
   function getSelectedWorker() {
     const selected = new URLSearchParams(window.location.search).get("selected");
-    const desired = queryEmployee || selected;
+    const desired = lockedWorkerIdForPage() || selected;
     if (!desired) return null;
     return state.workers.find((worker) => worker.id === desired) || null;
   }
@@ -2145,6 +2313,11 @@
     let response = await postJson(url, payload, state.authStatus.writePinRequired ? getWritePin() : "");
 
     if (response.status === 401) {
+      if (state.auth.active) {
+        await loadAuthStatus();
+        render();
+        return response;
+      }
       sessionStorage.removeItem("dailyAssignmentPin.v1");
       state.authStatus.writePinRequired = true;
       response = await postJson(url, payload, getWritePin());
@@ -2464,7 +2637,7 @@
   }
 
   function getTimerKey(taskId) {
-    return `${state.date}::${queryEmployee || "admin"}::${taskId}`;
+    return `${state.date}::${lockedWorkerIdForPage() || "admin"}::${taskId}`;
   }
 
   function loadLocalTimers() {

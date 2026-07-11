@@ -23,6 +23,7 @@
     "pg:sync:dry": "npm run pg:pull:airtable && npm run pg:normalize && npm run pg:build:hb",
     "pg:source-health": "node ./apps/postgres-sync/src/source-health.js",
     "pg:summary": "node ./apps/postgres-sync/src/import-summary.js",
+    "pg:hawley-auth-user": "node ./apps/postgres-sync/src/hawley-auth-user.js",
     "worker:hawley": "node ./apps/hawley-worker-page/server.js"
   },
   "dependencies": {

@@ -16,6 +16,44 @@ source Asana task complete, and adds an Asana story. The live write scope is
 reported by `/api/auth-status`; `writeWorkerIds: ["*"]` means all assigned
 worker pages use server-backed live writes.
 
+Account login support is installed but inactive by default. Keep
+`HAWLEY_AUTH_ACTIVE=false` until a manager approves login testing. The auth
+migration creates `core.app_users`, `core.app_sessions`, and
+`core.app_auth_events`, and seeds inactive user rows from active
+`hb.work_force` workers with email addresses. No seeded worker account can sign
+in until it is activated and given a password hash.
+
+When login testing is approved, set `HAWLEY_AUTH_ACTIVE=true`, configure
+manager/admin emails with `HAWLEY_AUTH_MANAGER_EMAILS` or
+`HAWLEY_AUTH_ADMIN_EMAILS`, and use the temporary bootstrap env values only long
+enough to create the first admin password:
+
+```text
+HAWLEY_AUTH_BOOTSTRAP_ENABLED=true
+HAWLEY_AUTH_BOOTSTRAP_EMAIL=<manager email>
+HAWLEY_AUTH_BOOTSTRAP_PASSWORD=<secret>
+```
+
+After the first admin can sign in, remove the bootstrap password env value and
+redeploy. Runtime sessions use the HTTP-only `hawley_session` cookie; browser
+JavaScript does not store session tokens.
+
+To activate a specific employee for testing after auth is enabled, set a
+temporary password in the shell and run the admin CLI:
+
+```powershell
+$env:HAWLEY_AUTH_PASSWORD="<temporary password>"
+npm run pg:hawley-auth-user -- set-password worker@example.com --active --role=worker
+```
+
+The CLI stores only a salted hash, marks the account active only when `--active`
+is supplied, and can list or deactivate accounts with:
+
+```powershell
+npm run pg:hawley-auth-user -- list
+npm run pg:hawley-auth-user -- deactivate worker@example.com
+```
+
 Manager control mode uses the same live endpoint. From the manager dashboard,
 selecting a worker opens the manager detail view with Start, Stop, End Session,
 SOP, and Complete controls for that worker's assigned tasks. These controls
@@ -256,6 +294,9 @@ GET /api/daily-assignments?date=YYYY-MM-DD
 GET /api/daily-assignments?date=YYYY-MM-DD&includeNoWork=true
 GET /api/daily-assignments?date=YYYY-MM-DD&employee=<worker-slug>
 GET /api/auth-status
+GET /api/auth/me
+POST /api/auth/login
+POST /api/auth/logout
 GET /api/alert-status
 GET /api/refresh-daily-tracker
 POST /api/refresh-daily-tracker

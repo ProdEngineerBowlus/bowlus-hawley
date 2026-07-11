@@ -33,6 +33,8 @@
     health: null,
     sync: null,
     auth: null,
+    loginPending: false,
+    loginError: "",
     assignments: null,
     utilization: null,
     utilizationLoading: false,
@@ -175,6 +177,53 @@
     return body;
   }
 
+  function accountAuth() {
+    return state.auth?.accountAuth || {};
+  }
+
+  function loginRequired() {
+    const account = accountAuth();
+    return Boolean(account.active && !account.authenticated);
+  }
+
+  async function login(username, password) {
+    state.loginPending = true;
+    state.loginError = "";
+    render();
+    try {
+      const payload = await postJson("/api/auth/login", {
+        username: String(username || "").trim(),
+        password: String(password || ""),
+      });
+      state.auth = { ...(state.auth || {}), accountAuth: payload.accountAuth };
+      state.loginPending = false;
+      state.loginError = "";
+      await load();
+    } catch (error) {
+      state.loginPending = false;
+      state.loginError = error.message || "Could not sign in.";
+      render();
+    }
+  }
+
+  async function logout() {
+    try {
+      await postJson("/api/auth/logout", {});
+    } finally {
+      state.auth = {
+        ...(state.auth || {}),
+        accountAuth: {
+          ...(accountAuth() || {}),
+          authenticated: false,
+          user: null,
+        },
+      };
+      state.assignments = null;
+      state.utilization = null;
+      render();
+    }
+  }
+
   function updateUrl() {
     const url = new URL(window.location.href);
     url.searchParams.set("date", state.date);
@@ -272,21 +321,36 @@
     state.utilizationError = "";
     render();
 
+    try {
+      state.auth = await fetchJson(`/api/auth-status?_=${stamp}`);
+    } catch (error) {
+      state.error = error.message || "Could not check Hawley sign-in status.";
+      state.loading = false;
+      state.utilizationLoading = false;
+      render();
+      return;
+    }
+
+    if (loginRequired()) {
+      state.loading = false;
+      state.utilizationLoading = false;
+      render();
+      return;
+    }
+
     const utilizationPromise = fetchJson(`/api/utilization-report?date=${encodeURIComponent(requestedDate)}&_=${stamp}`)
       .then((payload) => ({ payload }))
       .catch((error) => ({ error }));
 
     try {
-      const [health, sync, auth, assignments] = await Promise.all([
+      const [health, sync, assignments] = await Promise.all([
         fetchJson(`/api/health?_=${stamp}`),
         fetchJson(`/api/sync-status?_=${stamp}`),
-        fetchJson(`/api/auth-status?_=${stamp}`),
         fetchJson(`/api/daily-assignments?date=${encodeURIComponent(requestedDate)}&includeNoWork=true&_=${stamp}`),
       ]);
       if (state.loadToken !== stamp || state.date !== requestedDate) return;
       state.health = health;
       state.sync = sync;
-      state.auth = auth;
       state.assignments = assignments;
       state.loading = false;
       reconcileSelection();
@@ -859,6 +923,11 @@
   }
 
   function renderTopbar() {
+    const user = accountAuth().user;
+    const accountBadge = accountAuth().active && user
+      ? `<span class="account-badge">${escapeHtml(user.displayName || user.email || "Signed in")} - ${escapeHtml(user.role || "manager")}</span>
+         <button class="btn" type="button" data-action="logout">Logout</button>`
+      : "";
     return `
       <header class="beta-topbar">
         <div class="brand">
@@ -872,8 +941,37 @@
           <input class="date-control" type="date" value="${escapeHtml(state.date)}" data-action="date" />
           <button class="btn primary" type="button" data-action="reload">Reload</button>
           <a class="btn" href="/">Live app</a>
+          ${accountBadge}
         </div>
       </header>
+    `;
+  }
+
+  function renderLoginScreen() {
+    return `
+      <div class="beta-shell auth-shell">
+        <main class="auth-card">
+          <div class="brand auth-brand">
+            <div class="brand-mark">HB</div>
+            <div>
+              <h1>Hawley Reporting</h1>
+              <p>Sign in with a manager account</p>
+            </div>
+          </div>
+          <form class="auth-form" data-auth-form>
+            <label class="field">
+              <span>Email</span>
+              <input type="email" name="username" autocomplete="username" required ${state.loginPending ? "disabled" : ""} />
+            </label>
+            <label class="field">
+              <span>Password</span>
+              <input type="password" name="password" autocomplete="current-password" required ${state.loginPending ? "disabled" : ""} />
+            </label>
+            ${state.loginError ? `<div class="auth-error" role="alert">${escapeHtml(state.loginError)}</div>` : ""}
+            <button class="btn primary auth-submit" type="submit" ${state.loginPending ? "disabled" : ""}>${state.loginPending ? "Signing in..." : "Sign in"}</button>
+          </form>
+        </main>
+      </div>
     `;
   }
 
@@ -1342,6 +1440,11 @@
   }
 
   function render() {
+    if (loginRequired()) {
+      root.innerHTML = renderLoginScreen();
+      return;
+    }
+
     root.innerHTML = `
       <div class="beta-shell">
         ${renderTopbar()}
@@ -1384,6 +1487,7 @@
     const target = event.target.closest("[data-action]");
     const action = target?.dataset.action;
     if (action === "reload") load();
+    if (action === "logout") logout();
     if (action === "select-phase") setPhase(target.dataset.phaseKey);
     if (action === "show-phase-tasks") setPhaseView("tasks");
     if (action === "show-transitions") setPhaseView("transitions");
@@ -1398,6 +1502,14 @@
   root.addEventListener("change", (event) => {
     const target = event.target.closest("[data-action='date']");
     if (target) setDate(target.value);
+  });
+
+  root.addEventListener("submit", async (event) => {
+    const form = event.target.closest("[data-auth-form]");
+    if (!form) return;
+    event.preventDefault();
+    const data = new FormData(form);
+    await login(data.get("username"), data.get("password"));
   });
 
   load();
