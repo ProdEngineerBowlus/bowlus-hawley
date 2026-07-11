@@ -961,13 +961,19 @@
 
     const currentCycle = cycleDays.cycle || "";
     const cycleLinks = cycles
-      .filter((cycle) => cycle.cycle !== currentCycle && Number(cycle.snapshotDays || 0) > 0)
+      .filter((cycle) => cycle.cycle !== currentCycle && (Number(cycle.snapshotDays || 0) > 0 || cycle.primaryDate || cycle.firstDate))
       .map((cycle) => {
         const date = cycle.primaryDate || state.date;
+        const rangeLabel = cycle.firstDate && cycle.lastDate
+          ? `${formatShortDate(cycle.firstDate)} to ${formatShortDate(cycle.lastDate)}`
+          : formatShortDate(date);
+        const detail = cycle.snapshotDays
+          ? `${cycle.snapshotDays}/${cycle.dayCount || cycle.snapshotDays} days`
+          : rangeLabel;
         return `
           <a class="cycle-chip${cycle.status === "No Work" ? " empty" : ""}" href="${escapeAttr(managerDateUrl(date))}">
             <strong>${escapeHtml(cycle.cycle || "Cycle")}</strong>
-            <span>${escapeHtml(cycle.snapshotDays ? `${cycle.snapshotDays}/${cycle.dayCount || cycle.snapshotDays} days` : "No snapshots")}</span>
+            <span>${escapeHtml(detail)}</span>
           </a>
         `;
       })

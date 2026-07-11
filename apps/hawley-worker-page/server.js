@@ -2219,77 +2219,38 @@ function buildCycleDaysFromRows(dayRows, selectedDate, calendar = null) {
 }
 
 async function reportingCycleSummaries(selectedDate, selectedCycleName = "") {
-  const [calendarResult, summaryResult] = await Promise.all([
-    pool.query(`
-      select
-        cycle_number,
-        cycle_label,
-        start_date::text,
-        end_date::text,
-        days_in_cycle,
-        holidays
-      from reporting.hawley_cycle_calendar
-      where start_date is not null
-      order by cycle_number nulls last, start_date
-    `),
-    pool.query(`
-      select
-        assigned_on::text,
-        cycle_name,
-        worker_count,
-        task_count,
-        completed_task_count,
-        open_task_count,
-        assigned_hours,
-        completed_hours,
-        remaining_hours
-      from reporting.hawley_reporting_day_summary
-      order by assigned_on
-    `)
-  ]);
+  const calendarResult = await pool.query(`
+    select
+      cycle_number,
+      cycle_label,
+      start_date::text,
+      end_date::text,
+      days_in_cycle,
+      holidays
+    from reporting.hawley_cycle_calendar
+    where start_date is not null
+    order by cycle_number nulls last, start_date
+  `);
 
-  const cycles = new Map();
-
-  for (const row of calendarResult.rows) {
-    const cycle = formatCycleName(row.cycle_label || row.cycle_number);
-    const key = cycleSummaryKey(cycle);
-    const holidays = holidayDatesFromField(row.holidays, row.start_date);
-    const dates = cycleWorkdays(row.start_date, row.end_date, holidays, row.days_in_cycle);
-    cycles.set(key, {
-      key,
-      cycle,
-      cycleNumber: Number(row.cycle_number || cycleNumberFromName(cycle) || 0),
-      startDate: row.start_date || "",
-      endDate: row.end_date || "",
-      dayCount: Number(row.days_in_cycle || dates.length || 0),
-      firstDate: dates[0] || row.start_date || "",
-      lastDate: dates[dates.length - 1] || row.end_date || "",
-      primaryDate: dates[dates.length - 1] || row.end_date || row.start_date || selectedDate,
-      snapshotDays: 0,
-      workerCount: 0,
-      assignedHours: 0,
-      completedHours: 0,
-      remainingHours: 0,
-      taskCount: 0,
-      completedTaskCount: 0,
-      openTaskCount: 0,
-    });
-  }
-
-  for (const row of summaryResult.rows) {
-    const cycle = formatCycleName(row.cycle_name) || "Current";
-    const key = cycleSummaryKey(cycle);
-    if (!cycles.has(key)) {
-      cycles.set(key, {
+  const selectedKey = cycleSummaryKey(selectedCycleName);
+  const currentDate = todayIso();
+  return calendarResult.rows
+    .map(row => {
+      const cycle = formatCycleName(row.cycle_label || row.cycle_number);
+      const key = cycleSummaryKey(cycle);
+      const holidays = holidayDatesFromField(row.holidays, row.start_date);
+      const dates = cycleWorkdays(row.start_date, row.end_date, holidays, row.days_in_cycle);
+      const primaryDate = dates[dates.length - 1] || row.end_date || row.start_date || selectedDate;
+      return {
         key,
         cycle,
-        cycleNumber: Number(cycleNumberFromName(cycle) || 0),
-        startDate: "",
-        endDate: "",
-        dayCount: 0,
-        firstDate: row.assigned_on,
-        lastDate: row.assigned_on,
-        primaryDate: row.assigned_on || selectedDate,
+        cycleNumber: Number(row.cycle_number || cycleNumberFromName(cycle) || 0),
+        startDate: row.start_date || "",
+        endDate: row.end_date || "",
+        dayCount: Number(row.days_in_cycle || dates.length || 0),
+        firstDate: dates[0] || row.start_date || "",
+        lastDate: dates[dates.length - 1] || row.end_date || "",
+        primaryDate,
         snapshotDays: 0,
         workerCount: 0,
         assignedHours: 0,
@@ -2298,39 +2259,17 @@ async function reportingCycleSummaries(selectedDate, selectedCycleName = "") {
         taskCount: 0,
         completedTaskCount: 0,
         openTaskCount: 0,
-      });
-    }
-
-    const cycleRow = cycles.get(key);
-    cycleRow.snapshotDays += 1;
-    cycleRow.firstDate = cycleRow.firstDate && row.assigned_on
-      ? [cycleRow.firstDate, row.assigned_on].sort()[0]
-      : row.assigned_on || cycleRow.firstDate;
-    cycleRow.lastDate = cycleRow.lastDate && row.assigned_on
-      ? [cycleRow.lastDate, row.assigned_on].sort().slice(-1)[0]
-      : row.assigned_on || cycleRow.lastDate;
-    cycleRow.primaryDate = row.assigned_on || cycleRow.primaryDate;
-    cycleRow.workerCount = Math.max(cycleRow.workerCount, Number(row.worker_count || 0));
-    cycleRow.assignedHours = round(cycleRow.assignedHours + Number(row.assigned_hours || 0));
-    cycleRow.completedHours = round(cycleRow.completedHours + Number(row.completed_hours || 0));
-    cycleRow.remainingHours = round(cycleRow.remainingHours + Number(row.remaining_hours || 0));
-    cycleRow.taskCount += Number(row.task_count || 0);
-    cycleRow.completedTaskCount += Number(row.completed_task_count || 0);
-    cycleRow.openTaskCount += Number(row.open_task_count || 0);
-  }
-
-  const selectedKey = cycleSummaryKey(selectedCycleName);
-  const currentDate = todayIso();
-  return Array.from(cycles.values())
+        completionPercent: 0,
+        completeTaskLabel: "",
+        selected: key === selectedKey,
+        status: row.end_date && row.end_date < currentDate ? "Complete" : "Assigned",
+      };
+    })
     .map(row => ({
       ...row,
-      primaryDate: row.primaryDate || row.lastDate || row.firstDate || selectedDate,
-      completionPercent: row.taskCount ? round((row.completedTaskCount / row.taskCount) * 100, 1) : 0,
-      completeTaskLabel: `${row.completedTaskCount}/${row.taskCount}`,
-      selected: row.key === selectedKey,
-      status: row.openTaskCount > 0 ? "Assigned" : row.taskCount > 0 ? "Complete" : "No Work",
+      primaryDate: row.primaryDate || row.lastDate || row.firstDate || selectedDate
     }))
-    .filter(row => row.selected || row.snapshotDays > 0 || !row.startDate || row.startDate <= currentDate)
+    .filter(row => row.selected || !row.startDate || row.startDate <= currentDate)
     .sort((a, b) =>
       (b.cycleNumber || 0) - (a.cycleNumber || 0) ||
       String(b.startDate || b.firstDate || "").localeCompare(String(a.startDate || a.firstDate || "")) ||
@@ -2466,24 +2405,25 @@ async function cycleDays(date) {
           (select cycle_name from reporting.hawley_worker_page_assignments where cycle_name is not null order by assigned_on desc limit 1)
         ) as cycle_name
       )
-      select
-        assigned_on::text,
-        coalesce(cycle_name, (select cycle_name from selected), 'Current') as cycle_name,
-        worker_count,
-        task_count,
-        completed_task_count,
-        open_task_count,
-        assigned_hours,
-        completed_hours,
-        remaining_hours
-      from reporting.hawley_reporting_day_summary
-      where assigned_on is not null
-        and (
-          cycle_name = (select cycle_name from selected)
-          or (select cycle_name from selected) is null
-        )
-      order by assigned_on
-    `,
+        select
+          assigned_on::text,
+          coalesce(cycle_name, (select cycle_name from selected), 'Current') as cycle_name,
+          count(distinct coalesce(worker_email, worker_name))::int as worker_count,
+          count(*)::int as task_count,
+          count(*) filter (where completed)::int as completed_task_count,
+          count(*) filter (where not completed)::int as open_task_count,
+          coalesce(sum(estimated_hours), 0)::numeric as assigned_hours,
+          coalesce(sum(estimated_hours) filter (where completed), 0)::numeric as completed_hours,
+          coalesce(sum(estimated_hours) filter (where not completed), 0)::numeric as remaining_hours
+        from reporting.hawley_worker_page_assignments
+        where assigned_on is not null
+          and (
+            cycle_name = (select cycle_name from selected)
+            or (select cycle_name from selected) is null
+          )
+        group by assigned_on, cycle_name
+        order by assigned_on
+      `,
     [date, calendarCycle]
   );
 
