@@ -799,7 +799,7 @@
           <div class="panel-header dashboard-header">
             <div>
               <h2 class="panel-title">Alert layer</h2>
-              <p class="summary-line">${issueCount ? `${issueCount} current signal${issueCount === 1 ? "" : "s"}` : "No paused, not logged in, or over-estimate workers right now."}</p>
+              <p class="summary-line">${issueCount ? `${issueCount} current signal${issueCount === 1 ? "" : "s"}` : "No paused, not logged in, or over-estimate tasks right now."}</p>
             </div>
             <div class="button-row">
               <button class="btn ghost" type="button" data-action="adopt-tasks" ${state.trackerRefresh.running ? "disabled" : ""}>${icons.refresh}<span>${state.trackerRefresh.running ? "Working..." : "Adopt new tasks"}</span></button>
@@ -1804,7 +1804,7 @@
       outlierValue: String(outliers.length),
       outlierDetail: outliers.length ? "Open tasks with PLH/outlier flags" : "No visible outlier flags",
       attentionValue: String(workerSignals.length),
-      attentionDetail: workerSignals.length ? "Workers below pace, idle, or over assigned hours" : "No current pacing flags",
+      attentionDetail: workerSignals.length ? "Workers below pace, idle, or over task estimate" : "No current pacing flags",
       outliers,
       workerSignals,
     };
@@ -1815,7 +1815,6 @@
       .flatMap((worker) => {
         const actualBreakdown = workerActualBreakdown(worker);
         const actual = actualBreakdown.totalMinutes;
-        const assigned = Math.round(Number(worker.assignedHours || 0) * 60);
         const open = openTasks(worker.tasks);
         const openCount = open.length;
         const runningTask = getWorkerActiveTask(worker);
@@ -1824,9 +1823,13 @@
         const paused = Boolean(pausedTask);
         const remaining = Math.round(Number(worker.remainingHours || 0) * 60);
         const efficiency = workerDailyEfficiency(worker);
+        const overEstimateThreshold = Number((state.alertStatus || {}).overEstimateThresholdMinutes || 15);
         const signals = [];
 
-        if (actual >= assigned + 30 && assigned > 0) {
+        for (const task of worker.tasks || []) {
+          const estimatedMinutes = taskEstimateMinutes(task);
+          const taskActual = taskActualLoggedMinutes(task) + taskActualWipMinutes(task);
+          if (!estimatedMinutes || taskActual <= estimatedMinutes + overEstimateThreshold) continue;
           signals.push({
             id: worker.id,
             name: worker.name,
@@ -1835,7 +1838,7 @@
             label: "Over estimate",
             level: "risk",
             score: 3,
-            detail: `${formatMinutes(actual)} actual vs ${formatMinutes(assigned)} assigned`,
+            detail: `${task.title || "Untitled task"} - ${formatMinutes(taskActual)} actual vs ${formatMinutes(estimatedMinutes)} estimate`,
           });
         }
         if (!running && !paused && openCount) {
@@ -2363,6 +2366,13 @@
       state.alertStatus || {},
     );
     return accumulated + running;
+  }
+
+  function taskEstimateMinutes(task) {
+    const estimatedMinutes = Number(task.estimatedMinutes || 0);
+    if (estimatedMinutes > 0) return estimatedMinutes;
+    const estimatedHours = Number(task.estimatedHours || task.assignedHours || task.targetHours || 0);
+    return estimatedHours > 0 ? Math.round(estimatedHours * 60) : 0;
   }
 
   function normalizeLocalTimer(timer) {

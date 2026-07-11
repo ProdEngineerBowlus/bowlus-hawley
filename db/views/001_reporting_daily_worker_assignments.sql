@@ -9,7 +9,7 @@ select
   coalesce(ti.phase_label, ti.section_column) as phase_name,
   ti.cycle_label as cycle_name,
   coalesce(ti.vin_text, ti.vin::text) as vin,
-  round((coalesce(ti.estimated_task_time_seconds, 0) / 3600.0)::numeric, 2)::numeric(10, 2) as estimated_hours,
+  round((coalesce(ti.estimated_batch_task_time_seconds, ti.estimated_task_time_seconds, 0) / 3600.0)::numeric, 2)::numeric(10, 2) as estimated_hours,
   ti.actual_time_minutes,
   ti.asana_task_gid,
   ti.airtable_record_id,

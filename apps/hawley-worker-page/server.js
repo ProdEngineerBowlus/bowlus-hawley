@@ -1653,12 +1653,32 @@ function mergeStatus(left, right) {
   return left || right || "";
 }
 
+function taskEstimateHours(task) {
+  const estimatedMinutes = Number(task?.estimatedMinutes || 0);
+  if (estimatedMinutes > 0) return round(estimatedMinutes / 60);
+  const estimatedHours = Number(task?.estimatedHours || 0);
+  if (estimatedHours > 0) return round(estimatedHours);
+  return round(Number(task?.assignedHours || task?.targetHours || 0));
+}
+
+function normalizeTaskEstimate(task) {
+  if (!task) return task;
+  const estimateHours = taskEstimateHours(task);
+  if (estimateHours > 0) {
+    task.assignedHours = estimateHours;
+    task.targetHours = estimateHours;
+    task.estimatedHours = estimateHours;
+    task.estimatedMinutes = Number(task.estimatedMinutes || 0) || minutesFromHours(estimateHours);
+  }
+  return task;
+}
+
 function mergeTaskLists(existingTasks, nextTasks) {
   const tasksById = new Map();
 
   for (const task of [...(existingTasks || []), ...(nextTasks || [])]) {
     const key = task.id || `${task.title}-${task.cycle}-${task.vin}-${task.order}`;
-    if (!tasksById.has(key)) tasksById.set(key, task);
+    if (!tasksById.has(key)) tasksById.set(key, normalizeTaskEstimate(task));
   }
 
   return Array.from(tasksById.values());
@@ -1840,7 +1860,10 @@ function ensureLivePilotWorkers(workers) {
 }
 
 function recalculateSnapshotWorkerCompletion(worker) {
-  const completedTasks = (worker.tasks || []).filter(task => task.completed);
+  const tasks = (worker.tasks || []).map(normalizeTaskEstimate);
+  worker.tasks = tasks;
+  const completedTasks = tasks.filter(task => task.completed);
+  const assignedHours = tasks.reduce((sum, task) => sum + taskEstimateHours(task), 0);
   const actualTimeCompletedMinutes = (worker.tasks || []).reduce((sum, task) => (
     sum + (task.completed ? Number(task.actualTimeOnDateMinutes || 0) : 0)
   ), 0);
@@ -1850,8 +1873,9 @@ function recalculateSnapshotWorkerCompletion(worker) {
   const actualTimeTotalMinutes = actualTimeCompletedMinutes + actualTimeWipMinutes;
   worker.taskCount = (worker.tasks || []).length;
   worker.completedTaskCount = completedTasks.length;
-  worker.completedHours = completedTasks.reduce((sum, task) => sum + Number(task.assignedHours || 0), 0);
-  worker.remainingHours = Math.max(0, Number(worker.assignedHours || 0) - worker.completedHours);
+  worker.assignedHours = round(assignedHours);
+  worker.completedHours = round(completedTasks.reduce((sum, task) => sum + taskEstimateHours(task), 0));
+  worker.remainingHours = round(Math.max(0, assignedHours - worker.completedHours));
   worker.actualTimeCompletedMinutes = actualTimeCompletedMinutes;
   worker.actualTimeWipMinutes = actualTimeWipMinutes;
   worker.actualTimeTotalMinutes = actualTimeTotalMinutes;
@@ -1901,7 +1925,14 @@ async function enrichSnapshotWorkersFromRaw(workers) {
       task.actualTimeOnDateMinutes = Number(task.actualTimeOnDateMinutes || 0);
       task.sopUrl = publicLink(textValue(fields["SOP Link"]) || task.sopUrl);
       task.estimatedMinutes = estimatedMinutes || task.estimatedMinutes || minutesFromHours(task.assignedHours);
-      task.targetHours = Number(task.targetHours || task.assignedHours || 0);
+      if (estimatedMinutes) {
+        const estimateHours = round(estimatedMinutes / 60);
+        task.assignedHours = estimateHours;
+        task.targetHours = estimateHours;
+        task.estimatedHours = estimateHours;
+      } else {
+        task.targetHours = Number(task.targetHours || task.assignedHours || 0);
+      }
       task.phase = formatPhaseName(task.phase);
       task.cycle = formatCycleName(task.cycle);
     }
