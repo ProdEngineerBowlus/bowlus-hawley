@@ -186,7 +186,10 @@ npm run pg:backfill:airtable-worker-actuals -- --apply
 
 That command is dry-run by default. It writes only when
 `HAWLEY_ALLOW_SOURCE_WRITES=true`, `HAWLEY_DRY_RUN=false`, and `--apply` are all
-present. Do not run this as part of the live web service.
+present. The production web service now chains this export after the 1:00 a.m.
+HB refresh when `HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_ENABLED=true`. The scheduler
+injects the write gates only for the child backfill process, so normal web
+requests remain DB-only.
 
 The manager `C# day` gauge is intentionally a task-completion gauge. Its percent
 must be `completedTaskCount / taskCount`, matching the adjacent `X/Y tasks

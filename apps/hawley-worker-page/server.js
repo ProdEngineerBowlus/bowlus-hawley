@@ -28,6 +28,8 @@ const WORKER_ACTUALS_WATCH_RESTART_MS = Number(process.env.HAWLEY_WORKER_ACTUALS
 const NIGHTLY_REFRESH_TIME = process.env.HAWLEY_NIGHTLY_REFRESH_TIME || "01:00";
 const NIGHTLY_REFRESH_TIME_ZONE = process.env.HAWLEY_NIGHTLY_REFRESH_TIME_ZONE || "America/Los_Angeles";
 const NIGHTLY_REFRESH_SCRIPT = process.env.HAWLEY_NIGHTLY_REFRESH_SCRIPT || "pg:refresh-worker-read-model";
+const NIGHTLY_AIRTABLE_BACKFILL_SCRIPT = process.env.HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_SCRIPT || "pg:backfill:airtable-worker-actuals";
+const NIGHTLY_AIRTABLE_BACKFILL_WINDOW_DAYS = Number(process.env.HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_WINDOW_DAYS || process.env.HAWLEY_AIRTABLE_BACKFILL_WINDOW_DAYS || 2);
 const APPLY_MIGRATIONS_ON_START = booleanEnv("HAWLEY_APPLY_MIGRATIONS_ON_START", process.env.NODE_ENV === "production");
 const JACOB_R_WORKER_ID = process.env.HAWLEY_JACOB_R_WORKER_ID || "asana-asana-bowlus-com";
 const JACOB_R_WORKER_NAME = process.env.HAWLEY_JACOB_R_NAME || "Jacob R";
@@ -145,6 +147,23 @@ const nightlyRefreshState = {
 let nightlyRefreshProcess = null;
 let nightlyRefreshTimer = null;
 let nightlyRefreshStopping = false;
+
+const nightlyAirtableBackfillState = {
+  enabled: false,
+  requested: false,
+  running: false,
+  pid: null,
+  script: NIGHTLY_AIRTABLE_BACKFILL_SCRIPT,
+  apply: false,
+  windowDays: NIGHTLY_AIRTABLE_BACKFILL_WINDOW_DAYS,
+  startedAt: "",
+  lastOutputAt: "",
+  lastExit: null,
+  lastError: "",
+  mode: "web-service-sidecar",
+  reason: ""
+};
+let nightlyAirtableBackfillProcess = null;
 
 const CONTENT_TYPES = Object.freeze({
   ".html": "text/html; charset=utf-8",
@@ -302,6 +321,20 @@ function shouldStartNightlyRefreshScheduler() {
   return process.env.NODE_ENV === "production";
 }
 
+function shouldRunNightlyAirtableBackfill() {
+  if (process.env.HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_ENABLED !== undefined) {
+    return booleanEnv("HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_ENABLED", false);
+  }
+  return process.env.NODE_ENV === "production";
+}
+
+function shouldApplyNightlyAirtableBackfill() {
+  if (process.env.HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_APPLY !== undefined) {
+    return booleanEnv("HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_APPLY", false);
+  }
+  return process.env.NODE_ENV === "production";
+}
+
 function syncDatabaseConfigured() {
   return Boolean(process.env.HAWLEY_SYNC_DATABASE_URL || process.env.HAWLEY_MIGRATION_DATABASE_URL);
 }
@@ -322,11 +355,16 @@ function nightlyRefreshStatus() {
   return { ...nightlyRefreshState };
 }
 
+function nightlyAirtableBackfillStatus() {
+  return { ...nightlyAirtableBackfillState };
+}
+
 function watcherStatuses() {
   return {
     asanaEvents: asanaEventWatcherStatus(),
     workerDailyActuals: workerActualsWatcherStatus(),
-    nightlyRefresh: nightlyRefreshStatus()
+    nightlyRefresh: nightlyRefreshStatus(),
+    nightlyAirtableBackfill: nightlyAirtableBackfillStatus()
   };
 }
 
@@ -675,6 +713,21 @@ function logNightlyRefreshStream(streamName, chunk) {
   }
 }
 
+function logNightlyAirtableBackfillStream(streamName, chunk) {
+  const lines = String(chunk)
+    .split(/\r?\n/)
+    .filter(Boolean);
+  for (const line of lines) {
+    nightlyAirtableBackfillState.lastOutputAt = new Date().toISOString();
+    if (streamName === "stderr") {
+      nightlyAirtableBackfillState.lastError = line.slice(0, 1000);
+      console.error(`[hawley-airtable-backfill] ${line}`);
+    } else {
+      console.log(`[hawley-airtable-backfill] ${line}`);
+    }
+  }
+}
+
 function scheduleNextNightlyRefresh() {
   if (nightlyRefreshStopping || !nightlyRefreshState.enabled) return;
   if (nightlyRefreshTimer) {
@@ -746,7 +799,107 @@ function runNightlyRefresh() {
     }
 
     nightlyRefreshState.reason = code === 0 ? "scheduled" : "failed";
+    if (code === 0 && nightlyAirtableBackfillState.enabled) {
+      runNightlyAirtableBackfill(() => scheduleNextNightlyRefresh());
+      return;
+    }
     scheduleNextNightlyRefresh();
+  });
+}
+
+function configureNightlyAirtableBackfill() {
+  nightlyAirtableBackfillState.requested = shouldRunNightlyAirtableBackfill();
+  nightlyAirtableBackfillState.enabled = false;
+  nightlyAirtableBackfillState.apply = shouldApplyNightlyAirtableBackfill();
+  nightlyAirtableBackfillState.windowDays = NIGHTLY_AIRTABLE_BACKFILL_WINDOW_DAYS;
+  nightlyAirtableBackfillState.reason = "";
+
+  if (!nightlyAirtableBackfillState.requested) {
+    nightlyAirtableBackfillState.reason = "disabled";
+    return;
+  }
+
+  if (!process.env.AIRTABLE_PAT || !process.env.AIRTABLE_BASE) {
+    nightlyAirtableBackfillState.reason = "missing AIRTABLE_PAT or AIRTABLE_BASE";
+    console.warn("Hawley nightly Airtable backfill disabled: missing Airtable configuration.");
+    return;
+  }
+
+  if (!syncDatabaseConfigured()) {
+    nightlyAirtableBackfillState.reason = "missing HAWLEY_SYNC_DATABASE_URL or HAWLEY_MIGRATION_DATABASE_URL";
+    console.warn("Hawley nightly Airtable backfill disabled: missing sync database URL.");
+    return;
+  }
+
+  if (!Number.isFinite(NIGHTLY_AIRTABLE_BACKFILL_WINDOW_DAYS) || NIGHTLY_AIRTABLE_BACKFILL_WINDOW_DAYS < 1) {
+    nightlyAirtableBackfillState.reason = "invalid HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_WINDOW_DAYS";
+    console.warn("Hawley nightly Airtable backfill disabled: window days must be at least 1.");
+    return;
+  }
+
+  nightlyAirtableBackfillState.enabled = true;
+  nightlyAirtableBackfillState.reason = "scheduled after nightly refresh";
+}
+
+function runNightlyAirtableBackfill(onComplete = () => {}) {
+  if (nightlyRefreshStopping || !nightlyAirtableBackfillState.enabled) {
+    onComplete();
+    return;
+  }
+  if (nightlyAirtableBackfillProcess) {
+    nightlyAirtableBackfillState.reason = "already running";
+    onComplete();
+    return;
+  }
+
+  const args = [
+    "run",
+    NIGHTLY_AIRTABLE_BACKFILL_SCRIPT,
+    "--",
+    "--window-days",
+    String(Math.trunc(NIGHTLY_AIRTABLE_BACKFILL_WINDOW_DAYS))
+  ];
+  if (nightlyAirtableBackfillState.apply) args.push("--apply");
+
+  const backfillEnv = { ...process.env };
+  if (nightlyAirtableBackfillState.apply) {
+    backfillEnv.HAWLEY_ALLOW_SOURCE_WRITES = "true";
+    backfillEnv.HAWLEY_DRY_RUN = "false";
+  }
+
+  const child = spawn(npmCommand(), args, {
+    cwd: repoRoot,
+    env: backfillEnv,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true
+  });
+
+  nightlyAirtableBackfillProcess = child;
+  nightlyAirtableBackfillState.running = true;
+  nightlyAirtableBackfillState.pid = child.pid || null;
+  nightlyAirtableBackfillState.startedAt = new Date().toISOString();
+  nightlyAirtableBackfillState.lastExit = null;
+  nightlyAirtableBackfillState.lastError = "";
+  nightlyAirtableBackfillState.reason = nightlyAirtableBackfillState.apply ? "running apply" : "running dry run";
+
+  child.stdout.on("data", chunk => logNightlyAirtableBackfillStream("stdout", chunk));
+  child.stderr.on("data", chunk => logNightlyAirtableBackfillStream("stderr", chunk));
+  child.on("error", error => {
+    nightlyAirtableBackfillState.lastError = error.message;
+    nightlyAirtableBackfillState.reason = "spawn failed";
+    console.error(`Hawley nightly Airtable backfill failed to start: ${error.message}`);
+  });
+  child.on("exit", (code, signal) => {
+    nightlyAirtableBackfillProcess = null;
+    nightlyAirtableBackfillState.running = false;
+    nightlyAirtableBackfillState.pid = null;
+    nightlyAirtableBackfillState.lastExit = {
+      code,
+      signal,
+      at: new Date().toISOString()
+    };
+    nightlyAirtableBackfillState.reason = code === 0 ? "scheduled after nightly refresh" : "failed";
+    onComplete();
   });
 }
 
@@ -754,9 +907,13 @@ function startNightlyRefreshScheduler() {
   nightlyRefreshState.requested = shouldStartNightlyRefreshScheduler();
   nightlyRefreshState.enabled = false;
   nightlyRefreshState.reason = "";
+  configureNightlyAirtableBackfill();
 
   if (!nightlyRefreshState.requested) {
     nightlyRefreshState.reason = "disabled";
+    if (nightlyAirtableBackfillState.enabled) {
+      nightlyAirtableBackfillState.reason = "waiting for nightly refresh scheduler";
+    }
     return;
   }
 
@@ -798,6 +955,9 @@ function stopNightlyRefreshScheduler(signal = "SIGTERM") {
   }
   if (nightlyRefreshProcess && !nightlyRefreshProcess.killed) {
     nightlyRefreshProcess.kill(signal);
+  }
+  if (nightlyAirtableBackfillProcess && !nightlyAirtableBackfillProcess.killed) {
+    nightlyAirtableBackfillProcess.kill(signal);
   }
 }
 

@@ -848,18 +848,24 @@
     const syncStatus = state.syncStatus || {};
     const watcher = syncStatus.watcher || {};
     const nightlyRefresh = syncStatus.watchers?.nightlyRefresh || {};
+    const nightlyBackfill = syncStatus.watchers?.nightlyAirtableBackfill || {};
     const latestRuns = syncStatus.latestRuns || state.latestRuns || {};
     const running = Boolean(watcher.running);
     const intervalMs = Number(watcher.intervalMs || 60000);
     const nightlyRunning = Boolean(nightlyRefresh.running);
+    const backfillRunning = Boolean(nightlyBackfill.running);
     const watcherTone = running ? "good" : watcher.requested || watcher.enabled ? "warn" : "risk";
     const nightlyTone = nightlyRunning ? "good" : nightlyRefresh.enabled ? "warn" : "risk";
+    const backfillTone = backfillRunning ? "good" : nightlyBackfill.enabled ? "warn" : "risk";
     const watcherDetail = running
       ? `Every ${formatMinutes(Math.round(intervalMs / 60000))}`
       : watcher.reason || "Not running";
     const nightlyDetail = nightlyRunning
       ? "Running now"
       : nightlyRefresh.nextRunAt ? `Next ${formatRelativeTime(nightlyRefresh.nextRunAt)}` : nightlyRefresh.reason || "Not scheduled";
+    const backfillDetail = backfillRunning
+      ? `${nightlyBackfill.apply ? "Writing" : "Dry run"} - ${nightlyBackfill.windowDays || 2}d window`
+      : nightlyBackfill.reason || "Not scheduled";
     const refreshedAt = syncStatus.refreshedAt || state.refreshedAt;
 
     return `
@@ -874,6 +880,7 @@
         <div class="panel-body freshness-grid">
           ${renderFreshnessMetric("Asana watcher", running ? "Running" : "Off", watcherDetail, watcherTone)}
           ${renderFreshnessMetric("Nightly HB refresh", nightlyRunning ? "Running" : "Scheduled", nightlyDetail, nightlyTone)}
+          ${renderFreshnessMetric("Airtable export job", backfillRunning ? "Running" : nightlyBackfill.enabled ? "Scheduled" : "Off", backfillDetail, backfillTone)}
           ${renderRunFreshness("Asana events", latestRuns.pull_asana_events, 5)}
           ${renderRunFreshness("Full Asana", latestRuns.pull_asana, 180)}
           ${renderRunFreshness("DAT mirror", latestRuns.pull_daily_tracker, 60)}

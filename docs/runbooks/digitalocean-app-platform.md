@@ -51,6 +51,10 @@ HAWLEY_NIGHTLY_REFRESH_ENABLED=true
 HAWLEY_NIGHTLY_REFRESH_TIME=01:00
 HAWLEY_NIGHTLY_REFRESH_TIME_ZONE=America/Los_Angeles
 HAWLEY_NIGHTLY_REFRESH_SCRIPT=pg:refresh-worker-read-model
+HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_ENABLED=true
+HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_APPLY=true
+HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_SCRIPT=pg:backfill:airtable-worker-actuals
+HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_WINDOW_DAYS=2
 HAWLEY_AUTH_ACTIVE=false
 HAWLEY_AUTH_SEED_ROSTER_ON_START=true
 HAWLEY_AUTH_SESSION_TTL_HOURS=12
@@ -233,18 +237,19 @@ npm run pg:refresh-legacy-airtable-bootstrap
 
 The intended Airtable direction for worker actuals is the opposite: Hawley feeds
 the legacy Airtable `Worker Daily Task Actuals` table overnight for human
-readability. Use a separate scheduled job with explicit write gates:
+readability. As of July 11, 2026, Jacob approved running this from the existing
+web service after the 1:00 a.m. HB refresh succeeds:
 
 ```powershell
 npm run pg:backfill:airtable-worker-actuals -- --apply
 ```
 
-That job writes only when `HAWLEY_ALLOW_SOURCE_WRITES=true` and
-`HAWLEY_DRY_RUN=false`. The web service should keep
-`HAWLEY_ALLOW_SOURCE_WRITES=false` and `HAWLEY_DRY_RUN=true`.
+The scheduler reports this as `watchers.nightlyAirtableBackfill`. The child
+process writes only when `HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_APPLY=true`; the web
+request path still does not read from or write to Airtable.
 
-Do not add the Worker component or scheduled job without explicit approval,
-because either can change the App Platform bill or resource layout.
+Do not add a separate App Platform Worker component without explicit approval,
+because that can change the App Platform bill or resource layout.
 
 The web service also schedules a nightly Hawley worker read-model refresh at
 1:00 AM Pacific by default in production:
@@ -255,8 +260,10 @@ npm run pg:refresh-worker-read-model
 
 That refresh runs `pg:pull:asana`, `pg:build:hb`, and `pg:pull:daily-tracker`.
 It writes only to Hawley/Postgres mirror and read-model tables; it does not
-write to Asana or Airtable. `/api/sync-status` reports the scheduler state under
-`watchers.nightlyRefresh`, including the next scheduled run time.
+write to Asana or Airtable. When the refresh exits cleanly, the chained Airtable
+backfill exports the latest Hawley-owned worker actual rows to Airtable.
+`/api/sync-status` reports the scheduler state under `watchers.nightlyRefresh`
+and `watchers.nightlyAirtableBackfill`.
 
 ## Health Checks
 
