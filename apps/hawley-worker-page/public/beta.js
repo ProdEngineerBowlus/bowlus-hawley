@@ -12,11 +12,15 @@
   const debugMode = params.get("debug") === "1" || params.get("debug") === "true";
   const validPhaseViews = new Set(["workers", "tasks", "worker", "transitions", "review"]);
   const today = localTodayIso();
-  const standardDailyMinutes = 7.5 * 60;
+  const standardDailyMinutes = 460;
   const defaultWorkSchedule = {
     workStart: "07:00",
     workEnd: "15:30",
-    pauses: [{ label: "lunch", start: "11:00", end: "11:30" }],
+    pauses: [
+      { label: "break", start: "09:00", end: "09:10" },
+      { label: "lunch", start: "11:00", end: "11:30" },
+      { label: "break", start: "13:30", end: "13:40" },
+    ],
   };
   const state = {
     date: params.get("date") || today,
@@ -121,7 +125,8 @@
       const windowStart = new Date(Math.max(window.start.getTime(), startDate.getTime()));
       const windowEnd = new Date(Math.min(window.end.getTime(), endDate.getTime()));
       if (windowEnd <= windowStart) return sum;
-      return sum + Math.floor((windowEnd.getTime() - windowStart.getTime()) / 60000);
+      const minutes = (windowEnd.getTime() - windowStart.getTime()) / 60000;
+      return sum + (minutes > 0 ? Math.max(1, Math.round(minutes)) : 0);
     }, 0);
   }
 
@@ -296,7 +301,7 @@
     if (!startedAt) return accumulated;
     const started = new Date(startedAt);
     if (Number.isNaN(started.getTime())) return accumulated;
-    return accumulated + Math.max(1, Math.round((Date.now() - started.getTime()) / 60000));
+    return accumulated + scheduledWorkMinutesBetween(started, new Date(), defaultWorkSchedule);
   }
 
   function actualSplitLabel(actual) {

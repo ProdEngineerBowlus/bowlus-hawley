@@ -2,6 +2,7 @@
   const PROJECT_ID = "1214157321063250";
   const ASSIGNMENT_AUTO_REFRESH_MS = 90 * 1000;
   const SYNC_STATUS_REFRESH_MS = 60 * 1000;
+  const STANDARD_DAILY_MINUTES = 460;
   let today = getTodayIso();
   const queryEmployee = getEmployeeFromUrl();
   const queryDate = queryEmployee ? "" : getDateFromUrl();
@@ -34,7 +35,11 @@
       workEnd: "15:30",
       lunchStart: "11:00",
       lunchEnd: "11:30",
-      pauses: [],
+      pauses: [
+        { label: "break", start: "09:00", end: "09:10" },
+        { label: "lunch", start: "11:00", end: "11:30" },
+        { label: "break", start: "13:30", end: "13:40" },
+      ],
       timerAutoStopEnabled: true,
       timerScheduleEnforced: true,
       pending: [],
@@ -1213,7 +1218,7 @@
   }
 
   function renderDailyProgress(worker) {
-    const targetMinutes = 7.5 * 60;
+    const targetMinutes = STANDARD_DAILY_MINUTES;
     const completedMinutes = completedEstimatedMinutes(worker.tasks);
     const percent = Math.min(100, Math.round((completedMinutes / targetMinutes) * 100));
 
@@ -1221,7 +1226,7 @@
       <section class="progress-panel" aria-label="Daily estimated time progress">
         <div class="progress-copy">
           <span>Estimated complete</span>
-          <strong>${escapeHtml(formatMinutes(completedMinutes))} / 7h 30m</strong>
+          <strong>${escapeHtml(formatMinutes(completedMinutes))} / ${escapeHtml(formatMinutes(targetMinutes))}</strong>
         </div>
         <div class="progress-track">
           <div class="progress-fill" style="width: ${percent}%"></div>
@@ -1783,7 +1788,7 @@
     const remainingHours = state.workers.reduce((sum, worker) => sum + Number(worker.remainingHours || 0), 0);
     const actual = totalActualBreakdown();
     const actualMinutes = actual.totalMinutes;
-    const targetMinutes = workersWithWork.length * 7.5 * 60;
+    const targetMinutes = workersWithWork.length * STANDARD_DAILY_MINUTES;
     const pacingDeltaMinutes = targetMinutes ? actualMinutes - targetMinutes : 0;
     const outliers = visibleOutlierTasks();
     const workerSignals = workerAttentionSignals(workersWithWork);
@@ -2278,7 +2283,8 @@
       const windowStart = new Date(Math.max(window.start.getTime(), startDate.getTime()));
       const windowEnd = new Date(Math.min(window.end.getTime(), endDate.getTime()));
       if (windowEnd <= windowStart) return sum;
-      return sum + Math.floor((windowEnd.getTime() - windowStart.getTime()) / 60000);
+      const minutes = (windowEnd.getTime() - windowStart.getTime()) / 60000;
+      return sum + (minutes > 0 ? Math.max(1, Math.round(minutes)) : 0);
     }, 0);
   }
 
@@ -2351,7 +2357,11 @@
     if (!normalized.startedAt) return accumulated;
     const startedAt = new Date(normalized.startedAt).getTime();
     if (!Number.isFinite(startedAt)) return accumulated;
-    const running = Math.max(1, Math.round((Date.now() - startedAt) / 60000));
+    const running = scheduledWorkMinutesBetween(
+      new Date(startedAt),
+      new Date(),
+      state.alertStatus || {},
+    );
     return accumulated + running;
   }
 

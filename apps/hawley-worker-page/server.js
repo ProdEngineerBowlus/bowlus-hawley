@@ -40,6 +40,22 @@ const WORKER_WRITE_IDS = new Set(
 );
 const TRANSITION_REVIEWS_ENABLED = booleanEnv("HAWLEY_TRANSITION_REVIEWS_ENABLED", true);
 const LIVE_WORKER_SOURCE = "hawley_worker_live_pilot";
+const SHOP_TIME_ZONE = "America/Los_Angeles";
+const SHOP_WORK_START = "07:00";
+const SHOP_WORK_END = "15:30";
+const SHOP_PAUSES = Object.freeze([
+  { label: "break", start: "09:00", end: "09:10" },
+  { label: "lunch", start: "11:00", end: "11:30" },
+  { label: "break", start: "13:30", end: "13:40" }
+]);
+const SHOP_WORK_WINDOWS = Object.freeze([
+  { start: "07:00", end: "09:00" },
+  { start: "09:10", end: "11:00" },
+  { start: "11:30", end: "13:30" },
+  { start: "13:40", end: "15:30" }
+]);
+const SHOP_DAILY_AVAILABLE_MINUTES = 460;
+const SHOP_DAILY_AVAILABLE_HOURS = SHOP_DAILY_AVAILABLE_MINUTES / 60;
 
 const pool = new Pool(getDatabaseConfig());
 const writePool = new Pool(getDatabaseConfig({ useSyncUrl: true }));
@@ -810,6 +826,129 @@ function isIsoDate(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
 }
 
+function clockToMinutes(value) {
+  const match = String(value || "").match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return 0;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function timeZoneParts(date, timeZone = SHOP_TIME_ZONE) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  });
+  const parts = {};
+  for (const part of formatter.formatToParts(date)) {
+    if (part.type !== "literal") parts[part.type] = Number(part.value);
+  }
+  return parts;
+}
+
+function isoDateInTimeZone(date, timeZone = SHOP_TIME_ZONE) {
+  const parsed = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(parsed.getTime())) return todayIso();
+  const parts = timeZoneParts(parsed, timeZone);
+  return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+}
+
+function timeZoneOffsetMinutes(date, timeZone = SHOP_TIME_ZONE) {
+  const parts = timeZoneParts(date, timeZone);
+  const localAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second || 0);
+  return (localAsUtc - date.getTime()) / 60000;
+}
+
+function dateAtZonedClock(isoDate, clock, timeZone = SHOP_TIME_ZONE) {
+  const dateMatch = String(isoDate || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!dateMatch) return null;
+  const minutes = clockToMinutes(clock);
+  const localAsUtc = Date.UTC(
+    Number(dateMatch[1]),
+    Number(dateMatch[2]) - 1,
+    Number(dateMatch[3]),
+    Math.floor(minutes / 60),
+    minutes % 60,
+    0,
+    0
+  );
+  let utcMs = localAsUtc;
+  for (let i = 0; i < 3; i += 1) {
+    const offsetMinutes = timeZoneOffsetMinutes(new Date(utcMs), timeZone);
+    const nextUtcMs = localAsUtc - offsetMinutes * 60000;
+    if (Math.abs(nextUtcMs - utcMs) < 1000) break;
+    utcMs = nextUtcMs;
+  }
+  return new Date(utcMs);
+}
+
+function scheduledWorkWindowsForDate(workDate) {
+  if (!isIsoDate(workDate)) return [];
+  return SHOP_WORK_WINDOWS
+    .map(window => ({
+      start: dateAtZonedClock(workDate, window.start),
+      end: dateAtZonedClock(workDate, window.end)
+    }))
+    .filter(window => window.start && window.end && window.end > window.start);
+}
+
+function scheduledWorkMinutesBetween(startValue, endValue, workDate = "") {
+  const startedAt = startValue instanceof Date ? startValue : new Date(startValue);
+  const stoppedAt = endValue instanceof Date ? endValue : new Date(endValue);
+  if (Number.isNaN(startedAt.getTime()) || Number.isNaN(stoppedAt.getTime()) || stoppedAt <= startedAt) return 0;
+  const date = isIsoDate(workDate) ? workDate : isoDateInTimeZone(startedAt);
+  let minutes = 0;
+  for (const window of scheduledWorkWindowsForDate(date)) {
+    const overlapStart = Math.max(startedAt.getTime(), window.start.getTime());
+    const overlapEnd = Math.min(stoppedAt.getTime(), window.end.getTime());
+    if (overlapEnd > overlapStart) minutes += (overlapEnd - overlapStart) / 60000;
+  }
+  return minutes > 0 ? Math.max(1, Math.round(minutes)) : 0;
+}
+
+function isWithinScheduledWorkWindow(value, workDate = "") {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return false;
+  const dateKey = isIsoDate(workDate) ? workDate : isoDateInTimeZone(date);
+  return scheduledWorkWindowsForDate(dateKey).some(window => date >= window.start && date < window.end);
+}
+
+function effectiveScheduledStopDate(value, workDate = "") {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  const dateKey = isIsoDate(workDate) ? workDate : isoDateInTimeZone(date);
+  const windows = scheduledWorkWindowsForDate(dateKey);
+  let latestBoundary = null;
+  for (const window of windows) {
+    if (date >= window.start && date < window.end) return date;
+    if (date >= window.end) latestBoundary = window.end;
+    if (date < window.start) break;
+  }
+  return latestBoundary || null;
+}
+
+function scheduledWindowEndForStart(value, workDate = "") {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  const dateKey = isIsoDate(workDate) ? workDate : isoDateInTimeZone(date);
+  return scheduledWorkWindowsForDate(dateKey).find(window => date < window.end)?.end || null;
+}
+
+function scheduledAutoStopReason(stopAt, workDate = "") {
+  const date = stopAt instanceof Date ? stopAt : new Date(stopAt);
+  if (Number.isNaN(date.getTime())) return "scheduled_pause";
+  const dateKey = isIsoDate(workDate) ? workDate : isoDateInTimeZone(date);
+  const windows = scheduledWorkWindowsForDate(dateKey);
+  const matchingWindow = windows.find(window => Math.abs(window.end.getTime() - date.getTime()) < 1000);
+  if (!matchingWindow) return "scheduled_pause";
+  const lastWindow = windows[windows.length - 1];
+  return lastWindow && Math.abs(lastWindow.end.getTime() - date.getTime()) < 1000 ? "end_of_day" : "scheduled_pause";
+}
+
 function booleanQuery(value) {
   return ["1", "true", "yes", "y"].includes(String(value || "").trim().toLowerCase());
 }
@@ -1016,7 +1155,7 @@ function emptyWorkerFromRow(row) {
     workBlock: "",
     trackerStatus: "No Work",
     trackerUrl: "",
-    targetHours: Number(row.hours_per_day || 7.5),
+    targetHours: Number(row.hours_per_day || SHOP_DAILY_AVAILABLE_HOURS),
     tasks: [],
     assignedHours: 0,
     completedHours: 0,
@@ -1051,7 +1190,7 @@ function buildWorkers(rows) {
         workBlock: formatPhaseName(row.inferred_work_area_name || row.phase_name),
         trackerStatus: "No Work",
         trackerUrl: "",
-        targetHours: 7.5,
+        targetHours: SHOP_DAILY_AVAILABLE_HOURS,
         tasks: [],
         assignedHours: 0,
         completedHours: 0,
@@ -1187,7 +1326,7 @@ function buildManagerSignals(workers) {
     sum + Number(worker.actualTimeWipMinutes || 0)
   ), 0);
   const actualTimeLoggedMinutes = actualTimeCompletedMinutes + actualTimeWipMinutes;
-  const targetMinutes = workersWithWork.length * 7.5 * 60;
+  const targetMinutes = workersWithWork.length * SHOP_DAILY_AVAILABLE_MINUTES;
 
   return {
     workerCount: workerList.length,
@@ -1557,7 +1696,7 @@ function createEmptySnapshotWorker(row) {
     actualTimeCompletedMinutes: 0,
     actualTimeWipMinutes: 0,
     actualTimeTotalMinutes: 0,
-    targetHours: Number(row.hours_per_day || 7.5),
+    targetHours: Number(row.hours_per_day || SHOP_DAILY_AVAILABLE_HOURS),
     taskCount: 0,
     completedTaskCount: 0,
     taskOrderRange: "",
@@ -1607,7 +1746,7 @@ function emptyJacobRWorker() {
     actualTimeCompletedMinutes: 0,
     actualTimeWipMinutes: 0,
     actualTimeTotalMinutes: 0,
-    targetHours: 7.5,
+    targetHours: SHOP_DAILY_AVAILABLE_HOURS,
     taskCount: 0,
     completedTaskCount: 0,
     taskOrderRange: "",
@@ -2353,6 +2492,8 @@ async function dailyAssignmentsPayload(url) {
     throw error;
   }
 
+  await autoCloseScheduledTimersForDate(date);
+
   const [rows, configuredRows, latestRuns, latestDate, trackerSnapshots, actualRows] = await Promise.all([
     workerAssignments(date),
     configuredWorkers(),
@@ -2493,12 +2634,12 @@ function liveTimerFromRow(row) {
   };
 }
 
-function liveTimerElapsedMinutes(timer, now) {
+function liveTimerElapsedMinutes(timer, now, workDate = "") {
   const accumulated = Number(timer?.accumulatedMinutes || 0);
   if (!timer?.startedAt) return accumulated;
   const startedAt = new Date(timer.startedAt);
   if (Number.isNaN(startedAt.getTime())) return accumulated;
-  return accumulated + Math.max(1, Math.round((now.getTime() - startedAt.getTime()) / 60000));
+  return accumulated + scheduledWorkMinutesBetween(startedAt, now, workDate);
 }
 
 function liveTimerBaseActualMinutes(timer) {
@@ -2507,8 +2648,8 @@ function liveTimerBaseActualMinutes(timer) {
   return Math.max(0, actual - accumulated);
 }
 
-function liveTimerTotalActualMinutes(timer, now) {
-  return liveTimerBaseActualMinutes(timer) + liveTimerElapsedMinutes(timer, now);
+function liveTimerTotalActualMinutes(timer, now, workDate = "") {
+  return liveTimerBaseActualMinutes(timer) + liveTimerElapsedMinutes(timer, now, workDate);
 }
 
 async function assignedWorkerTaskForWrite(employee, date, taskId) {
@@ -2813,11 +2954,11 @@ function sessionKeyForWorkerTask(workerId, date, taskId, startedAt) {
   return `${workerId}::${date}::${taskId}::${safeStartedAt}`;
 }
 
-function runningSegmentMinutes(timer, now) {
+function runningSegmentMinutes(timer, now, workDate = "") {
   if (!timer?.startedAt) return 0;
   const startedAt = new Date(timer.startedAt);
   if (Number.isNaN(startedAt.getTime())) return 0;
-  return Math.max(1, Math.round((now.getTime() - startedAt.getTime()) / 60000));
+  return scheduledWorkMinutesBetween(startedAt, now, workDate);
 }
 
 async function recordWorkerTaskEvent(client, worker, task, date, eventType, eventTimestamp, options = {}) {
@@ -3008,6 +3149,148 @@ async function closeTimeSession(client, worker, task, date, startedAt, stoppedAt
     ]
   );
   return insert.rows[0];
+}
+
+function workerFromActualRow(row) {
+  return {
+    id: row.worker_key || "",
+    name: row.worker_name || "",
+    email: row.worker_email || ""
+  };
+}
+
+function taskFromActualRow(row) {
+  return {
+    id: row.asana_task_gid || "",
+    title: row.task_name || "",
+    phase: row.phase_label || "",
+    workArea: row.phase_label || "",
+    vin: row.vin || "",
+    cycle: row.cycle_label || "",
+    assignedHours: Number(row.assigned_hours || 0),
+    targetHours: Number(row.allocated_hours || row.assigned_hours || 0),
+    estimatedMinutes: minutesFromHours(row.allocated_hours || row.assigned_hours || 0),
+    sourceUrl: row.task_url || ""
+  };
+}
+
+async function autoCloseScheduledTimersForDate(date) {
+  if (!WORKER_WRITES_ENABLED || !isIsoDate(date)) return 0;
+  const now = new Date();
+  if (date > isoDateInTimeZone(now)) return 0;
+  const client = await writePool.connect();
+  let closedCount = 0;
+
+  try {
+    await client.query("begin");
+    const result = await client.query(
+      `
+        select
+          ledger_key,
+          work_date::text,
+          worker_key,
+          worker_name,
+          worker_email,
+          asana_task_gid,
+          task_name,
+          task_url,
+          vin,
+          cycle_label,
+          phase_label,
+          assigned_hours,
+          allocated_hours,
+          actual_minutes,
+          timer_minutes,
+          asana_posted_minutes,
+          completed,
+          fields_json
+        from hb.worker_daily_task_actuals
+        where work_date = $1::date
+          and source_system = $2
+          and not daily_summary
+          and not completed
+          and nullif(fields_json ->> 'Timer Started At', '') is not null
+      `,
+      [date, LIVE_WORKER_SOURCE]
+    );
+
+    for (const row of result.rows) {
+      const timer = liveTimerFromRow(row);
+      if (!timer?.startedAt) continue;
+      const autoStopAt = scheduledWindowEndForStart(timer.startedAt, date);
+      if (!autoStopAt || now < autoStopAt) continue;
+
+      const eventIso = autoStopAt.toISOString();
+      const reason = scheduledAutoStopReason(autoStopAt, date);
+      const elapsedMinutes = liveTimerElapsedMinutes(timer, autoStopAt, date);
+      const actualMinutes = liveTimerTotalActualMinutes(timer, autoStopAt, date);
+      const segmentMinutes = runningSegmentMinutes(timer, autoStopAt, date);
+      const worker = workerFromActualRow(row);
+      const task = taskFromActualRow(row);
+
+      await client.query(
+        `
+          update hb.worker_daily_task_actuals
+          set
+            actual_minutes = $2,
+            timer_minutes = $3,
+            last_seen_at = $4::timestamptz,
+            source_synced_at = $4::timestamptz,
+            source_label = $5,
+            fields_json = coalesce(fields_json, '{}'::jsonb)
+              || jsonb_build_object(
+                'Timer Started At', '',
+                'Timer Minutes', $3,
+                'Actual Minutes', $2,
+                'Schedule Auto Stopped?', true,
+                'Schedule Auto Stop Reason', $6,
+                'Schedule Auto Stopped At', $4
+              ),
+            normalized_at = now()
+          where ledger_key = $1
+            and source_system = $7
+        `,
+        [
+          row.ledger_key,
+          actualMinutes,
+          elapsedMinutes,
+          eventIso,
+          reason === "end_of_day" ? "Hawley timer auto-stopped at end of day" : "Hawley timer auto-stopped for scheduled break/lunch",
+          reason,
+          LIVE_WORKER_SOURCE
+        ]
+      );
+
+      await closeTimeSession(client, worker, task, date, timer.startedAt, eventIso, reason, segmentMinutes, {
+        action: "schedule-auto-stop",
+        ledgerKey: row.ledger_key,
+        elapsedMinutes,
+        actualMinutes,
+        reason
+      });
+      await recordWorkerTaskEvent(client, worker, task, date, "stop", eventIso, {
+        durationMinutes: segmentMinutes || elapsedMinutes,
+        notes: "Timer auto-stopped by Hawley shop schedule.",
+        payload: {
+          action: "schedule-auto-stop",
+          ledgerKey: row.ledger_key,
+          elapsedMinutes,
+          actualMinutes,
+          reason
+        }
+      });
+      closedCount += 1;
+    }
+
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    console.warn(`Hawley schedule auto-stop skipped: ${error.message}`);
+  } finally {
+    client.release();
+  }
+
+  return closedCount;
 }
 
 function transitionBucketKey(minutes) {
@@ -3219,6 +3502,10 @@ async function handleWorkerTaskAction(req) {
   if (!taskId) throw actionError("Task ID is required.", 400);
   if (!isIsoDate(date)) throw actionError("Date must be YYYY-MM-DD.", 400);
 
+  if (action === "start") {
+    await autoCloseScheduledTimersForDate(date);
+  }
+
   const { worker, task } = await assignedWorkerTaskForWrite(employee, date, taskId);
   const now = new Date();
   const nowIso = now.toISOString();
@@ -3241,9 +3528,15 @@ async function handleWorkerTaskAction(req) {
           taskId,
           startedAt: current.startedAt,
           accumulatedMinutes: current.accumulatedMinutes,
-          elapsedMinutes: liveTimerElapsedMinutes(current, now),
+          elapsedMinutes: liveTimerElapsedMinutes(current, now, date),
           completed: false
         };
+      }
+
+      if (!isWithinScheduledWorkWindow(now, date)) {
+        throw actionError("Timers can only be started during scheduled shop time: 7:00 AM-3:30 PM, excluding breaks and lunch.", 409, {
+          code: "OUTSIDE_SCHEDULED_WORK_TIME"
+        });
       }
 
       const blocking = await blockingLiveTimerForWorker(client, worker.id, date, task.id);
@@ -3290,7 +3583,7 @@ async function handleWorkerTaskAction(req) {
         taskId,
         startedAt: saved.startedAt,
         accumulatedMinutes: saved.accumulatedMinutes,
-        elapsedMinutes: liveTimerElapsedMinutes(saved, now),
+        elapsedMinutes: liveTimerElapsedMinutes(saved, now, date),
         completed: false
       };
     }
@@ -3299,9 +3592,11 @@ async function handleWorkerTaskAction(req) {
       throw actionError("Start the timer before stopping or completing this task.", 409);
     }
 
-    const elapsedMinutes = liveTimerElapsedMinutes(current, now);
-    const actualMinutes = liveTimerTotalActualMinutes(current, now);
-    const segmentMinutes = runningSegmentMinutes(current, now);
+    const eventAt = effectiveScheduledStopDate(now, date) || now;
+    const eventIso = eventAt.toISOString();
+    const elapsedMinutes = liveTimerElapsedMinutes(current, eventAt, date);
+    const actualMinutes = liveTimerTotalActualMinutes(current, eventAt, date);
+    const segmentMinutes = runningSegmentMinutes(current, eventAt, date);
     if (action === "stop") {
       const saved = await upsertLiveWorkerActual(client, worker, task, date, {
         ...current,
@@ -3313,16 +3608,16 @@ async function handleWorkerTaskAction(req) {
         timerMinutes: elapsedMinutes,
         asanaPostedMinutes: current.asanaPostedMinutes,
         sourceLabel: "Hawley timer stopped",
-        seenAt: nowIso
+        seenAt: eventIso
       });
       await tryWorkerTransitionLedger("stop", async () => {
-        await closeTimeSession(client, worker, task, date, current.startedAt, nowIso, "stop", segmentMinutes, {
+        await closeTimeSession(client, worker, task, date, current.startedAt, eventIso, "stop", segmentMinutes, {
           action: "stop",
           ledgerKey,
           elapsedMinutes,
           actualMinutes
         });
-        await recordWorkerTaskEvent(client, worker, task, date, "stop", nowIso, {
+        await recordWorkerTaskEvent(client, worker, task, date, "stop", eventIso, {
           durationMinutes: segmentMinutes || elapsedMinutes,
           payload: {
             accumulatedMinutes: saved.accumulatedMinutes,
@@ -3361,16 +3656,16 @@ async function handleWorkerTaskAction(req) {
         timerMinutes: 0,
         asanaPostedMinutes: current.asanaPostedMinutes,
         sourceLabel: "Hawley timer session ended",
-        seenAt: nowIso
+        seenAt: eventIso
       });
       await tryWorkerTransitionLedger("release", async () => {
-        await closeTimeSession(client, worker, task, date, current.startedAt, nowIso, "release", segmentMinutes, {
+        await closeTimeSession(client, worker, task, date, current.startedAt, eventIso, "release", segmentMinutes, {
           action: "release",
           ledgerKey,
           elapsedMinutes,
           actualMinutes
         });
-        await recordWorkerTaskEvent(client, worker, task, date, "release", nowIso, {
+        await recordWorkerTaskEvent(client, worker, task, date, "release", eventIso, {
           durationMinutes: segmentMinutes || elapsedMinutes,
           payload: {
             elapsedMinutes,
@@ -3424,16 +3719,16 @@ async function handleWorkerTaskAction(req) {
       completionPending: true,
       timeEntryCreated: current.timeEntryCreated,
       sourceLabel: "Hawley completion pending",
-      seenAt: nowIso
+      seenAt: eventIso
     });
     await tryWorkerTransitionLedger("complete", async () => {
-      await closeTimeSession(client, worker, task, date, current.startedAt, nowIso, "complete", segmentMinutes, {
+      await closeTimeSession(client, worker, task, date, current.startedAt, eventIso, "complete", segmentMinutes, {
         action: "complete",
         ledgerKey,
         elapsedMinutes,
         actualMinutes
       });
-      await recordWorkerTaskEvent(client, worker, task, date, "complete", nowIso, {
+      await recordWorkerTaskEvent(client, worker, task, date, "complete", eventIso, {
         durationMinutes: segmentMinutes || elapsedMinutes,
         syncStatus: "pending",
         payload: {
@@ -3462,7 +3757,7 @@ async function handleWorkerTaskAction(req) {
         completionPending: true,
         timeEntryCreated: true,
         sourceLabel: "Hawley Asana time posted",
-        seenAt: nowIso
+        seenAt: eventIso
       });
     }
 
@@ -3482,7 +3777,7 @@ async function handleWorkerTaskAction(req) {
       completionPending: false,
       timeEntryCreated: true,
       sourceLabel: "Hawley task completed",
-      seenAt: nowIso
+      seenAt: eventIso
     });
 
     return {
@@ -4135,17 +4430,13 @@ const server = http.createServer(async (req, res) => {
         configuredRecipients: 0,
         thresholdMinutes: 15,
         overEstimateThresholdMinutes: 15,
-        workStart: "07:00",
-        workEnd: "15:30",
+        workStart: SHOP_WORK_START,
+        workEnd: SHOP_WORK_END,
         lunchStart: "11:00",
         lunchEnd: "11:30",
-        pauses: [
-          { label: "lunch", start: "11:00", end: "11:30" },
-          { label: "break", start: "09:00", end: "09:10" },
-          { label: "break", start: "13:30", end: "13:40" }
-        ],
-        timerAutoStopEnabled: false,
-        timerScheduleEnforced: false,
+        pauses: SHOP_PAUSES,
+        timerAutoStopEnabled: true,
+        timerScheduleEnforced: true,
         pending: [],
         history: [],
         mode: "hawley-read-only-pilot"
