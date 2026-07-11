@@ -1057,6 +1057,43 @@ async function applyStartupMigrations() {
   }
 }
 
+async function applyAuthSchemaMigrationIfNeeded() {
+  if (!APP_AUTH_ACTIVE && !APP_AUTH_SEED_ROSTER_ON_START && !APP_AUTH_BOOTSTRAP_ENABLED) return;
+  if (!syncDatabaseConfigured()) {
+    console.warn("Hawley auth schema migration skipped: missing sync database URL.");
+    return;
+  }
+
+  const client = new pg.Client(getDatabaseConfig({ useSyncUrl: true }));
+  await client.connect();
+  try {
+    const exists = await client.query("select to_regclass('core.app_users') as table_name");
+    if (exists.rows[0]?.table_name) return;
+
+    await client.query("begin");
+    await client.query("create schema if not exists sync");
+    await ensureMigrationTable(client);
+    const migrationFile = "014_app_user_auth.sql";
+    const sql = await fs.readFile(path.join(migrationsDir, migrationFile), "utf8");
+    console.log(`Applying Hawley auth migration ${migrationFile}`);
+    await client.query(sql);
+    await client.query(
+      `
+        insert into sync.schema_migrations (filename)
+        values ($1)
+        on conflict (filename) do update set applied_at = now()
+      `,
+      [migrationFile]
+    );
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    await client.end();
+  }
+}
+
 function todayIso() {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
@@ -5645,6 +5682,11 @@ async function startServer() {
     await applyStartupMigrations();
   } catch (error) {
     console.error(`Hawley startup migrations failed: ${error.message}`);
+  }
+  try {
+    await applyAuthSchemaMigrationIfNeeded();
+  } catch (error) {
+    console.error(`Hawley auth schema migration failed: ${error.message}`);
   }
   await applyRuntimeReadGrants();
   await seedInactiveAuthUsersFromWorkForce();
