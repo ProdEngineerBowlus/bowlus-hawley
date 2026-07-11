@@ -77,6 +77,9 @@ views. It combines Airtable `Work Force` skill levels, observed Rev1/Asana task
 assignment history, and local-only owner hints for scheduling/routing support.
 See `docs/runbooks/operational-capability-map.md`.
 
+The current Postgres schema map and data-layer rules are documented in
+`docs/hawley-database-schema.md`.
+
 The Rev1 Airtable field and calculation migration audit is documented in
 `docs/runbooks/rev1-airtable-calculation-audit.md`.
 

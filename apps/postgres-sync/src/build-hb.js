@@ -926,9 +926,10 @@ function cycleRow(raw) {
   const fields = raw.fields_json || {};
   const startDate = dateValue(fields["Start Date"]);
   const endDate = dateValue(fields["End Date"]);
+  const computedDaysInCycle = countBusinessDaysInclusive(startDate, endDate, parseHolidayDates(fields.Holidays));
   const daysInCycle =
-    integerValue(fields["Days In Cycle"]) ||
-    countBusinessDaysInclusive(startDate, endDate, parseHolidayDates(fields.Holidays));
+    computedDaysInCycle ||
+    integerValue(fields["Days In Cycle"]);
   const hoursPerWorkday = numberValue(fields["Hours Per Workday"]);
   const cycleCapacity =
     numberValue(fields["Cycle Capacity"]) ??

@@ -2356,11 +2356,12 @@ function selectedCycleFromTrackerSnapshots(activeSnapshots, selectedDate) {
 }
 
 function cycleDayDateList(byDate, calendar, selectedDate) {
-  const dates = calendar?.dates?.length
+  const hasCalendarDates = Boolean(calendar?.dates?.length);
+  const dates = hasCalendarDates
     ? [...calendar.dates]
     : Array.from(byDate.keys()).sort((a, b) => a.localeCompare(b));
 
-  if (isIsoDate(selectedDate) && !dates.includes(selectedDate)) {
+  if (!hasCalendarDates && isIsoDate(selectedDate) && !dates.includes(selectedDate)) {
     dates.push(selectedDate);
   }
 
@@ -2509,6 +2510,7 @@ async function reportingCycleSummaries(selectedDate, selectedCycleName = "") {
       const key = cycleSummaryKey(cycle);
       const holidays = holidayDatesFromField(row.holidays, row.start_date);
       const dates = cycleWorkdays(row.start_date, row.end_date, holidays, row.days_in_cycle);
+      const dayCount = dates.length || Number(row.days_in_cycle || 0);
       const primaryDate = dates[dates.length - 1] || row.end_date || row.start_date || selectedDate;
       return {
         key,
@@ -2516,7 +2518,7 @@ async function reportingCycleSummaries(selectedDate, selectedCycleName = "") {
         cycleNumber: Number(row.cycle_number || cycleNumberFromName(cycle) || 0),
         startDate: row.start_date || "",
         endDate: row.end_date || "",
-        dayCount: Number(row.days_in_cycle || dates.length || 0),
+        dayCount,
         firstDate: dates[0] || row.start_date || "",
         lastDate: dates[dates.length - 1] || row.end_date || "",
         primaryDate,
@@ -2656,7 +2658,7 @@ async function cycleCalendar(cycleName, selectedDate) {
     cycle: formatCycleName(row.cycle_label || row.cycle_number),
     startDate: row.start_date,
     endDate: row.end_date,
-    daysInCycle: Number(row.days_in_cycle || dates.length),
+    daysInCycle: dates.length,
     holidays: Array.from(holidays).sort(),
     dates
   };
@@ -5592,7 +5594,7 @@ function adminCycleStatus(row) {
   const elapsedWorkday = startDate && effectiveToday >= startDate
     ? workdays.filter(date => date <= effectiveToday).length
     : 0;
-  const totalWorkdays = Number(row.days_in_cycle || workdays.length || 0) || null;
+  const totalWorkdays = Number(workdays.length || row.days_in_cycle || 0) || null;
   const progressPct = totalWorkdays
     ? round(Math.max(0, Math.min(100, (elapsedWorkday / totalWorkdays) * 100)), 1)
     : adminPercentValue(row.cycle_percent);
