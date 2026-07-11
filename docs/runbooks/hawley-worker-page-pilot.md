@@ -57,8 +57,8 @@ npm run pg:hawley-auth-user -- deactivate worker@example.com
 For the first shop-floor login pilot, the auth CLI can activate and verify the
 full active workforce roster in one pass. It reads active employees from
 `hb.work_force`, sets the shell-provided temporary password hash for each
-account, makes Erick T and Jacob R admins, makes Cesar Z a manager, and leaves
-everyone else as a worker:
+account, makes Erick T, Jacob R, and `prodengineering@bowlusroadchief.com`
+admins, makes Cesar Z a manager, and leaves everyone else as a worker:
 
 ```powershell
 $env:HAWLEY_AUTH_PASSWORD="<temporary pilot password>"

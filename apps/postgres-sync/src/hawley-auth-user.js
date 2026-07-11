@@ -5,7 +5,7 @@ import { getDatabaseConfig } from "./config.js";
 
 const { Client } = pg;
 const scryptAsync = promisify(crypto.scrypt);
-const DEFAULT_PILOT_ADMINS = ["erick t", "jacob r"];
+const DEFAULT_PILOT_ADMINS = ["erick t", "jacob r", "prodengineering@bowlusroadchief.com"];
 const DEFAULT_PILOT_MANAGERS = ["cesar z"];
 
 function usage() {
@@ -20,8 +20,9 @@ Usage:
 
 Set HAWLEY_AUTH_PASSWORD in the shell before setup-pilot-roster, verify-passwords,
 or set-password. The password is never printed and is stored only as a salted
-scrypt hash. By default setup-pilot-roster makes Erick T and Jacob R admins,
-Cesar Z a manager, and everyone else a worker.
+scrypt hash. By default setup-pilot-roster makes Erick T, Jacob R, and
+prodengineering@bowlusroadchief.com admins, Cesar Z a manager, and everyone else
+a worker.
 `.trim();
 }
 
