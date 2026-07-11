@@ -12,6 +12,16 @@ const TABLES = Object.freeze([
     targetTable: "raw.airtable_task_instances"
   },
   {
+    envKey: "HAWLEY_AIRTABLE_TASKS_TABLE",
+    sourceName: "Tasks",
+    targetTable: "raw.airtable_tasks"
+  },
+  {
+    envKey: "HAWLEY_AIRTABLE_PRODUCTION_TABLE",
+    sourceName: "Production",
+    targetTable: "raw.airtable_production"
+  },
+  {
     envKey: "HAWLEY_AIRTABLE_CYCLES_TABLE",
     sourceName: "Cycles",
     targetTable: "raw.airtable_cycles"

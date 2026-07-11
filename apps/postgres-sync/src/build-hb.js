@@ -550,6 +550,263 @@ function unique(values) {
   return Array.from(new Set((values || []).filter(value => value !== null && value !== undefined && value !== "")));
 }
 
+function firstPresentField(fields, names) {
+  for (const name of names) {
+    if (Object.prototype.hasOwnProperty.call(fields, name)) return fields[name];
+  }
+  return undefined;
+}
+
+function textFromAny(fields, names) {
+  return text(firstPresentField(fields, names));
+}
+
+function flattenFieldValues(value) {
+  const result = [];
+  const visit = item => {
+    if (item === null || item === undefined || item === "") return;
+    if (Array.isArray(item)) {
+      item.forEach(visit);
+      return;
+    }
+    if (typeof item === "object") {
+      visit(item.name ?? item.email ?? item.value ?? item.text ?? item.id);
+      return;
+    }
+    const normalized = String(item).trim();
+    if (normalized) result.push(normalized);
+  };
+  visit(value);
+  return result;
+}
+
+function textList(value) {
+  return unique(flattenFieldValues(value));
+}
+
+function recordLinkedIds(value) {
+  return unique(linkedIds(value).filter(id => /^rec[a-z0-9]+$/i.test(id)));
+}
+
+function recordLinkedIdsFromAny(fields, names) {
+  return unique(names.flatMap(name => recordLinkedIds(fields[name])));
+}
+
+function nonRecordTextList(value) {
+  return textList(value).filter(item => !/^rec[a-z0-9]+$/i.test(item));
+}
+
+function optionalBoolean(value) {
+  const raw = firstValue(value);
+  if (raw === null || raw === undefined || raw === "") return null;
+  return booleanValue(value);
+}
+
+function validUrl(value) {
+  if (!value) return false;
+  try {
+    new URL(String(value));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function filenameFromUrl(value) {
+  try {
+    const url = new URL(String(value));
+    const name = url.pathname.split("/").filter(Boolean).pop();
+    return name ? decodeURIComponent(name) : "attachment";
+  } catch {
+    return "attachment";
+  }
+}
+
+function attachmentFiles(value) {
+  const files = [];
+  const seen = new Set();
+  for (const item of toArray(value)) {
+    let url = "";
+    let filename = "";
+    if (typeof item === "string") {
+      url = item.trim();
+      filename = filenameFromUrl(url);
+    } else if (item && typeof item === "object") {
+      url = String(item.url || item.downloadUrl || item.download_url || "").trim();
+      filename = String(item.filename || item.name || item.id || filenameFromUrl(url)).trim();
+    }
+    if (!validUrl(url)) continue;
+    const key = `${url}::${filename}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    files.push({ url, filename: filename || "attachment" });
+  }
+  return files;
+}
+
+function attachmentSummary(value) {
+  const files = attachmentFiles(value);
+  return files.length ? files.map(file => file.filename).join("\n") : null;
+}
+
+function phaseNamesForIds(ids, lookups) {
+  return unique(ids.map(id => lookups.phases.get(id)?.phase_name || lookups.phases.get(id)?.section_column));
+}
+
+function workerNamesForIds(ids, lookups) {
+  return unique(ids.map(id => lookups.workers.get(id)?.worker_name));
+}
+
+function normalizeVinValue(value) {
+  const normalized = String(value || "")
+    .replace(/^vin\s*/i, "")
+    .trim();
+  const match = normalized.match(/\b\d{3,5}\b/);
+  return match ? match[0] : normalized;
+}
+
+function splitVinValues(value) {
+  return String(value || "")
+    .split(/[,;/\n]+/)
+    .map(item => normalizeVinValue(item))
+    .filter(Boolean);
+}
+
+function vinValuesFromFields(fields) {
+  return unique(
+    [
+      ...nonRecordTextList(fields["VIN (from VIN)"]),
+      ...nonRecordTextList(fields["VIN Number"]),
+      ...nonRecordTextList(fields.VIN)
+    ].flatMap(splitVinValues)
+  );
+}
+
+function taskTemplateRow(raw, lookups) {
+  const fields = raw.fields_json || {};
+  const phaseIds = recordLinkedIds(fields.Phase);
+  const phaseNames = unique([
+    ...phaseNamesForIds(phaseIds, lookups),
+    ...nonRecordTextList(fields.Phase)
+  ]);
+  const workerIds = recordLinkedIdsFromAny(fields, ["Name", "Assigned Worker", "Worker"]);
+  const workerNames = unique([
+    ...workerNamesForIds(workerIds, lookups),
+    ...nonRecordTextList(firstPresentField(fields, ["Name", "Assigned Worker", "Worker"]))
+  ]);
+  const parentRecordId = recordLinkedIdsFromAny(fields, ["Parent Task Record", "Parent Task", "Parent"])[0] || null;
+  const status = textFromAny(fields, ["Status", "Task Status", "Template Status"]);
+  const active = optionalBoolean(firstPresentField(fields, ["Active?", "Active", "Task Active?"]));
+  const primaryWorker = workerIds.length ? lookups.workers.get(workerIds[0]) : null;
+  const attachmentValue = fields["Diagrams & Utilities"];
+
+  return {
+    task_record_id: raw.record_id,
+    tasks_key: text(fields.TasksKey) || text(fields["Tasks Key"]),
+    task_name: text(fields["Task Name"]) || text(fields.Task) || raw.record_id,
+    parent_task_record_id: parentRecordId,
+    parent_task_name:
+      text(fields["Parent Task Name"]) ||
+      (parentRecordId ? null : text(fields["Parent Task"])) ||
+      text(fields.Parent),
+    task_order: numberValue(fields["Task Order"]) ?? numberValue(fields.Order) ?? numberValue(fields.Sort),
+    quantity: numberValue(fields.Quantity),
+    estimated_task_time_seconds: durationSeconds(fields["Estimated Task Time"]),
+    estimated_batch_task_time_seconds:
+      durationSeconds(fields["Estimated Batched Task Time"]) ??
+      durationSeconds(fields["Estimated Batch Task Time"]) ??
+      durationSeconds(fields["Estimated Time (w/ Qty)"]),
+    primary_phase_record_id: phaseIds[0] || null,
+    primary_phase_name: phaseNames[0] || null,
+    phase_record_ids: phaseIds,
+    phase_names: phaseNames,
+    primary_worker_record_id: workerIds[0] || null,
+    primary_worker_name: workerNames[0] || null,
+    assigned_worker_record_ids: workerIds,
+    assigned_worker_names: workerNames,
+    assignee_email: text(fields.Assignee) || primaryWorker?.worker_email || null,
+    document_link: text(fields["Document Link"]) || text(fields["SOP Link"]),
+    attachment_summary: attachmentSummary(attachmentValue),
+    attachment_files_json: JSON.stringify(attachmentFiles(attachmentValue)),
+    task_description: text(fields["Task Description"]) || text(fields.Description) || text(fields.Notes),
+    template_status: status,
+    active: active ?? (status ? !/\b(inactive|archived|retired)\b/i.test(status) : null),
+    fields_json: fields,
+    source_system: "airtable_tasks",
+    source_synced_at: raw.synced_at
+  };
+}
+
+function taskTemplateRows(rawRows, lookups) {
+  const rows = rawRows.map(raw => taskTemplateRow(raw, lookups));
+  const byRecordId = new Map(rows.map(row => [row.task_record_id, row]));
+  for (const row of rows) {
+    if (!row.parent_task_name && row.parent_task_record_id && byRecordId.has(row.parent_task_record_id)) {
+      row.parent_task_name = byRecordId.get(row.parent_task_record_id).task_name;
+    }
+  }
+  return rows;
+}
+
+function productionScheduleRow(raw, lookups) {
+  const fields = raw.fields_json || {};
+  const cycleIds = recordLinkedIds(fields.Cycle);
+  const phaseIds = recordLinkedIds(fields.Phase);
+  const cycle =
+    (cycleIds[0] ? lookups.cycles.get(cycleIds[0]) : null) ||
+    findCycle(lookups, fields["Cycle Number"], fields["Cycle Number (from Cycle)"], fields["Cycle Label"], fields.Cycle);
+  const phase =
+    (phaseIds[0] ? lookups.phases.get(phaseIds[0]) : null) ||
+    findPhase(lookups, fields["Section/Column"], fields["Asana Section"], fields.Phase);
+  const cycleNumber =
+    integerValue(fields["Cycle Number"]) ??
+    integerValue(fields["Cycle Number (from Cycle)"]) ??
+    cycle?.cycle_number ??
+    cycleNumberFromText(text(fields.Cycle));
+  const cycleLabel =
+    text(fields["Cycle Label"]) ||
+    cycle?.cycle_label ||
+    (cycleNumber !== null && cycleNumber !== undefined ? `C${cycleNumber}` : text(fields.Cycle));
+  const shortCycleLabel =
+    cycleNumber !== null && cycleNumber !== undefined ? `C${cycleNumber}` : cycleLabel;
+  const vinValues = vinValuesFromFields(fields);
+  const vinRecordIds = recordLinkedIdsFromAny(fields, ["VIN Record", "VIN"]);
+  const phaseName = phase?.phase_name || text(fields.Phase) || text(fields["Section/Column"]);
+  const sectionColumn = text(fields["Section/Column"]) || phase?.section_column || null;
+  const taskInstanceIds = recordLinkedIds(fields["Task Instances Rev1"]);
+  const scheduleKey = unique([
+    shortCycleLabel,
+    vinValues[0],
+    phase?.phase_record_id || phaseName || sectionColumn
+  ]).join("::") || raw.record_id;
+
+  return {
+    production_record_id: raw.record_id,
+    schedule_key: scheduleKey,
+    schedule_name: text(fields["Schedule Name"]) || text(fields.Name) || scheduleKey,
+    cycle_number: cycleNumber,
+    cycle_label: cycleLabel,
+    short_cycle_label: shortCycleLabel,
+    cycle_record_id: cycleIds[0] || cycle?.cycle_record_id || null,
+    phase_record_id: phaseIds[0] || phase?.phase_record_id || null,
+    phase_name: phaseName,
+    section_column: sectionColumn,
+    asana_section: text(fields["Asana Section"]),
+    vin: vinValues.length ? vinValues.join(", ") : null,
+    vin_values: vinValues,
+    vin_record_ids: vinRecordIds,
+    model_type: text(fields["Model Type"]),
+    start_date: dateValue(fields["Start Date"]),
+    end_date: dateValue(fields["End Date"]),
+    days_in_cycle: integerValue(fields["Days in Cycle (from Cycle)"]) ?? integerValue(fields["Days in Cycle"]),
+    task_instance_record_ids: taskInstanceIds,
+    existing_rev1_task_instance_links: taskInstanceIds.length,
+    fields_json: fields,
+    source_system: "airtable_production",
+    source_synced_at: raw.synced_at
+  };
+}
+
 function workerRow(raw) {
   const fields = raw.fields_json || {};
   return {
@@ -1071,6 +1328,28 @@ async function normalizeBaseTables(client) {
 
   const lookups = buildLookups(workers, cycles, phases);
 
+  const taskTemplateRaw = await rawRows(client, "raw.airtable_tasks");
+  const taskTemplates = taskTemplateRows(taskTemplateRaw, lookups);
+  await upsertRows(client, "hb.task_templates", "task_record_id", taskTemplates);
+  await deleteSourceRowsNotSeen(
+    client,
+    "hb.task_templates",
+    "task_record_id",
+    "airtable_tasks",
+    taskTemplates.map(row => row.task_record_id)
+  );
+
+  const productionRaw = await rawRows(client, "raw.airtable_production");
+  const productionSchedule = productionRaw.map(row => productionScheduleRow(row, lookups));
+  await upsertRows(client, "hb.production_schedule", "production_record_id", productionSchedule);
+  await deleteSourceRowsNotSeen(
+    client,
+    "hb.production_schedule",
+    "production_record_id",
+    "airtable_production",
+    productionSchedule.map(row => row.production_record_id)
+  );
+
   const taskRaw = await rawRows(client, "raw.airtable_task_instances");
   const asanaRaw = await rawAsanaPortfolioTaskRows(client);
   const asanaByGid = new Map(asanaRaw.map(row => [row.gid, row]));
@@ -1113,6 +1392,8 @@ async function normalizeBaseTables(client) {
     workers: workers.length,
     cycles: cycles.length,
     phases: phases.length,
+    taskTemplates: taskTemplates.length,
+    productionSchedule: productionSchedule.length,
     taskInstances: allTaskRows.length,
     airtableTaskInstances: taskRows.length,
     asanaOnlyTaskInstances: asanaOnlyRows.length,

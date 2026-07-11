@@ -22,7 +22,7 @@ as $$
       (time '11:30', time '13:30'),
       (time '13:40', time '15:30')
   ),
-  overlaps as (
+  work_overlaps as (
     select
       extract(epoch from (
         least(params.stopped_at, (params.work_date + windows.end_clock) at time zone 'America/Los_Angeles')
@@ -34,7 +34,7 @@ as $$
       > greatest(params.started_at, (params.work_date + windows.start_clock) at time zone 'America/Los_Angeles')
   )
   select coalesce(greatest(0, round(sum(minutes))::integer), 0)
-  from overlaps;
+  from work_overlaps;
 $$;
 
 create or replace function core.hawley_effective_work_stop(

@@ -15,6 +15,8 @@ remain represented in the schema catalog.
 ## Imported Tables
 
 - `Task Instances Rev1` -> `raw.airtable_task_instances`
+- `Tasks` -> `raw.airtable_tasks`
+- `Production` -> `raw.airtable_production`
 - `Cycles` -> `raw.airtable_cycles`
 - `Work Force` -> `raw.airtable_work_force`
 - `Phase Cycle Load Rev1` -> `raw.airtable_phase_cycle_load`
@@ -52,6 +54,20 @@ It also reads:
 - `Phase Cycle Load Rev1`: `PhaseCycleBucketKey`, `Phase`, `Cycle`, `Total Load Hrs.`, `Completed Task Hours`, `Remaining Task Hours`, `Completion %`
 - `Cycles`: cycle start/end, cycle number, workday, holiday, and current-cycle fields
 - `Phases`: `Name`, `Section/Column`
+
+The admin project-creator path also mirrors:
+
+- `Tasks`: `Task Name`, `Parent Task`, `Task Order`, `Quantity`,
+  `Estimated Task Time`, `Estimated Batched Task Time`, `TasksKey`,
+  `Document Link`, `Diagrams & Utilities`, `Task Description`, `Assignee`,
+  `Name`, and `Phase`
+- `Production`: `Schedule Name`, `Cycle Number`,
+  `Cycle Number (from Cycle)`, `Cycle`, `Phase`, `Section/Column`,
+  `Asana Section`, `VIN`, `VIN (from VIN)`, `Start Date`, `End Date`,
+  `Days in Cycle (from Cycle)`, `Task Instances Rev1`, and `Model Type`
+
+Those records normalize into `hb.task_templates` and
+`hb.production_schedule` for Postgres-backed admin features.
 
 `rev1-rebuild-downstream.mjs` additionally depends on:
 

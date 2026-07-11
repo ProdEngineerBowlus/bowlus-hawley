@@ -55,6 +55,16 @@ This runs:
 
 The Daily Tracker pull is read-only and is kept for comparison/fallback. The cloned worker app defaults to the HB read model, not DAT snapshots.
 
+Full Hawley read-model refresh:
+
+```powershell
+npm run pg:refresh-hawley-read-model
+```
+
+This runs Airtable mirror, legacy core normalization, Asana mirror, HB build,
+and Daily Tracker mirror. It keeps `Tasks` and `Production` current for the
+Postgres-backed admin project-creator path.
+
 One-minute incremental Asana refresh:
 
 ```powershell
@@ -88,7 +98,7 @@ npm run pg:build:hb
 
 This command:
 
-1. Normalizes Work Force, Cycles, Phases, Task Instances Rev1, and Asana portfolio tasks into `hb.*`; Hawley-owned worker actual rows remain the live worker-time source.
+1. Normalizes Work Force, Cycles, Phases, Tasks, Production, Task Instances Rev1, and Asana portfolio tasks into `hb.*`; Hawley-owned worker actual rows remain the live worker-time source.
 2. Rebuilds phase/cycle load, worker phase allocation, and worker cycle bank tables inside `hb.*`.
 3. Keeps `Actual Efficiency` as the legacy batch-based calculation:
    `actual_time_seconds / estimated_batch_task_time_seconds`.

@@ -27,7 +27,7 @@ const WORKER_ACTUALS_WATCH_INTERVAL_MS = Number(process.env.HAWLEY_WORKER_ACTUAL
 const WORKER_ACTUALS_WATCH_RESTART_MS = Number(process.env.HAWLEY_WORKER_ACTUALS_WATCH_RESTART_MS || 30000);
 const NIGHTLY_REFRESH_TIME = process.env.HAWLEY_NIGHTLY_REFRESH_TIME || "01:00";
 const NIGHTLY_REFRESH_TIME_ZONE = process.env.HAWLEY_NIGHTLY_REFRESH_TIME_ZONE || "America/Los_Angeles";
-const NIGHTLY_REFRESH_SCRIPT = process.env.HAWLEY_NIGHTLY_REFRESH_SCRIPT || "pg:refresh-worker-read-model";
+const NIGHTLY_REFRESH_SCRIPT = process.env.HAWLEY_NIGHTLY_REFRESH_SCRIPT || "pg:refresh-hawley-read-model";
 const NIGHTLY_AIRTABLE_BACKFILL_SCRIPT = process.env.HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_SCRIPT || "pg:backfill:airtable-worker-actuals";
 const NIGHTLY_AIRTABLE_BACKFILL_WINDOW_DAYS = Number(process.env.HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_WINDOW_DAYS || process.env.HAWLEY_AIRTABLE_BACKFILL_WINDOW_DAYS || 2);
 const APPLY_MIGRATIONS_ON_START = booleanEnv("HAWLEY_APPLY_MIGRATIONS_ON_START", process.env.NODE_ENV === "production");
@@ -817,6 +817,11 @@ function runNightlyRefresh() {
   });
 }
 
+function nightlyRefreshNeedsAirtable() {
+  const script = String(NIGHTLY_REFRESH_SCRIPT || "").toLowerCase();
+  return script.includes("airtable") || script === "pg:refresh-all" || script === "pg:refresh-hawley-read-model";
+}
+
 function configureNightlyAirtableBackfill() {
   nightlyAirtableBackfillState.requested = shouldRunNightlyAirtableBackfill();
   nightlyAirtableBackfillState.enabled = false;
@@ -930,6 +935,12 @@ function startNightlyRefreshScheduler() {
   if (!process.env.ASANA_PAT) {
     nightlyRefreshState.reason = "missing ASANA_PAT";
     console.warn("Hawley nightly refresh disabled: missing ASANA_PAT.");
+    return;
+  }
+
+  if (nightlyRefreshNeedsAirtable() && (!process.env.AIRTABLE_PAT || !process.env.AIRTABLE_BASE)) {
+    nightlyRefreshState.reason = "missing AIRTABLE_PAT or AIRTABLE_BASE";
+    console.warn("Hawley nightly refresh disabled: missing Airtable configuration.");
     return;
   }
 
