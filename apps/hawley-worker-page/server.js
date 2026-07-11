@@ -3265,18 +3265,18 @@ async function autoCloseScheduledTimersForDate(date) {
         `
           update hb.worker_daily_task_actuals
           set
-            actual_minutes = $2,
-            timer_minutes = $3,
+            actual_minutes = $2::integer,
+            timer_minutes = $3::integer,
             last_seen_at = $4::timestamptz,
             source_synced_at = $4::timestamptz,
-            source_label = $5,
+            source_label = $5::text,
             fields_json = coalesce(fields_json, '{}'::jsonb)
               || jsonb_build_object(
                 'Timer Started At', '',
-                'Timer Minutes', $3,
-                'Actual Minutes', $2,
+                'Timer Minutes', $3::integer,
+                'Actual Minutes', $2::integer,
                 'Schedule Auto Stopped?', true,
-                'Schedule Auto Stop Reason', $6,
+                'Schedule Auto Stop Reason', $6::text,
                 'Schedule Auto Stopped At', $4
               ),
             normalized_at = now()
@@ -3448,9 +3448,9 @@ async function enforceScheduledActualsForDate(date) {
         `
           update hb.worker_daily_task_actuals
           set
-            actual_minutes = $2,
-            timer_minutes = $3,
-            asana_posted_minutes = $4,
+            actual_minutes = $2::integer,
+            timer_minutes = $3::integer,
+            asana_posted_minutes = $4::integer,
             last_seen_at = $5::timestamptz,
             source_synced_at = $5::timestamptz,
             fields_json = coalesce(fields_json, '{}'::jsonb)
@@ -3458,14 +3458,14 @@ async function enforceScheduledActualsForDate(date) {
                 'Schedule Raw Actual Minutes', actual_minutes,
                 'Schedule Raw Timer Minutes', timer_minutes,
                 'Schedule Raw Asana Posted Minutes', asana_posted_minutes,
-                'Schedule Raw Logged Minutes', $6,
-                'Schedule Raw Stop At', $7,
+                'Schedule Raw Logged Minutes', $6::integer,
+                'Schedule Raw Stop At', $7::text,
                 'Schedule Effective Stop At', $5,
                 'Schedule Corrected At', now()::text,
-                'Schedule Correction Source', $8,
-                'Actual Minutes', $2,
-                'Timer Minutes', $3,
-                'Asana Posted Minutes', $4
+                'Schedule Correction Source', $8::text,
+                'Actual Minutes', $2::integer,
+                'Timer Minutes', $3::integer,
+                'Asana Posted Minutes', $4::integer
               ),
             normalized_at = now()
           where worker_daily_actual_id = $1
@@ -3523,16 +3523,16 @@ async function enforceScheduledActualsForDate(date) {
         `
           update core.time_sessions
           set
-            duration_minutes = $2,
+            duration_minutes = $2::integer,
             stopped_at = $3::timestamptz,
             source_payload = coalesce(source_payload, '{}'::jsonb)
               || jsonb_build_object(
-                'scheduleRawDurationMinutes', $4,
-                'scheduleCorrectedDurationMinutes', $2,
-                'scheduleRawStoppedAt', $5,
+                'scheduleRawDurationMinutes', $4::integer,
+                'scheduleCorrectedDurationMinutes', $2::integer,
+                'scheduleRawStoppedAt', $5::text,
                 'scheduleEffectiveStoppedAt', $3,
                 'scheduleCorrectedAt', now()::text,
-                'scheduleCorrectionSource', $6
+                'scheduleCorrectionSource', $6::text
               ),
             updated_at = now()
           where time_session_id = $1
@@ -3574,7 +3574,7 @@ async function enforceScheduledActualsForDate(date) {
             timer_minutes = case when coalesce(summaries.timer_minutes, 0) > 0 then rollups.logged_minutes else summaries.timer_minutes end,
             source_synced_at = now(),
             last_seen_at = now(),
-            daily_available_minutes = $3,
+            daily_available_minutes = $3::integer,
             daily_logged_minutes = rollups.logged_minutes,
             daily_efficiency_percent = round((rollups.logged_minutes / $3::numeric * 100)::numeric, 2),
             daily_efficiency_under_75 = rollups.logged_minutes < round(($3 * 0.75)::numeric, 0),
@@ -3582,7 +3582,7 @@ async function enforceScheduledActualsForDate(date) {
             fields_json = coalesce(summaries.fields_json, '{}'::jsonb)
               || jsonb_build_object(
                 'Actual Minutes', rollups.logged_minutes,
-                'Daily Available Minutes', $3,
+                'Daily Available Minutes', $3::integer,
                 'Daily Logged Minutes', rollups.logged_minutes,
                 'Daily Efficiency Percent', round((rollups.logged_minutes / $3::numeric * 100)::numeric, 2),
                 'Daily Efficiency Under 75?', rollups.logged_minutes < round(($3 * 0.75)::numeric, 0),
