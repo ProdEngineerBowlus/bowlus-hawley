@@ -1186,6 +1186,7 @@
             <h2 class="panel-title">Snapshot</h2>
           </div>
           <div class="panel-body">
+            ${renderSnapshotLegend()}
             ${renderWorkerStats(worker)}
             <div class="snapshot-detail">
               ${renderDetail("Cycle", worker.cycle)}
@@ -1203,16 +1204,24 @@
   function renderWorkerStats(worker) {
     const efficiency = workerDailyEfficiency(worker);
     const actual = workerActualBreakdown(worker);
-    const splitDetail = actualBreakdownLabel(actual);
     return `
       <div class="metric-grid">
-        ${renderMetric("Daily utilization", efficiency.availableMinutes ? `${efficiency.percent}%` : "--", splitDetail)}
+        ${renderEfficiencySplitMetric("Task Efficiency", efficiency)}
         ${renderMetric("Assigned", formatHours(worker.assignedHours))}
-        ${renderMetric(actualTimeLabel(), formatMinutes(actual.totalMinutes), splitDetail)}
+        ${renderTimeSplitMetric(actualTimeLabel(), actual)}
         ${renderMetric("Complete", formatHours(worker.completedHours))}
         ${renderMetric("Remaining", formatHours(worker.remainingHours))}
         ${renderMetric("Scheduled elapsed", formatMinutes(efficiency.availableMinutes))}
         ${renderMetric("Tasks", `${worker.completedTaskCount || 0}/${worker.taskCount || worker.tasks.length}`)}
+      </div>
+    `;
+  }
+
+  function renderSnapshotLegend() {
+    return `
+      <div class="snapshot-legend" aria-label="Snapshot value key">
+        <span><i class="legend-dot logged" aria-hidden="true"></i>Logged</span>
+        <span><i class="legend-dot wip" aria-hidden="true"></i>WIP</span>
       </div>
     `;
   }
@@ -1328,6 +1337,39 @@
         <span>${escapeHtml(label)}</span>
         <strong>${escapeHtml(value || "0")}</strong>
         ${detail ? `<small>${escapeHtml(detail)}</small>` : ""}
+      </div>
+    `;
+  }
+
+  function renderTimeSplitMetric(label, actual) {
+    return renderSplitMetric(label, [
+      { tone: "logged", value: formatMinutes(Number(actual?.loggedMinutes || 0)), label: "Logged" },
+      { tone: "wip", value: formatMinutes(Number(actual?.wipMinutes || 0)), label: "WIP" },
+    ]);
+  }
+
+  function renderEfficiencySplitMetric(label, efficiency) {
+    const availableMinutes = Number(efficiency?.availableMinutes || 0);
+    const loggedPercent = availableMinutes ? Math.round((Number(efficiency?.loggedMinutes || 0) / availableMinutes) * 100) : null;
+    const wipPercent = availableMinutes ? Math.round((Number(efficiency?.wipMinutes || 0) / availableMinutes) * 100) : null;
+    return renderSplitMetric(label, [
+      { tone: "logged", value: loggedPercent === null ? "--" : `${loggedPercent}%`, label: "Logged" },
+      { tone: "wip", value: wipPercent === null ? "--" : `${wipPercent}%`, label: "WIP" },
+    ]);
+  }
+
+  function renderSplitMetric(label, items) {
+    return `
+      <div class="metric split-metric">
+        <span>${escapeHtml(label)}</span>
+        <div class="split-values">
+          ${items.map((item) => `
+            <div class="split-value ${escapeAttr(item.tone)}">
+              <strong>${escapeHtml(item.value)}</strong>
+              <small>${escapeHtml(item.label)}</small>
+            </div>
+          `).join("")}
+        </div>
       </div>
     `;
   }

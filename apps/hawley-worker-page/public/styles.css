@@ -1718,6 +1718,78 @@ button {
   line-height: 1.2;
 }
 
+.snapshot-legend {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.snapshot-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--primary);
+}
+
+.legend-dot.wip {
+  background: var(--yellow);
+}
+
+.split-metric {
+  align-content: start;
+}
+
+.split-values {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  align-items: end;
+}
+
+.split-value {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.split-value strong {
+  min-width: 0;
+  color: var(--primary);
+  font-size: 20px;
+  line-height: 1.05;
+  white-space: nowrap;
+}
+
+.split-value.wip strong {
+  color: var(--yellow);
+}
+
+.split-value small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.admin-shell .split-value.logged strong {
+  color: var(--primary-strong);
+}
+
+.admin-shell .split-value.wip strong {
+  color: #ffd782;
+}
+
 .snapshot-detail {
   display: grid;
   gap: 8px;
