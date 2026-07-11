@@ -162,7 +162,7 @@ function sendError(res, status, message, details = {}) {
 
 function publicErrorMessage(error) {
   const message = error.message || "";
-  if (/hawley_worker_page_assignments|hawley_cycle_calendar|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|jsonb_display_text|task_transition_events|time_sessions|transition_category_catalog/.test(message)) {
+  if (/hawley_worker_page_assignments|hawley_cycle_calendar|hawley_reporting_day_summary|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|jsonb_display_text|task_transition_events|time_sessions|transition_category_catalog/.test(message)) {
     return {
       status: 503,
       message: "Hawley worker read model is not migrated yet. Run npm run pg:migrate."
@@ -1112,6 +1112,11 @@ function formatCycleName(value) {
   if (/^c\d+$/i.test(text)) return `C${text.replace(/^c/i, "")}`;
   if (/^\d+$/.test(text)) return `C${text}`;
   return text;
+}
+
+function cycleSummaryKey(value) {
+  const cycleNumber = cycleNumberFromName(value);
+  return cycleNumber ? `cycle-${cycleNumber}` : slugify(formatCycleName(value) || "current");
 }
 
 function formatPhaseName(value) {
@@ -2213,6 +2218,137 @@ function buildCycleDaysFromRows(dayRows, selectedDate, calendar = null) {
   return cycleDayPayloadFromDateMap(byDate, selectedDate, selectedCycle, calendar, "hawley-read-model");
 }
 
+async function reportingCycleSummaries(selectedDate, selectedCycleName = "") {
+  const [calendarResult, summaryResult] = await Promise.all([
+    pool.query(`
+      select
+        cycle_number,
+        cycle_label,
+        start_date::text,
+        end_date::text,
+        days_in_cycle,
+        holidays
+      from reporting.hawley_cycle_calendar
+      where start_date is not null
+      order by cycle_number nulls last, start_date
+    `),
+    pool.query(`
+      select
+        assigned_on::text,
+        cycle_name,
+        worker_count,
+        task_count,
+        completed_task_count,
+        open_task_count,
+        assigned_hours,
+        completed_hours,
+        remaining_hours
+      from reporting.hawley_reporting_day_summary
+      order by assigned_on
+    `)
+  ]);
+
+  const cycles = new Map();
+
+  for (const row of calendarResult.rows) {
+    const cycle = formatCycleName(row.cycle_label || row.cycle_number);
+    const key = cycleSummaryKey(cycle);
+    const holidays = holidayDatesFromField(row.holidays, row.start_date);
+    const dates = cycleWorkdays(row.start_date, row.end_date, holidays, row.days_in_cycle);
+    cycles.set(key, {
+      key,
+      cycle,
+      cycleNumber: Number(row.cycle_number || cycleNumberFromName(cycle) || 0),
+      startDate: row.start_date || "",
+      endDate: row.end_date || "",
+      dayCount: Number(row.days_in_cycle || dates.length || 0),
+      firstDate: dates[0] || row.start_date || "",
+      lastDate: dates[dates.length - 1] || row.end_date || "",
+      primaryDate: dates[dates.length - 1] || row.end_date || row.start_date || selectedDate,
+      snapshotDays: 0,
+      workerCount: 0,
+      assignedHours: 0,
+      completedHours: 0,
+      remainingHours: 0,
+      taskCount: 0,
+      completedTaskCount: 0,
+      openTaskCount: 0,
+    });
+  }
+
+  for (const row of summaryResult.rows) {
+    const cycle = formatCycleName(row.cycle_name) || "Current";
+    const key = cycleSummaryKey(cycle);
+    if (!cycles.has(key)) {
+      cycles.set(key, {
+        key,
+        cycle,
+        cycleNumber: Number(cycleNumberFromName(cycle) || 0),
+        startDate: "",
+        endDate: "",
+        dayCount: 0,
+        firstDate: row.assigned_on,
+        lastDate: row.assigned_on,
+        primaryDate: row.assigned_on || selectedDate,
+        snapshotDays: 0,
+        workerCount: 0,
+        assignedHours: 0,
+        completedHours: 0,
+        remainingHours: 0,
+        taskCount: 0,
+        completedTaskCount: 0,
+        openTaskCount: 0,
+      });
+    }
+
+    const cycleRow = cycles.get(key);
+    cycleRow.snapshotDays += 1;
+    cycleRow.firstDate = cycleRow.firstDate && row.assigned_on
+      ? [cycleRow.firstDate, row.assigned_on].sort()[0]
+      : row.assigned_on || cycleRow.firstDate;
+    cycleRow.lastDate = cycleRow.lastDate && row.assigned_on
+      ? [cycleRow.lastDate, row.assigned_on].sort().slice(-1)[0]
+      : row.assigned_on || cycleRow.lastDate;
+    cycleRow.primaryDate = row.assigned_on || cycleRow.primaryDate;
+    cycleRow.workerCount = Math.max(cycleRow.workerCount, Number(row.worker_count || 0));
+    cycleRow.assignedHours = round(cycleRow.assignedHours + Number(row.assigned_hours || 0));
+    cycleRow.completedHours = round(cycleRow.completedHours + Number(row.completed_hours || 0));
+    cycleRow.remainingHours = round(cycleRow.remainingHours + Number(row.remaining_hours || 0));
+    cycleRow.taskCount += Number(row.task_count || 0);
+    cycleRow.completedTaskCount += Number(row.completed_task_count || 0);
+    cycleRow.openTaskCount += Number(row.open_task_count || 0);
+  }
+
+  const selectedKey = cycleSummaryKey(selectedCycleName);
+  const currentDate = todayIso();
+  return Array.from(cycles.values())
+    .map(row => ({
+      ...row,
+      primaryDate: row.primaryDate || row.lastDate || row.firstDate || selectedDate,
+      completionPercent: row.taskCount ? round((row.completedTaskCount / row.taskCount) * 100, 1) : 0,
+      completeTaskLabel: `${row.completedTaskCount}/${row.taskCount}`,
+      selected: row.key === selectedKey,
+      status: row.openTaskCount > 0 ? "Assigned" : row.taskCount > 0 ? "Complete" : "No Work",
+    }))
+    .filter(row => row.selected || row.snapshotDays > 0 || !row.startDate || row.startDate <= currentDate)
+    .sort((a, b) =>
+      (b.cycleNumber || 0) - (a.cycleNumber || 0) ||
+      String(b.startDate || b.firstDate || "").localeCompare(String(a.startDate || a.firstDate || "")) ||
+      a.cycle.localeCompare(b.cycle)
+    );
+}
+
+async function reportingNavigation(date) {
+  const selectedDate = isIsoDate(date) ? date : todayIso();
+  const dayPayload = await cycleDays(selectedDate);
+  const cycles = await reportingCycleSummaries(selectedDate, dayPayload?.cycle || "");
+  return {
+    ...dayPayload,
+    source: "hawley-reporting-navigation",
+    cycles,
+  };
+}
+
 async function latestImportRuns() {
   const result = await pool.query(`
     select distinct on (job_name)
@@ -2333,20 +2469,19 @@ async function cycleDays(date) {
       select
         assigned_on::text,
         coalesce(cycle_name, (select cycle_name from selected), 'Current') as cycle_name,
-        count(distinct coalesce(worker_email, worker_name))::int as worker_count,
-        count(*)::int as task_count,
-        count(*) filter (where completed)::int as completed_task_count,
-        count(*) filter (where not completed)::int as open_task_count,
-        coalesce(sum(estimated_hours), 0)::numeric as assigned_hours,
-        coalesce(sum(estimated_hours) filter (where completed), 0)::numeric as completed_hours,
-        coalesce(sum(estimated_hours) filter (where not completed), 0)::numeric as remaining_hours
-      from reporting.hawley_worker_page_assignments
+        worker_count,
+        task_count,
+        completed_task_count,
+        open_task_count,
+        assigned_hours,
+        completed_hours,
+        remaining_hours
+      from reporting.hawley_reporting_day_summary
       where assigned_on is not null
         and (
           cycle_name = (select cycle_name from selected)
           or (select cycle_name from selected) is null
         )
-      group by assigned_on, cycle_name
       order by assigned_on
     `,
     [date, calendarCycle]
@@ -2590,7 +2725,7 @@ async function dailyAssignmentsPayload(url) {
     allWorkers = ensureLivePilotWorkers(allWorkers);
     applyWorkerDailyActualRows(allWorkers, actualRows);
     allWorkers = ensureLivePilotWorkers(allWorkers);
-    cycleDayPayload = employee ? null : await cycleDays(date);
+    cycleDayPayload = employee ? null : await reportingNavigation(date);
   }
 
   const workers = visibleWorkersForRequest(allWorkers, employee, includeNoWork);
@@ -4495,6 +4630,11 @@ async function transitionReviewQueuePayload(url) {
   };
 }
 
+async function reportingNavigationPayload(url) {
+  const requestedDate = url.searchParams.get("date") || todayIso();
+  return reportingNavigation(isIsoDate(requestedDate) ? requestedDate : todayIso());
+}
+
 async function transitionById(transitionEventId) {
   const result = await pool.query(
     "select * from reporting.transition_event_detail where transition_event_id = $1",
@@ -4682,6 +4822,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/utilization-report" && req.method === "GET") {
       sendJson(res, 200, await utilizationReportPayload(url));
+      return;
+    }
+
+    if (url.pathname === "/api/reporting-navigation" && req.method === "GET") {
+      sendJson(res, 200, await reportingNavigationPayload(url));
       return;
     }
 

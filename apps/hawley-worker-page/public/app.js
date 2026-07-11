@@ -957,14 +957,27 @@
   function renderCycleDayBar() {
     const cycleDays = state.cycleDays || {};
     const days = Array.isArray(cycleDays.days) ? cycleDays.days : [];
+    const cycles = Array.isArray(cycleDays.cycles) ? cycleDays.cycles : [];
     if (!days.length) return "";
 
-    const selected = days.find((day) => day.selected) || days.find((day) => day.date === state.date) || {};
+    const cycleLinks = cycles
+      .map((cycle) => {
+        const date = cycle.selected ? state.date : cycle.primaryDate;
+        return `
+          <a class="cycle-tile${cycle.selected ? " active" : ""}${cycle.status === "No Work" ? " empty" : ""}" href="${escapeAttr(reportingViewUrl(date))}">
+            <span>${escapeHtml(cycle.cycle || "Cycle")}</span>
+            <strong>${escapeHtml(cycle.completeTaskLabel || `${formatNumber(cycle.completedTaskCount)}/${formatNumber(cycle.taskCount)}`)}</strong>
+            <small>${escapeHtml(cycle.snapshotDays ? `${cycle.snapshotDays}/${cycle.dayCount || cycle.snapshotDays} days` : "No snapshots")}</small>
+          </a>
+        `;
+      })
+      .join("");
     const dayLinks = days
       .map((day) => `
-        <a class="cycle-day${day.date === state.date ? " active" : ""}${day.date === today ? " today" : ""}${day.hasSnapshot ? "" : " empty"}" href="${escapeAttr(managerDateUrl(day.date))}">
+        <a class="cycle-day${day.date === state.date ? " active" : ""}${day.date === today ? " today" : ""}${day.hasSnapshot ? "" : " empty"}" href="${escapeAttr(reportingViewUrl(day.date))}">
           <span>${escapeHtml(day.label)}</span>
           <strong>${escapeHtml(formatShortDate(day.date))}</strong>
+          <small>${escapeHtml(day.completeTaskLabel || "")}</small>
         </a>
       `)
       .join("");
@@ -974,10 +987,11 @@
         <div class="panel-header dashboard-header">
           <div>
             <h2 class="panel-title">${escapeHtml(cycleDays.cycle || "Cycle")} history</h2>
-            <p class="summary-line">${escapeHtml(formatLongDate(state.date))}</p>
+            <p class="summary-line">Open any cycle/day in Reporting View</p>
           </div>
-          <a class="btn ghost" href="${escapeAttr(managerDateUrl(today))}">${icons.refresh}<span>Today</span></a>
+          <a class="btn ghost" href="${escapeAttr(reportingViewUrl(today))}">${icons.open}<span>Today report</span></a>
         </div>
+        ${cycleLinks ? `<div class="cycle-cycle-strip" aria-label="Cycles">${cycleLinks}</div>` : ""}
         <div class="cycle-day-strip" aria-label="Cycle days">
           ${dayLinks}
         </div>
@@ -2106,8 +2120,12 @@
   }
 
   function lineViewUrl() {
+    return reportingViewUrl(state.date);
+  }
+
+  function reportingViewUrl(date = state.date) {
     const url = new URL("/beta.html", window.location.origin);
-    url.searchParams.set("date", state.date);
+    url.searchParams.set("date", date || state.date);
     return `${url.pathname}${url.search}`;
   }
 

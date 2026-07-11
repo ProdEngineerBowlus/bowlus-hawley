@@ -34,6 +34,9 @@
     sync: null,
     auth: null,
     assignments: null,
+    reportingNavigation: null,
+    navigationLoading: false,
+    navigationError: "",
     utilization: null,
     utilizationLoading: false,
     utilizationError: "",
@@ -82,6 +85,13 @@
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return "--";
     return `${date.toLocaleDateString()} ${timeFmt.format(date)}`;
+  }
+
+  function formatShortDate(value) {
+    if (!value) return "--";
+    const date = new Date(`${value}T00:00:00`);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   }
 
   function formatClock(value) {
@@ -267,14 +277,31 @@
     state.loading = true;
     state.error = "";
     state.assignments = null;
+    state.reportingNavigation = null;
+    state.navigationLoading = true;
+    state.navigationError = "";
     state.utilization = null;
     state.utilizationLoading = true;
     state.utilizationError = "";
     render();
 
+    const navigationPromise = fetchJson(`/api/reporting-navigation?date=${encodeURIComponent(requestedDate)}&_=${stamp}`)
+      .then((payload) => ({ payload }))
+      .catch((error) => ({ error }));
     const utilizationPromise = fetchJson(`/api/utilization-report?date=${encodeURIComponent(requestedDate)}&_=${stamp}`)
       .then((payload) => ({ payload }))
       .catch((error) => ({ error }));
+
+    navigationPromise.then((navigationResult) => {
+      if (state.loadToken !== stamp || state.date !== requestedDate) return;
+      if (navigationResult.error) {
+        state.navigationError = navigationResult.error.message || "Could not load reporting navigation.";
+      } else {
+        state.reportingNavigation = navigationResult.payload;
+      }
+      state.navigationLoading = false;
+      render();
+    });
 
     try {
       const [health, sync, auth, assignments] = await Promise.all([
@@ -288,6 +315,9 @@
       state.sync = sync;
       state.auth = auth;
       state.assignments = assignments;
+      if (!state.reportingNavigation && assignments.cycleDays) {
+        state.reportingNavigation = assignments.cycleDays;
+      }
       state.loading = false;
       reconcileSelection();
       updateUrl();
@@ -296,6 +326,7 @@
       if (state.loadToken !== stamp || state.date !== requestedDate) return;
       state.error = error.message || "Could not load reporting view.";
       state.loading = false;
+      state.navigationLoading = false;
       state.utilizationLoading = false;
       render();
       return;
@@ -1197,6 +1228,59 @@
     `;
   }
 
+  function reportingViewUrl(date = state.date) {
+    const url = new URL("/beta.html", window.location.origin);
+    url.searchParams.set("date", date || state.date);
+    return `${url.pathname}${url.search}`;
+  }
+
+  function managerDateUrl(date = state.date) {
+    const url = new URL("/", window.location.origin);
+    if (date) url.searchParams.set("date", date);
+    return `${url.pathname}${url.search}`;
+  }
+
+  function renderReportingNavigation() {
+    const nav = state.reportingNavigation || state.assignments?.cycleDays || {};
+    const cycles = Array.isArray(nav.cycles) ? nav.cycles : [];
+    const days = Array.isArray(nav.days) ? nav.days : [];
+    if (!cycles.length && !days.length && !state.navigationLoading && !state.navigationError) return "";
+
+    const cycleTiles = cycles.map((cycle) => {
+      const date = cycle.selected ? state.date : cycle.primaryDate;
+      return `
+        <a class="cycle-tile${cycle.selected ? " active" : ""}${cycle.status === "No Work" ? " empty" : ""}" href="${escapeHtml(reportingViewUrl(date))}">
+          <span>${escapeHtml(cycle.cycle || "Cycle")}</span>
+          <strong>${escapeHtml(cycle.completeTaskLabel || `${formatNumber(cycle.completedTaskCount)}/${formatNumber(cycle.taskCount)}`)}</strong>
+          <small>${escapeHtml(cycle.snapshotDays ? `${cycle.snapshotDays}/${cycle.dayCount || cycle.snapshotDays} days` : "No snapshots")}</small>
+        </a>
+      `;
+    }).join("");
+
+    const dayTiles = days.map((day) => `
+      <a class="cycle-day${day.date === state.date ? " active" : ""}${day.date === today ? " today" : ""}${day.hasSnapshot ? "" : " empty"}" href="${escapeHtml(reportingViewUrl(day.date))}">
+        <span>${escapeHtml(day.label)}</span>
+        <strong>${escapeHtml(formatShortDate(day.date))}</strong>
+        <small>${escapeHtml(day.completeTaskLabel || "")}</small>
+      </a>
+    `).join("");
+
+    return `
+      <section class="panel report-nav-panel">
+        <div class="panel-header">
+          <div>
+            <h2 class="panel-title">${escapeHtml(nav.cycle || "Cycle")} reporting history</h2>
+            <p class="muted">${state.navigationLoading ? "Loading cycle navigation..." : "Choose a cycle or workday report"}</p>
+          </div>
+          <a class="btn" href="${escapeHtml(managerDateUrl(state.date))}">Manager view</a>
+        </div>
+        ${cycleTiles ? `<div class="cycle-cycle-strip" aria-label="Cycles">${cycleTiles}</div>` : ""}
+        ${dayTiles ? `<div class="cycle-day-strip" aria-label="Cycle days">${dayTiles}</div>` : ""}
+        ${state.navigationError ? `<div class="nav-error">${escapeHtml(state.navigationError)}</div>` : ""}
+      </section>
+    `;
+  }
+
   function renderNotice() {
     return `
       <div class="notice">
@@ -1208,6 +1292,7 @@
 
   function renderDayView() {
     return `
+      ${renderReportingNavigation()}
       ${renderNotice()}
       ${renderStatusStrip()}
       <section class="panel day-panel">
@@ -1233,6 +1318,7 @@
       const reviewOnly = state.phaseView === "review";
       const transitions = transitionsForScope(phase.phaseKey, "", reviewOnly);
       return `
+        ${renderReportingNavigation()}
         ${renderNotice()}
         ${renderPhaseHero(
           phase,
@@ -1262,6 +1348,7 @@
     if (state.phaseView === "tasks") {
       const summary = taskScopeSummary(phase.phaseKey);
       return `
+        ${renderReportingNavigation()}
         ${renderNotice()}
         ${renderPhaseHero(phase, "Task detail", `${phase.phase} tasks`, `${state.date} - all tasks in this phase`)}
         ${renderTaskScopeMetricStrip(summary)}
@@ -1289,6 +1376,7 @@
       }
       const summary = taskScopeSummary(phase.phaseKey, worker.workerKey);
       return `
+        ${renderReportingNavigation()}
         ${renderNotice()}
         ${renderPhaseHero(phase, "Worker task detail", worker.name, `${state.date} - ${phase.phase} - ${formatNumber(summary.completedTaskCount)}/${formatNumber(summary.taskCount)} tasks complete`)}
         ${renderTaskScopeMetricStrip(summary)}
@@ -1311,6 +1399,7 @@
     }
 
     return `
+      ${renderReportingNavigation()}
       ${renderNotice()}
       ${renderPhaseHero(phase)}
       ${renderPhaseMetricStrip(phase)}
@@ -1335,7 +1424,10 @@
     }
 
     if (state.loading && !state.assignments) {
-      return `<div class="empty">Loading Hawley reporting view...</div>`;
+      return `
+        ${renderReportingNavigation()}
+        <div class="empty">Loading Hawley reporting view...</div>
+      `;
     }
 
     return state.selectedPhase ? renderPhaseDetail() : renderDayView();
