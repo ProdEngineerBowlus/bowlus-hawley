@@ -575,7 +575,6 @@ button {
   overflow: hidden;
 }
 
-.cycle-cycle-strip,
 .cycle-day-strip {
   display: flex;
   gap: 8px;
@@ -583,15 +582,62 @@ button {
   scrollbar-width: thin;
 }
 
-.cycle-cycle-strip {
-  padding: 0 18px 10px;
+.cycle-history-header {
+  display: grid;
+  grid-template-columns: minmax(170px, auto) minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.cycle-history-copy {
+  min-width: 0;
+}
+
+.cycle-chip-strip {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.cycle-chip {
+  min-width: 92px;
+  display: grid;
+  gap: 2px;
+  color: var(--ink);
+  text-decoration: none;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(36, 107, 90, 0.1), rgba(40, 95, 143, 0.08)),
+    var(--soft);
+  padding: 8px 10px;
+}
+
+.cycle-chip strong {
+  font-size: 15px;
+  line-height: 1.05;
+}
+
+.cycle-chip span,
+.cycle-chip-empty {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.cycle-chip:hover,
+.cycle-chip:focus-visible {
+  border-color: var(--primary);
+  background: var(--green-soft);
+  outline: none;
 }
 
 .cycle-day-strip {
   padding: 0 18px 16px;
 }
 
-.cycle-tile,
 .cycle-day {
   min-width: 92px;
   display: grid;
@@ -604,14 +650,6 @@ button {
   padding: 9px 10px;
 }
 
-.cycle-tile {
-  min-width: 124px;
-  background:
-    linear-gradient(135deg, rgba(36, 107, 90, 0.1), rgba(40, 95, 143, 0.08)),
-    var(--soft);
-}
-
-.cycle-tile span,
 .cycle-day span {
   color: var(--muted);
   font-size: 11px;
@@ -619,12 +657,10 @@ button {
   text-transform: uppercase;
 }
 
-.cycle-tile strong,
 .cycle-day strong {
   font-size: 15px;
 }
 
-.cycle-tile small,
 .cycle-day small {
   min-height: 13px;
   color: var(--muted);
@@ -632,13 +668,11 @@ button {
   font-weight: 800;
 }
 
-.cycle-tile.active,
 .cycle-day.active {
   border-color: var(--primary);
   background: var(--green-soft);
 }
 
-.cycle-tile.empty,
 .cycle-day.empty {
   color: var(--muted);
   opacity: 0.72;
@@ -655,19 +689,20 @@ button {
     linear-gradient(135deg, rgba(32, 39, 29, 0.98), rgba(16, 20, 15, 0.98));
 }
 
-.admin-shell .cycle-tile,
 .admin-shell .cycle-day {
   background: #1c231a;
   border-color: #344233;
 }
 
-.admin-shell .cycle-tile {
+.admin-shell .cycle-chip {
   background:
     linear-gradient(135deg, rgba(51, 196, 141, 0.11), rgba(115, 199, 242, 0.08)),
     #1c231a;
+  border-color: #344233;
 }
 
-.admin-shell .cycle-tile.active,
+.admin-shell .cycle-chip:hover,
+.admin-shell .cycle-chip:focus-visible,
 .admin-shell .cycle-day.active {
   background: linear-gradient(135deg, rgba(51, 196, 141, 0.22), rgba(115, 199, 242, 0.12));
   border-color: var(--primary);
@@ -2016,6 +2051,10 @@ button {
 @media (max-width: 1050px) {
   .layout,
   .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .cycle-history-header {
     grid-template-columns: 1fr;
   }
 

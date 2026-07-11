@@ -438,7 +438,6 @@
             locked
               ? ""
               : `<a class="btn ghost" href="${escapeAttr(state.project.url)}" target="_blank" rel="noreferrer">${icons.open}<span>Asana project</span></a>
-                 <a class="btn ghost" href="${escapeAttr(lineViewUrl())}">${icons.open}<span>Reporting View</span></a>
                  <button class="btn ghost" type="button" data-action="refresh">${icons.refresh}<span>Reload</span></button>
                  ${
                    worker
@@ -960,14 +959,15 @@
     const cycles = Array.isArray(cycleDays.cycles) ? cycleDays.cycles : [];
     if (!days.length) return "";
 
+    const currentCycle = cycleDays.cycle || "";
     const cycleLinks = cycles
+      .filter((cycle) => cycle.cycle !== currentCycle && Number(cycle.snapshotDays || 0) > 0)
       .map((cycle) => {
-        const date = cycle.selected ? state.date : cycle.primaryDate;
+        const date = cycle.primaryDate || state.date;
         return `
-          <a class="cycle-tile${cycle.selected ? " active" : ""}${cycle.status === "No Work" ? " empty" : ""}" href="${escapeAttr(reportingViewUrl(date))}">
-            <span>${escapeHtml(cycle.cycle || "Cycle")}</span>
-            <strong>${escapeHtml(cycle.completeTaskLabel || `${formatNumber(cycle.completedTaskCount)}/${formatNumber(cycle.taskCount)}`)}</strong>
-            <small>${escapeHtml(cycle.snapshotDays ? `${cycle.snapshotDays}/${cycle.dayCount || cycle.snapshotDays} days` : "No snapshots")}</small>
+          <a class="cycle-chip${cycle.status === "No Work" ? " empty" : ""}" href="${escapeAttr(managerDateUrl(date))}">
+            <strong>${escapeHtml(cycle.cycle || "Cycle")}</strong>
+            <span>${escapeHtml(cycle.snapshotDays ? `${cycle.snapshotDays}/${cycle.dayCount || cycle.snapshotDays} days` : "No snapshots")}</span>
           </a>
         `;
       })
@@ -984,14 +984,16 @@
 
     return `
       <section class="panel cycle-panel">
-        <div class="panel-header dashboard-header">
-          <div>
+        <div class="panel-header dashboard-header cycle-history-header">
+          <div class="cycle-history-copy">
             <h2 class="panel-title">${escapeHtml(cycleDays.cycle || "Cycle")} history</h2>
-            <p class="summary-line">Open any cycle/day in Reporting View</p>
+            <p class="summary-line">Select a cycle, then choose a day</p>
           </div>
-          <a class="btn ghost" href="${escapeAttr(reportingViewUrl(today))}">${icons.open}<span>Today report</span></a>
+          <div class="cycle-chip-strip" aria-label="Other cycles">
+            ${cycleLinks || `<span class="cycle-chip-empty">Previous cycles will appear here</span>`}
+          </div>
+          <a class="btn ghost" href="${escapeAttr(managerDateUrl(today))}">${icons.refresh}<span>Today</span></a>
         </div>
-        ${cycleLinks ? `<div class="cycle-cycle-strip" aria-label="Cycles">${cycleLinks}</div>` : ""}
         <div class="cycle-day-strip" aria-label="Cycle days">
           ${dayLinks}
         </div>
@@ -2117,10 +2119,6 @@
       url.searchParams.set("date", date);
     }
     return `${url.pathname}${url.search}`;
-  }
-
-  function lineViewUrl() {
-    return reportingViewUrl(state.date);
   }
 
   function reportingViewUrl(date = state.date) {

@@ -199,12 +199,13 @@ Task-control safe reporting view:
 http://127.0.0.1:5273/beta.html
 ```
 
-The reporting view is intentionally not a worker control surface. It is available
-from the manager topbar and does not expose Start, Stop, Complete, End Session,
-Refresh tracker, or Adopt tasks. Most of the page uses GET requests against
-existing Hawley APIs. When manager transition reviews are enabled, a selected
-transition gap can be classified with buttons that write only to Hawley's
-`core.transition_reviews` and `core.task_transition_events` review fields.
+The reporting view is intentionally not a worker control surface. It is opened
+from the manager cycle/day history rail after choosing a workday and does not
+expose Start, Stop, Complete, End Session, Refresh tracker, or Adopt tasks. Most
+of the page uses GET requests against existing Hawley APIs. When manager
+transition reviews are enabled, a selected transition gap can be classified with
+buttons that write only to Hawley's `core.transition_reviews` and
+`core.task_transition_events` review fields.
 Use it for diagnostics, phase summaries, freshness checks, transition review,
 and side-by-side report testing without giving the shop another active task
 control page.
