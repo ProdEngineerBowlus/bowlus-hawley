@@ -567,6 +567,9 @@
     const scope = locked ? worker ? worker.name : "Worker" : "Admin";
     const sourceLabel = state.source === "asana" ? "Live Asana" : state.source === "sample" ? "Sample" : state.source === "error" ? "Error" : "Loading";
     const user = state.auth.user;
+    const adminLink = !locked && (!state.auth.active || user?.role === "admin")
+      ? `<a class="btn ghost" href="/admin">${icons.open}<span>Admin</span></a>`
+      : "";
     const accountBadge = state.auth.active && user
       ? `<span class="account-badge">${escapeHtml(user.displayName || user.email || "Signed in")} - ${escapeHtml(user.role || "worker")}</span>
          <button class="btn ghost" type="button" data-action="logout"><span>Logout</span></button>`
@@ -586,6 +589,7 @@
             locked
               ? ""
               : `<a class="btn ghost" href="${escapeAttr(state.project.url)}" target="_blank" rel="noreferrer">${icons.open}<span>Asana project</span></a>
+                 ${adminLink}
                  <button class="btn ghost" type="button" data-action="refresh">${icons.refresh}<span>Reload</span></button>
                  ${
                    worker

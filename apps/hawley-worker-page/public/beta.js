@@ -924,6 +924,9 @@
 
   function renderTopbar() {
     const user = accountAuth().user;
+    const adminLink = !accountAuth().active || user?.role === "admin"
+      ? `<a class="btn" href="/admin">Admin</a>`
+      : "";
     const accountBadge = accountAuth().active && user
       ? `<span class="account-badge">${escapeHtml(user.displayName || user.email || "Signed in")} - ${escapeHtml(user.role || "manager")}</span>
          <button class="btn" type="button" data-action="logout">Logout</button>`
@@ -941,6 +944,7 @@
           <input class="date-control" type="date" value="${escapeHtml(state.date)}" data-action="date" />
           <button class="btn primary" type="button" data-action="reload">Reload</button>
           <a class="btn" href="/">Live app</a>
+          ${adminLink}
           ${accountBadge}
         </div>
       </header>

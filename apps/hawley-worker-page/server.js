@@ -43,6 +43,7 @@ const WORKER_WRITE_IDS = new Set(
     .filter(Boolean)
 );
 const TRANSITION_REVIEWS_ENABLED = booleanEnv("HAWLEY_TRANSITION_REVIEWS_ENABLED", true);
+const ADMIN_PROJECT_CREATE_ENABLED = booleanEnv("HAWLEY_ADMIN_PROJECT_CREATE_ENABLED", false);
 const LIVE_WORKER_SOURCE = "hawley_worker_live_pilot";
 const APP_AUTH_ACTIVE = booleanEnv("HAWLEY_AUTH_ACTIVE", false);
 const APP_AUTH_SEED_ROSTER_ON_START = booleanEnv("HAWLEY_AUTH_SEED_ROSTER_ON_START", true);
@@ -203,7 +204,7 @@ function sendError(res, status, message, details = {}) {
 
 function publicErrorMessage(error) {
   const message = error.message || "";
-  if (/hawley_worker_page_assignments|hawley_cycle_calendar|hawley_reporting_day_summary|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|jsonb_display_text|task_transition_events|time_sessions|transition_category_catalog|app_users|app_sessions|app_auth_events/.test(message)) {
+  if (/hawley_worker_page_assignments|hawley_cycle_calendar|hawley_reporting_day_summary|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|task_templates|production_schedule|airtable_tasks|airtable_production|jsonb_display_text|task_transition_events|time_sessions|transition_category_catalog|app_users|app_sessions|app_auth_events/.test(message)) {
     return {
       status: 503,
       message: "Hawley worker read model is not migrated yet. Run npm run pg:migrate."
@@ -3099,6 +3100,10 @@ function actorIsManager(actor) {
   return Boolean(actor && ["manager", "admin"].includes(actor.role));
 }
 
+function actorIsAdmin(actor) {
+  return Boolean(actor && actor.role === "admin");
+}
+
 function authActorSummary(actor) {
   if (!actor) return null;
   return {
@@ -3352,6 +3357,11 @@ async function requireAuthActor(req) {
 function requireManagerActor(actor) {
   if (!APP_AUTH_ACTIVE) return;
   if (!actorIsManager(actor)) throw actionError("Manager access is required.", 403, { code: "MANAGER_REQUIRED" });
+}
+
+function requireAdminActor(actor) {
+  if (!APP_AUTH_ACTIVE) return;
+  if (!actorIsAdmin(actor)) throw actionError("Admin access is required.", 403, { code: "ADMIN_REQUIRED" });
 }
 
 function requireWorkerAccess(actor, workerKey) {
@@ -5535,8 +5545,290 @@ async function syncStatusPayload() {
   };
 }
 
+function adminCycleNumber(value) {
+  const match = String(value || "").match(/\d{1,3}/);
+  return match ? Number(match[0]) : null;
+}
+
+function adminProjectNameForSchedule(row) {
+  const vin = String(row.vin || "").trim();
+  const cycle = String(row.short_cycle_label || row.cycle_label || "").trim();
+  const phase = String(row.phase_name || row.section_column || "").trim();
+  return [vin ? `VIN ${vin}` : "", phase, cycle].filter(Boolean).join(" - ") || row.schedule_name || "New Hawley project";
+}
+
+function secondsToHours(value) {
+  return round(Number(value || 0) / 3600, 2);
+}
+
+async function adminDashboardPayload() {
+  const [countsResult, cycleResult, runResult, phaseResult] = await Promise.all([
+    pool.query(`
+      select
+        (select count(*)::int from hb.task_templates) as task_template_count,
+        (select count(*)::int from hb.task_templates where coalesce(active, true)) as active_task_template_count,
+        (select count(*)::int from hb.task_templates where estimated_batch_task_time_seconds is null and estimated_task_time_seconds is null) as task_templates_missing_estimates,
+        (select count(*)::int from hb.production_schedule) as production_schedule_count,
+        (select count(distinct cycle_number)::int from hb.production_schedule where cycle_number is not null) as production_cycle_count,
+        (select count(*)::int from hb.production_schedule where existing_rev1_task_instance_links > 0) as schedule_rows_with_rev1_links,
+        (select count(*)::int from hb.rev1_task_instances) as rev1_task_instance_count,
+        (select count(*)::int from hb.worker_daily_task_actuals) as worker_daily_actual_count,
+        (select count(*)::int from hb.work_force where actively_employed) as active_worker_count
+    `),
+    pool.query(`
+      select
+        cycle_number,
+        coalesce(short_cycle_label, cycle_label, 'C' || cycle_number::text) as cycle_label,
+        min(start_date)::text as start_date,
+        max(end_date)::text as end_date,
+        count(*)::int as schedule_rows,
+        count(distinct nullif(vin, ''))::int as vin_count,
+        count(distinct coalesce(phase_record_id, phase_name, section_column))::int as phase_count,
+        coalesce(sum(existing_rev1_task_instance_links), 0)::int as rev1_links
+      from hb.production_schedule
+      where cycle_number is not null
+      group by cycle_number, coalesce(short_cycle_label, cycle_label, 'C' || cycle_number::text)
+      order by cycle_number desc
+      limit 8
+    `),
+    pool.query(`
+      select
+        job_name,
+        status,
+        ended_at::text,
+        records_read,
+        records_written,
+        error_count
+      from sync.run_log
+      where job_name in ('pull_airtable', 'pull_asana', 'pull_daily_tracker', 'pull_worker_daily_actuals')
+      order by ended_at desc nulls last, id desc
+      limit 8
+    `),
+    pool.query(`
+      select
+        coalesce(primary_phase_name, 'Unassigned') as phase_name,
+        count(*)::int as task_count,
+        coalesce(sum(coalesce(estimated_batch_task_time_seconds, estimated_task_time_seconds, 0)), 0)::int as estimated_seconds,
+        count(*) filter (where estimated_batch_task_time_seconds is null and estimated_task_time_seconds is null)::int as missing_estimates
+      from hb.task_templates
+      where coalesce(active, true)
+      group by coalesce(primary_phase_name, 'Unassigned')
+      order by task_count desc, phase_name
+      limit 10
+    `)
+  ]);
+
+  return {
+    ok: true,
+    checkedAt: new Date().toISOString(),
+    projectCreateEnabled: ADMIN_PROJECT_CREATE_ENABLED,
+    counts: countsResult.rows[0] || {},
+    cycles: cycleResult.rows,
+    latestRuns: runResult.rows,
+    taskTemplatePhases: phaseResult.rows.map(row => ({
+      ...row,
+      estimatedHours: secondsToHours(row.estimated_seconds)
+    })),
+    features: [
+      {
+        key: "project-creator",
+        title: "Project Creator",
+        status: ADMIN_PROJECT_CREATE_ENABLED ? "write-ready" : "preview",
+        href: "#project-creator"
+      },
+      {
+        key: "source-health",
+        title: "Source Health",
+        status: "available",
+        href: "#dashboard"
+      },
+      {
+        key: "accounts",
+        title: "Accounts",
+        status: "planned",
+        href: "#dashboard"
+      },
+      {
+        key: "controls",
+        title: "Admin Controls",
+        status: "planned",
+        href: "#dashboard"
+      }
+    ]
+  };
+}
+
+async function selectedAdminCycleNumber(requestedCycle) {
+  const explicit = adminCycleNumber(requestedCycle);
+  if (explicit !== null) return explicit;
+  const result = await pool.query(`
+    select cycle_number
+    from hb.production_schedule
+    where cycle_number is not null
+    order by
+      case when current_date between coalesce(start_date, current_date) and coalesce(end_date, current_date) then 0 else 1 end,
+      start_date desc nulls last,
+      cycle_number desc
+    limit 1
+  `);
+  return result.rows[0]?.cycle_number || null;
+}
+
+async function adminProjectCreatorPayload(url) {
+  const requestedCycle = url.searchParams.get("cycle") || "";
+  const selectedProductionRecordId = url.searchParams.get("productionRecordId") || "";
+  const cycleNumber = await selectedAdminCycleNumber(requestedCycle);
+
+  const [cyclesResult, scheduleResult, phaseResult] = await Promise.all([
+    pool.query(`
+      select
+        cycle_number,
+        coalesce(short_cycle_label, cycle_label, 'C' || cycle_number::text) as cycle_label,
+        min(start_date)::text as start_date,
+        max(end_date)::text as end_date,
+        count(*)::int as schedule_rows,
+        count(distinct nullif(vin, ''))::int as vin_count
+      from hb.production_schedule
+      where cycle_number is not null
+      group by cycle_number, coalesce(short_cycle_label, cycle_label, 'C' || cycle_number::text)
+      order by cycle_number desc
+      limit 40
+    `),
+    pool.query(
+      `
+        select
+          production_record_id,
+          schedule_key,
+          schedule_name,
+          cycle_number,
+          cycle_label,
+          short_cycle_label,
+          phase_record_id,
+          phase_name,
+          section_column,
+          asana_section,
+          vin,
+          vin_values,
+          model_type,
+          start_date::text,
+          end_date::text,
+          days_in_cycle,
+          existing_rev1_task_instance_links
+        from hb.production_schedule
+        where ($1::int is null or cycle_number = $1::int)
+        order by start_date nulls last, nullif(vin, '') nulls last, phase_name nulls last, section_column nulls last
+        limit 300
+      `,
+      [cycleNumber]
+    ),
+    pool.query(`
+      select
+        primary_phase_record_id,
+        coalesce(primary_phase_name, 'Unassigned') as phase_name,
+        count(*)::int as task_count,
+        coalesce(sum(coalesce(estimated_batch_task_time_seconds, estimated_task_time_seconds, 0)), 0)::int as estimated_seconds,
+        count(*) filter (where estimated_batch_task_time_seconds is null and estimated_task_time_seconds is null)::int as missing_estimates
+      from hb.task_templates
+      where coalesce(active, true)
+      group by primary_phase_record_id, coalesce(primary_phase_name, 'Unassigned')
+      order by phase_name
+    `)
+  ]);
+
+  const scheduleRows = scheduleResult.rows;
+  const selectedSchedule =
+    scheduleRows.find(row => row.production_record_id === selectedProductionRecordId) ||
+    scheduleRows[0] ||
+    null;
+
+  let preview = null;
+  if (selectedSchedule) {
+    const taskResult = await pool.query(
+      `
+        select
+          task_record_id,
+          tasks_key,
+          task_name,
+          parent_task_name,
+          task_order,
+          quantity,
+          estimated_task_time_seconds,
+          estimated_batch_task_time_seconds,
+          primary_phase_record_id,
+          primary_phase_name,
+          assigned_worker_names,
+          assignee_email,
+          document_link,
+          attachment_summary
+        from hb.task_templates
+        where coalesce(active, true)
+          and (
+            $1::text is null
+            or primary_phase_record_id = $1::text
+            or $1::text = any(phase_record_ids)
+          )
+        order by task_order nulls last, parent_task_name nulls first, task_name
+        limit 500
+      `,
+      [selectedSchedule.phase_record_id || null]
+    );
+    const tasks = taskResult.rows.map(row => ({
+      ...row,
+      estimatedHours: secondsToHours(row.estimated_batch_task_time_seconds || row.estimated_task_time_seconds)
+    }));
+    const totalSeconds = tasks.reduce(
+      (sum, row) => sum + Number(row.estimated_batch_task_time_seconds || row.estimated_task_time_seconds || 0),
+      0
+    );
+    const missingEstimates = tasks.filter(row => !row.estimated_batch_task_time_seconds && !row.estimated_task_time_seconds).length;
+    preview = {
+      mode: ADMIN_PROJECT_CREATE_ENABLED ? "write-ready" : "preview-only",
+      writeEnabled: ADMIN_PROJECT_CREATE_ENABLED,
+      projectName: adminProjectNameForSchedule(selectedSchedule),
+      schedule: selectedSchedule,
+      taskCount: tasks.length,
+      estimatedHours: secondsToHours(totalSeconds),
+      missingEstimates,
+      tasks
+    };
+  }
+
+  return {
+    ok: true,
+    checkedAt: new Date().toISOString(),
+    projectCreateEnabled: ADMIN_PROJECT_CREATE_ENABLED,
+    selectedCycleNumber: cycleNumber,
+    cycles: cyclesResult.rows,
+    scheduleRows,
+    taskTemplatePhases: phaseResult.rows.map(row => ({
+      ...row,
+      estimatedHours: secondsToHours(row.estimated_seconds)
+    })),
+    preview
+  };
+}
+
+async function handleAdminProjectCreate(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  await parseJsonBody(req);
+
+  if (!ADMIN_PROJECT_CREATE_ENABLED) {
+    throw actionError("Project creation is in preview mode. Enable HAWLEY_ADMIN_PROJECT_CREATE_ENABLED after the Asana write path is reviewed.", 409, {
+      code: "PROJECT_CREATE_PREVIEW_ONLY"
+    });
+  }
+
+  throw actionError("Asana project creation is not implemented in this Hawley admin build yet.", 501, {
+    code: "PROJECT_CREATE_NOT_IMPLEMENTED"
+  });
+}
+
 async function serveStatic(req, res, url) {
-  const requested = url.pathname === "/" ? "index.html" : url.pathname.replace(/^\/+/, "");
+  const requested =
+    url.pathname === "/" ? "index.html" :
+    url.pathname === "/admin" || url.pathname === "/admin/" ? "admin.html" :
+    url.pathname.replace(/^\/+/, "");
   const resolved = path.resolve(staticDir, requested);
   if (!resolved.startsWith(staticDir)) {
     sendError(res, 403, "Forbidden.");
@@ -5590,6 +5882,25 @@ const server = http.createServer(async (req, res) => {
       const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
       requireManagerActor(authActor);
       sendJson(res, 200, await syncStatusPayload());
+      return;
+    }
+
+    if (url.pathname === "/api/admin/dashboard" && req.method === "GET") {
+      const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+      requireAdminActor(authActor);
+      sendJson(res, 200, await adminDashboardPayload());
+      return;
+    }
+
+    if (url.pathname === "/api/admin/project-creator" && req.method === "GET") {
+      const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+      requireAdminActor(authActor);
+      sendJson(res, 200, await adminProjectCreatorPayload(url));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/project-creator/create" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminProjectCreate(req));
       return;
     }
 
