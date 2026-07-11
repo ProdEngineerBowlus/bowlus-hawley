@@ -44,6 +44,7 @@ const WORKER_WRITE_IDS = new Set(
 );
 const TRANSITION_REVIEWS_ENABLED = booleanEnv("HAWLEY_TRANSITION_REVIEWS_ENABLED", true);
 const ADMIN_PROJECT_CREATE_ENABLED = booleanEnv("HAWLEY_ADMIN_PROJECT_CREATE_ENABLED", false);
+const ADMIN_PLH_BASELINE_CYCLE = process.env.HAWLEY_ADMIN_PLH_BASELINE_CYCLE || "C5";
 const LIVE_WORKER_SOURCE = "hawley_worker_live_pilot";
 const APP_AUTH_ACTIVE = booleanEnv("HAWLEY_AUTH_ACTIVE", false);
 const APP_AUTH_SEED_ROSTER_ON_START = booleanEnv("HAWLEY_AUTH_SEED_ROSTER_ON_START", true);
@@ -204,7 +205,7 @@ function sendError(res, status, message, details = {}) {
 
 function publicErrorMessage(error) {
   const message = error.message || "";
-  if (/hawley_worker_page_assignments|hawley_cycle_calendar|hawley_reporting_day_summary|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|task_templates|production_schedule|airtable_tasks|airtable_production|jsonb_display_text|task_transition_events|time_sessions|transition_category_catalog|app_users|app_sessions|app_auth_events/.test(message)) {
+  if (/hawley_worker_page_assignments|hawley_cycle_calendar|hawley_reporting_day_summary|worker_daily_utilization|phase_cycle_load_rev1|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|task_templates|production_schedule|airtable_tasks|airtable_production|jsonb_display_text|task_transition_events|time_sessions|transition_category_catalog|app_users|app_sessions|app_auth_events/.test(message)) {
     return {
       status: 503,
       message: "Hawley worker read model is not migrated yet. Run npm run pg:migrate."
@@ -5561,8 +5562,282 @@ function secondsToHours(value) {
   return round(Number(value || 0) / 3600, 2);
 }
 
+function adminPercentValue(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  return round(Math.abs(number) <= 1 ? number * 100 : number, 1);
+}
+
+function adminCycleStatus(row) {
+  if (!row) {
+    return {
+      label: "",
+      startDate: "",
+      endDate: "",
+      progressPct: null,
+      totalWorkdays: null,
+      elapsedWorkday: null,
+      remainingWorkdays: null,
+      source: "hb.cycles"
+    };
+  }
+
+  const startDate = row.start_date ? String(row.start_date).slice(0, 10) : "";
+  const endDate = row.end_date ? String(row.end_date).slice(0, 10) : "";
+  const holidays = holidayDatesFromField(row.holidays, startDate || endDate);
+  const workdays = cycleWorkdays(startDate, endDate, holidays, row.days_in_cycle);
+  const today = todayIso();
+  const effectiveToday = endDate && today > endDate ? endDate : today;
+  const elapsedWorkday = startDate && effectiveToday >= startDate
+    ? workdays.filter(date => date <= effectiveToday).length
+    : 0;
+  const totalWorkdays = Number(row.days_in_cycle || workdays.length || 0) || null;
+  const progressPct = totalWorkdays
+    ? round(Math.max(0, Math.min(100, (elapsedWorkday / totalWorkdays) * 100)), 1)
+    : adminPercentValue(row.cycle_percent);
+
+  return {
+    label: row.cycle_label || (row.cycle_number ? `C${row.cycle_number}` : ""),
+    cycleNumber: row.cycle_number === null || row.cycle_number === undefined ? null : Number(row.cycle_number),
+    startDate,
+    endDate,
+    progressPct,
+    totalWorkdays,
+    elapsedWorkday: totalWorkdays ? Math.max(0, Math.min(totalWorkdays, elapsedWorkday)) : null,
+    remainingWorkdays: totalWorkdays
+      ? Math.max(0, totalWorkdays - Math.max(1, Math.min(totalWorkdays, elapsedWorkday)) + 1)
+      : null,
+    source: "hb.cycles"
+  };
+}
+
+function adminDebtTier(label, shortLabel, tone) {
+  return {
+    label,
+    shortLabel,
+    tone,
+    totalHours: 0,
+    byPhase: {}
+  };
+}
+
+function addAdminDebtHours(tier, phaseName, hours) {
+  const value = round(Number(hours || 0), 2);
+  if (value <= 0) return;
+  tier.totalHours = round(tier.totalHours + value, 2);
+  tier.byPhase[phaseName] = round((tier.byPhase[phaseName] || 0) + value, 2);
+}
+
+function adminPhasePacingStatus(row, cycleProgressPct) {
+  const remainingHours = Number(row.remainingHours || 0);
+  if (remainingHours <= 0.05) return "Complete";
+  if (cycleProgressPct === null || cycleProgressPct === undefined) return row.status || "No signal";
+  if (Number(row.paceDeltaPct || 0) >= 0) return "On pace";
+  if (Number(row.paceDeltaPct || 0) <= -10) return "Behind pace";
+  return "Watch pace";
+}
+
+async function adminPlhMetricsPayload() {
+  const baselineCycleNumber = cycleNumberFromName(ADMIN_PLH_BASELINE_CYCLE) || 5;
+  const today = todayIso();
+  const [cycleResult, debtResult, dailyResult] = await Promise.all([
+    pool.query(`
+      select
+        cycle_record_id,
+        cycle_number,
+        cycle_label,
+        start_date::text,
+        end_date::text,
+        days_in_cycle,
+        holidays,
+        cycle_percent
+      from hb.cycles
+      where cycle_number is not null
+      order by
+        case when $1::date between coalesce(start_date, $1::date) and coalesce(end_date, $1::date) then 0 else 1 end,
+        start_date desc nulls last,
+        cycle_number desc
+      limit 1
+    `, [today]),
+    pool.query(`
+      select
+        coalesce(nullif(pcl.phase_name, ''), 'Unassigned') as phase_name,
+        coalesce(
+          cycles.cycle_number,
+          nullif(substring(coalesce(pcl.cycle_label, '') from 'C[[:space:]]*([0-9]{1,3})'), '')::int,
+          nullif(substring(coalesce(pcl.cycle_label, '') from '([0-9]{1,3})'), '')::int
+        ) as cycle_number,
+        coalesce(cycles.cycle_label, pcl.cycle_label) as cycle_label,
+        sum(coalesce(pcl.remaining_task_hours, 0))::numeric(12, 2) as remaining_hours,
+        sum(coalesce(pcl.total_load_hours, 0))::numeric(12, 2) as total_load_hours,
+        sum(coalesce(pcl.completed_task_hours, 0))::numeric(12, 2) as completed_hours,
+        max(pcl.status) as status
+      from hb.phase_cycle_load_rev1 pcl
+      left join hb.cycles cycles on cycles.cycle_record_id = pcl.cycle_record_id
+      where coalesce(pcl.remaining_task_hours, 0) > 0
+         or coalesce(pcl.total_load_hours, 0) > 0
+         or coalesce(pcl.completed_task_hours, 0) > 0
+      group by
+        coalesce(nullif(pcl.phase_name, ''), 'Unassigned'),
+        coalesce(
+          cycles.cycle_number,
+          nullif(substring(coalesce(pcl.cycle_label, '') from 'C[[:space:]]*([0-9]{1,3})'), '')::int,
+          nullif(substring(coalesce(pcl.cycle_label, '') from '([0-9]{1,3})'), '')::int
+        ),
+        coalesce(cycles.cycle_label, pcl.cycle_label)
+      order by cycle_number nulls last, phase_name
+    `),
+    pool.query(`
+      select
+        count(*) filter (where productive_task_minutes > 0 or assigned_task_count > 0)::int as worker_count,
+        coalesce(sum(productive_task_minutes), 0)::integer as productive_minutes,
+        coalesce(sum(estimated_minutes), 0)::integer as estimated_minutes,
+        coalesce(sum(assigned_task_count), 0)::integer as assigned_task_count,
+        coalesce(sum(completed_task_count), 0)::integer as completed_task_count,
+        coalesce(sum(review_required_count), 0)::integer as review_required_count
+      from reporting.worker_daily_utilization
+      where work_date = $1::date
+    `, [today])
+  ]);
+
+  const cycleStatus = adminCycleStatus(cycleResult.rows[0] || null);
+  const currentCycleNumber = cycleStatus.cycleNumber;
+  const tiers = {
+    current: adminDebtTier(`${cycleStatus.label || "Current"} Current Work`, cycleStatus.label || "Current", "blue"),
+    carryover: adminDebtTier("Carryover Debt", "Carryover", "warn"),
+    original: adminDebtTier(`C1-${ADMIN_PLH_BASELINE_CYCLE} Original Debt`, `C1-${ADMIN_PLH_BASELINE_CYCLE}`, "risk")
+  };
+  const matrix = new Map();
+  const currentRows = [];
+
+  for (const row of debtResult.rows) {
+    const cycleNumber = row.cycle_number === null || row.cycle_number === undefined ? null : Number(row.cycle_number);
+    if (currentCycleNumber && cycleNumber && cycleNumber > currentCycleNumber) continue;
+    const phaseName = formatPhaseName(row.phase_name) || "Unassigned";
+    const remainingHours = round(row.remaining_hours, 2);
+    const totalLoadHours = round(row.total_load_hours, 2);
+    const completedHours = round(row.completed_hours, 2);
+    let tierKey = "original";
+
+    if (currentCycleNumber && cycleNumber === currentCycleNumber) {
+      tierKey = "current";
+      currentRows.push({
+        phaseName,
+        cycleNumber,
+        cycleLabel: row.cycle_label || cycleStatus.label,
+        remainingHours,
+        totalLoadHours,
+        completedHours,
+        status: row.status || ""
+      });
+    } else if (cycleNumber && cycleNumber > baselineCycleNumber) {
+      tierKey = "carryover";
+    }
+
+    addAdminDebtHours(tiers[tierKey], phaseName, remainingHours);
+
+    const existing = matrix.get(phaseName) || {
+      phaseName,
+      currentHours: 0,
+      carryoverHours: 0,
+      originalDebtHours: 0,
+      totalPressureHours: 0
+    };
+    if (tierKey === "current") existing.currentHours = round(existing.currentHours + remainingHours, 2);
+    if (tierKey === "carryover") existing.carryoverHours = round(existing.carryoverHours + remainingHours, 2);
+    if (tierKey === "original") existing.originalDebtHours = round(existing.originalDebtHours + remainingHours, 2);
+    existing.totalPressureHours = round(existing.currentHours + existing.carryoverHours + existing.originalDebtHours, 2);
+    matrix.set(phaseName, existing);
+  }
+
+  const currentTotalLoadHours = round(currentRows.reduce((sum, row) => sum + Number(row.totalLoadHours || 0), 0), 2);
+  const currentCompletedHours = round(currentRows.reduce((sum, row) => sum + Number(row.completedHours || 0), 0), 2);
+  const currentRemainingHours = round(currentRows.reduce((sum, row) => sum + Number(row.remainingHours || 0), 0), 2);
+  const completionPct = currentTotalLoadHours ? round((currentCompletedHours / currentTotalLoadHours) * 100, 1) : null;
+  const cycleProgressPct = cycleStatus.progressPct;
+  const expectedCompletedHours = cycleProgressPct === null || cycleProgressPct === undefined
+    ? null
+    : round(currentTotalLoadHours * (cycleProgressPct / 100), 2);
+  const paceDeltaHours = expectedCompletedHours === null ? null : round(currentCompletedHours - expectedCompletedHours, 2);
+  const paceDeltaPct = completionPct === null || cycleProgressPct === null || cycleProgressPct === undefined
+    ? null
+    : round(completionPct - cycleProgressPct, 1);
+  const pacingStatus =
+    completionPct === null ? "No cycle load" :
+    paceDeltaPct >= 0 ? "On pace" :
+    paceDeltaPct <= -10 ? "Behind pace" :
+    "Watch pace";
+
+  const phasePacing = currentRows
+    .map(row => {
+      const rowCompletionPct = row.totalLoadHours ? round((row.completedHours / row.totalLoadHours) * 100, 1) : null;
+      const rowExpectedHours = cycleProgressPct === null || cycleProgressPct === undefined
+        ? null
+        : round(row.totalLoadHours * (cycleProgressPct / 100), 2);
+      const rowPaceDeltaHours = rowExpectedHours === null ? null : round(row.completedHours - rowExpectedHours, 2);
+      const rowPaceDeltaPct = rowCompletionPct === null || cycleProgressPct === null || cycleProgressPct === undefined
+        ? null
+        : round(rowCompletionPct - cycleProgressPct, 1);
+      const payload = {
+        ...row,
+        completionPct: rowCompletionPct,
+        cycleProgressPct,
+        expectedCompletedHours: rowExpectedHours,
+        paceDeltaHours: rowPaceDeltaHours,
+        paceDeltaPct: rowPaceDeltaPct
+      };
+      return {
+        ...payload,
+        status: adminPhasePacingStatus(payload, cycleProgressPct)
+      };
+    })
+    .sort((left, right) => Number(left.paceDeltaHours || -9999) - Number(right.paceDeltaHours || -9999));
+
+  const debtMatrix = Array.from(matrix.values())
+    .filter(row => row.totalPressureHours > 0)
+    .sort((left, right) => right.totalPressureHours - left.totalPressureHours);
+  const daily = dailyResult.rows[0] || {};
+
+  return {
+    baselineCycle: ADMIN_PLH_BASELINE_CYCLE,
+    cycleStatus,
+    pacing: {
+      status: pacingStatus,
+      completionPct,
+      cycleProgressPct,
+      paceDeltaPct,
+      paceDeltaHours,
+      currentTotalLoadHours,
+      currentCompletedHours,
+      currentRemainingHours,
+      expectedCompletedHours
+    },
+    recovery: {
+      currentHours: round(tiers.current.totalHours, 2),
+      carryoverHours: round(tiers.carryover.totalHours, 2),
+      originalDebtHours: round(tiers.original.totalHours, 2),
+      totalPressureHours: round(tiers.current.totalHours + tiers.carryover.totalHours + tiers.original.totalHours, 2),
+      totalRecoveryDebtHours: round(tiers.carryover.totalHours + tiers.original.totalHours, 2),
+      tiers
+    },
+    phasePacing,
+    debtMatrix,
+    daily: {
+      date: today,
+      workerCount: Number(daily.worker_count || 0),
+      productiveHours: round(Number(daily.productive_minutes || 0) / 60, 2),
+      estimatedHours: round(Number(daily.estimated_minutes || 0) / 60, 2),
+      assignedTaskCount: Number(daily.assigned_task_count || 0),
+      completedTaskCount: Number(daily.completed_task_count || 0),
+      reviewRequiredCount: Number(daily.review_required_count || 0)
+    },
+    source: "hb.cycles + hb.phase_cycle_load_rev1"
+  };
+}
+
 async function adminDashboardPayload() {
-  const [countsResult, cycleResult, runResult, phaseResult] = await Promise.all([
+  const [countsResult, cycleResult, runResult, phaseResult, plhMetrics] = await Promise.all([
     pool.query(`
       select
         (select count(*)::int from hb.task_templates) as task_template_count,
@@ -5623,6 +5898,7 @@ async function adminDashboardPayload() {
     checkedAt: new Date().toISOString(),
     projectCreateEnabled: ADMIN_PROJECT_CREATE_ENABLED,
     counts: countsResult.rows[0] || {},
+    plh: plhMetrics,
     cycles: cycleResult.rows,
     latestRuns: runResult.rows,
     taskTemplatePhases: phaseResult.rows.map(row => ({

@@ -170,7 +170,6 @@ a {
 
 .admin-main {
   display: grid;
-  grid-template-columns: minmax(210px, 280px) minmax(0, 1fr);
   gap: 22px;
   padding: 24px 28px 36px;
   padding-left: max(28px, env(safe-area-inset-left));
@@ -188,6 +187,15 @@ a {
 .task-list {
   display: grid;
   gap: 12px;
+}
+
+.plh-dashboard-panel,
+.plh-card,
+.debt-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(24, 29, 22, 0.96);
+  box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .panel,
@@ -296,6 +304,124 @@ a {
 .chip.risk {
   color: #ff9a7f;
   background: rgba(240, 106, 70, 0.16);
+}
+
+.pill.blue,
+.chip.blue {
+  color: var(--blue);
+  background: rgba(115, 199, 242, 0.15);
+}
+
+.plh-dashboard-panel {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+  background:
+    linear-gradient(135deg, rgba(36, 48, 38, 0.92), rgba(15, 20, 15, 0.98)),
+    var(--panel);
+}
+
+.plh-header,
+.debt-panel {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.plh-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.35fr) repeat(3, minmax(150px, 0.72fr));
+  gap: 12px;
+}
+
+.plh-card {
+  min-height: 148px;
+  padding: 14px;
+  display: grid;
+  align-content: space-between;
+  gap: 10px;
+  background: rgba(16, 20, 15, 0.5);
+}
+
+.plh-card span,
+.progress-row span,
+.debt-bar-row span {
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 750;
+}
+
+.plh-card strong {
+  font-size: 2rem;
+  line-height: 1;
+}
+
+.plh-card small {
+  color: var(--muted);
+}
+
+.progress-stack,
+.debt-bars {
+  display: grid;
+  gap: 10px;
+}
+
+.progress-row,
+.debt-bar-row {
+  display: grid;
+  gap: 6px;
+}
+
+.progress-row > div:first-child,
+.debt-bar-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.debt-bar-row .progress-track {
+  grid-column: 1 / -1;
+}
+
+.progress-track {
+  height: 9px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.progress-track span {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  border-radius: inherit;
+  background: var(--primary);
+}
+
+.progress-track span.warn {
+  background: var(--warn);
+}
+
+.progress-track span.risk {
+  background: var(--accent);
+}
+
+.progress-track span.blue {
+  background: var(--blue);
+}
+
+.debt-panel {
+  padding: 14px;
+  background: rgba(16, 20, 15, 0.58);
+}
+
+.debt-panel > div:first-child {
+  min-width: 220px;
+}
+
+.debt-bars {
+  flex: 1 1 420px;
 }
 
 .rail-button,
@@ -446,7 +572,7 @@ a {
 }
 
 @media (max-width: 1180px) {
-  .admin-main,
+  .plh-grid,
   .split-grid,
   .creator-grid {
     grid-template-columns: 1fr;
@@ -480,6 +606,11 @@ a {
 
   .admin-main {
     padding: 16px;
+  }
+
+  .plh-header,
+  .debt-panel {
+    flex-direction: column;
   }
 
   .rail,

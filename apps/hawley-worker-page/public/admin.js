@@ -38,6 +38,25 @@
     return `${Number.isFinite(number) ? number.toFixed(number >= 10 ? 1 : 2) : "0"}h`;
   }
 
+  function formatPercent(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? `${number.toFixed(1)}%` : "n/a";
+  }
+
+  function formatSignedHours(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "n/a";
+    const sign = number > 0 ? "+" : "";
+    return `${sign}${number.toFixed(Math.abs(number) >= 10 ? 1 : 2)}h`;
+  }
+
+  function formatSignedPercent(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "n/a";
+    const sign = number > 0 ? "+" : "";
+    return `${sign}${number.toFixed(1)}%`;
+  }
+
   function formatDate(value) {
     if (!value) return "";
     const date = new Date(`${value}T12:00:00`);
@@ -256,54 +275,168 @@
     `;
   }
 
-  function renderRail() {
-    const features = state.dashboard?.features || [];
+  function toneForPacingStatus(status) {
+    const normalized = String(status || "").toLowerCase();
+    if (normalized.includes("behind") || normalized.includes("off")) return "risk";
+    if (normalized.includes("watch") || normalized.includes("risk")) return "warn";
+    return "good";
+  }
+
+  function progressBar(label, value, tone = "good") {
+    const number = Number(value);
+    const width = Number.isFinite(number) ? Math.max(0, Math.min(100, number)) : 0;
     return `
-      <aside class="rail">
-        <button class="rail-button ${state.activeView === "dashboard" ? "active" : ""}" type="button" data-view="dashboard">
-          <strong>Dashboard</strong>
-          <span>System snapshot</span>
-        </button>
-        <button class="rail-button ${state.activeView === "project" ? "active" : ""}" type="button" data-view="project">
-          <strong>Project Creator</strong>
-          <span>${state.dashboard?.projectCreateEnabled ? "Write enabled" : "Preview mode"}</span>
-        </button>
-        ${features.filter(feature => !["project-creator"].includes(feature.key)).map(feature => `
-          <div class="feature-card">
-            <strong>${escapeHtml(feature.title)}</strong>
-            ${pill(feature.status, feature.status === "planned" ? "warn" : "good")}
-            <small>${escapeHtml(feature.key)}</small>
+      <div class="progress-row">
+        <div>
+          <span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(formatPercent(number))}</strong>
+        </div>
+        <div class="progress-track" aria-hidden="true">
+          <span class="${escapeAttr(tone)}" style="width: ${width}%"></span>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderDebtBars(recovery) {
+    const total = Math.max(Number(recovery?.totalPressureHours || 0), 0);
+    const rows = [
+      { label: "Current work", value: recovery?.currentHours, tone: "blue" },
+      { label: "Carryover debt", value: recovery?.carryoverHours, tone: "warn" },
+      { label: "Original debt", value: recovery?.originalDebtHours, tone: "risk" }
+    ];
+    return `
+      <div class="debt-bars">
+        ${rows.map(row => {
+          const value = Math.max(Number(row.value || 0), 0);
+          const width = total ? Math.max(2, Math.min(100, value / total * 100)) : 0;
+          return `
+            <div class="debt-bar-row">
+              <span>${escapeHtml(row.label)}</span>
+              <strong>${escapeHtml(formatHours(value))}</strong>
+              <div class="progress-track" aria-hidden="true">
+                <span class="${escapeAttr(row.tone)}" style="width: ${width}%"></span>
+              </div>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    `;
+  }
+
+  function renderPlhSnapshot(plh) {
+    const cycle = plh?.cycleStatus || {};
+    const pacing = plh?.pacing || {};
+    const recovery = plh?.recovery || {};
+    const daily = plh?.daily || {};
+    const pacingTone = toneForPacingStatus(pacing.status);
+    return `
+      <section class="plh-dashboard-panel">
+        <div class="plh-header">
+          <div>
+            <h3 class="panel-title">Shop Pacing</h3>
+            <p class="muted">${escapeHtml(cycle.label || "Current cycle")} - ${escapeHtml(formatDate(cycle.startDate))} to ${escapeHtml(formatDate(cycle.endDate))}</p>
           </div>
-        `).join("")}
-      </aside>
+          <div class="chip-row">
+            ${pill(pacing.status || "No signal", pacingTone)}
+            ${pill(plh?.source || "Postgres", "blue")}
+          </div>
+        </div>
+        <div class="plh-grid">
+          <article class="plh-card pacing-card">
+            <span>Cycle pacing</span>
+            <strong>${escapeHtml(formatSignedHours(pacing.paceDeltaHours))}</strong>
+            <small>${escapeHtml(formatSignedPercent(pacing.paceDeltaPct))} vs cycle progress</small>
+            <div class="progress-stack">
+              ${progressBar("Complete", pacing.completionPct, pacingTone)}
+              ${progressBar("Cycle", pacing.cycleProgressPct, "blue")}
+            </div>
+          </article>
+          <article class="plh-card">
+            <span>Current load</span>
+            <strong>${escapeHtml(formatHours(pacing.currentTotalLoadHours))}</strong>
+            <small>${escapeHtml(formatHours(pacing.currentCompletedHours))} complete - ${escapeHtml(formatHours(pacing.currentRemainingHours))} remaining</small>
+          </article>
+          <article class="plh-card">
+            <span>Cycle workdays</span>
+            <strong>${escapeHtml(formatNumber(cycle.elapsedWorkday || 0))}/${escapeHtml(formatNumber(cycle.totalWorkdays || 0))}</strong>
+            <small>${escapeHtml(formatNumber(cycle.remainingWorkdays || 0))} remaining</small>
+          </article>
+          <article class="plh-card">
+            <span>Today</span>
+            <strong>${escapeHtml(formatHours(daily.productiveHours))}</strong>
+            <small>${escapeHtml(formatNumber(daily.workerCount))} workers - ${escapeHtml(formatNumber(daily.reviewRequiredCount))} reviews</small>
+          </article>
+        </div>
+        <div class="debt-panel">
+          <div>
+            <h3 class="panel-title">Cycle Debt Hour Breakdown</h3>
+            <p class="muted">${escapeHtml(formatHours(recovery.totalRecoveryDebtHours))} recovery debt - ${escapeHtml(formatHours(recovery.totalPressureHours))} total pressure</p>
+          </div>
+          ${renderDebtBars(recovery)}
+        </div>
+      </section>
     `;
   }
 
   function renderDashboard() {
-    const counts = state.dashboard?.counts || {};
     const latestRuns = state.dashboard?.latestRuns || [];
     const cycles = state.dashboard?.cycles || [];
     const phases = state.dashboard?.taskTemplatePhases || [];
+    const plh = state.dashboard?.plh || {};
+    const phasePacing = plh.phasePacing || [];
+    const debtMatrix = plh.debtMatrix || [];
     return `
       <div class="content-stack">
         <section>
           <h2 class="section-title">Dashboard</h2>
           <p class="muted">Checked ${escapeHtml(new Date(state.dashboard?.checkedAt || Date.now()).toLocaleString())}</p>
         </section>
-        <section class="metric-grid">
-          ${metric("Task templates", formatNumber(counts.active_task_template_count || counts.task_template_count), `${formatNumber(counts.task_templates_missing_estimates)} missing estimates`)}
-          ${metric("Production rows", formatNumber(counts.production_schedule_count), `${formatNumber(counts.production_cycle_count)} cycles`)}
-          ${metric("Rev1 tasks", formatNumber(counts.rev1_task_instance_count), `${formatNumber(counts.schedule_rows_with_rev1_links)} scheduled rows linked`)}
-          ${metric("Workers", formatNumber(counts.active_worker_count), `${formatNumber(counts.worker_daily_actual_count)} actual rows`)}
-        </section>
-        <section class="feature-grid">
-          ${(state.dashboard?.features || []).map(feature => `
-            <article class="feature-card">
-              <strong>${escapeHtml(feature.title)}</strong>
-              ${pill(feature.status, feature.status === "planned" ? "warn" : "good")}
-              <small>${escapeHtml(feature.key)}</small>
-            </article>
-          `).join("")}
+        ${renderPlhSnapshot(plh)}
+        <section class="split-grid">
+          <article class="panel">
+            <div class="panel-header">
+              <h3 class="panel-title">Phase Pacing</h3>
+            </div>
+            <div class="panel-body table-wrap">
+              <table class="table">
+                <thead><tr><th>Phase</th><th>Status</th><th>Complete</th><th>Cycle</th><th>Delta</th><th>Remaining</th></tr></thead>
+                <tbody>
+                  ${phasePacing.map(row => `
+                    <tr>
+                      <td>${escapeHtml(row.phaseName)}</td>
+                      <td>${pill(row.status || "No signal", toneForPacingStatus(row.status))}</td>
+                      <td>${escapeHtml(formatPercent(row.completionPct))}</td>
+                      <td>${escapeHtml(formatPercent(row.cycleProgressPct))}</td>
+                      <td>${escapeHtml(formatSignedHours(row.paceDeltaHours))}</td>
+                      <td>${escapeHtml(formatHours(row.remainingHours))}</td>
+                    </tr>
+                  `).join("") || `<tr><td colspan="6">No current cycle phase pacing rows.</td></tr>`}
+                </tbody>
+              </table>
+            </div>
+          </article>
+          <article class="panel">
+            <div class="panel-header">
+              <h3 class="panel-title">Cycle Debt By Phase</h3>
+            </div>
+            <div class="panel-body table-wrap">
+              <table class="table">
+                <thead><tr><th>Phase</th><th>Current</th><th>Carryover</th><th>Original</th><th>Total</th></tr></thead>
+                <tbody>
+                  ${debtMatrix.map(row => `
+                    <tr>
+                      <td>${escapeHtml(row.phaseName)}</td>
+                      <td>${escapeHtml(formatHours(row.currentHours))}</td>
+                      <td>${escapeHtml(formatHours(row.carryoverHours))}</td>
+                      <td>${escapeHtml(formatHours(row.originalDebtHours))}</td>
+                      <td>${escapeHtml(formatHours(row.totalPressureHours))}</td>
+                    </tr>
+                  `).join("") || `<tr><td colspan="5">No cycle debt rows.</td></tr>`}
+                </tbody>
+              </table>
+            </div>
+          </article>
         </section>
         <section class="split-grid">
           <article class="panel">
@@ -499,7 +632,6 @@
       <div class="admin-shell">
         ${renderTopbar()}
         <main class="admin-main">
-          ${renderRail()}
           ${state.activeView === "project" ? renderProjectCreator() : renderDashboard()}
         </main>
       </div>
