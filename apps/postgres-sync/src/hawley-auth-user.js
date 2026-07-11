@@ -5,17 +5,23 @@ import { getDatabaseConfig } from "./config.js";
 
 const { Client } = pg;
 const scryptAsync = promisify(crypto.scrypt);
+const DEFAULT_PILOT_ADMINS = ["erick t", "jacob r"];
+const DEFAULT_PILOT_MANAGERS = ["cesar z"];
 
 function usage() {
   return `
 Usage:
   npm run pg:hawley-auth-user -- list
+  npm run pg:hawley-auth-user -- setup-pilot-roster [--admin="Erick T"] [--manager="Cesar Z"]
+  npm run pg:hawley-auth-user -- verify-passwords
   npm run pg:hawley-auth-user -- set-password <email> [--active] [--role=worker|manager|admin]
   npm run pg:hawley-auth-user -- set-role <email> <worker|manager|admin>
   npm run pg:hawley-auth-user -- deactivate <email>
 
-Set HAWLEY_AUTH_PASSWORD in the shell before set-password. The password is never
-printed and is stored only as a salted scrypt hash.
+Set HAWLEY_AUTH_PASSWORD in the shell before setup-pilot-roster, verify-passwords,
+or set-password. The password is never printed and is stored only as a salted
+scrypt hash. By default setup-pilot-roster makes Erick T and Jacob R admins,
+Cesar Z a manager, and everyone else a worker.
 `.trim();
 }
 
@@ -24,7 +30,7 @@ function normalizeEmail(value) {
 }
 
 function parseOptions(args) {
-  const options = {};
+  const options = { admins: [], managers: [] };
   const positional = [];
   for (const arg of args) {
     if (arg === "--active") {
@@ -33,6 +39,10 @@ function parseOptions(args) {
       options.active = false;
     } else if (arg.startsWith("--role=")) {
       options.role = arg.slice("--role=".length).trim().toLowerCase();
+    } else if (arg.startsWith("--admin=")) {
+      options.admins.push(arg.slice("--admin=".length).trim());
+    } else if (arg.startsWith("--manager=")) {
+      options.managers.push(arg.slice("--manager=".length).trim());
     } else {
       positional.push(arg);
     }
@@ -62,6 +72,65 @@ async function hashPassword(password) {
   return `scrypt$1$${salt}$${Buffer.from(key).toString("hex")}`;
 }
 
+async function verifyPassword(password, storedHash) {
+  const [scheme, version, salt, keyHex] = String(storedHash || "").split("$");
+  if (scheme !== "scrypt" || version !== "1" || !salt || !keyHex) return false;
+  const expected = Buffer.from(keyHex, "hex");
+  const actual = Buffer.from(await scryptAsync(String(password || ""), salt, expected.length));
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
+
+function normalizeNameMatch(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9@.]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function localPart(value) {
+  return String(value || "").split("@")[0] || "";
+}
+
+function candidateNames(row) {
+  return [
+    row.display_name,
+    row.worker_name,
+    row.workerName,
+    row.email,
+    row.worker_email,
+    row.workerEmail,
+    row.username,
+    localPart(row.email),
+    localPart(row.worker_email || row.workerEmail || row.username)
+  ].filter(Boolean);
+}
+
+function firstLastInitialMatch(spec, candidate) {
+  const specParts = normalizeNameMatch(spec).split(" ").filter(Boolean);
+  const candidateParts = normalizeNameMatch(candidate).split(" ").filter(Boolean);
+  if (specParts.length !== 2 || specParts[1].length !== 1 || candidateParts.length < 2) return false;
+  return candidateParts[0] === specParts[0] && candidateParts[candidateParts.length - 1].startsWith(specParts[1]);
+}
+
+function rosterSpecMatches(spec, row) {
+  const normalizedSpec = normalizeNameMatch(spec);
+  if (!normalizedSpec) return false;
+  return candidateNames(row).some(candidate => {
+    const normalizedCandidate = normalizeNameMatch(candidate);
+    return normalizedCandidate === normalizedSpec
+      || firstLastInitialMatch(normalizedSpec, normalizedCandidate)
+      || (normalizedSpec.includes("@") && normalizeEmail(candidate) === normalizeEmail(spec));
+  });
+}
+
+function roleForRosterRow(row, adminSpecs, managerSpecs) {
+  if (adminSpecs.some(spec => rosterSpecMatches(spec, row))) return "admin";
+  if (managerSpecs.some(spec => rosterSpecMatches(spec, row))) return "manager";
+  return "worker";
+}
+
 async function findWorker(client, email) {
   try {
     const result = await client.query(
@@ -77,6 +146,122 @@ async function findWorker(client, email) {
   } catch {
     return null;
   }
+}
+
+async function activeWorkForceRows(client) {
+  const result = await client.query(
+    `
+      select
+        lower(nullif(worker_email, '')) as username,
+        worker_name as display_name,
+        lower(nullif(worker_email, '')) as email,
+        'asana-' || trim(both '-' from regexp_replace(
+          case
+            when lower(nullif(worker_email, '')) like 'asana+%' then substring(lower(nullif(worker_email, '')) from 7)
+            else lower(nullif(worker_email, ''))
+          end,
+          '[^a-z0-9]+',
+          '-',
+          'g'
+        )) as worker_key,
+        worker_name,
+        lower(nullif(worker_email, '')) as worker_email,
+        source_synced_at
+      from (
+        select distinct on (lower(nullif(worker_email, ''))) *
+        from hb.work_force
+        where actively_employed
+          and nullif(worker_email, '') is not null
+        order by lower(nullif(worker_email, '')), source_synced_at desc nulls last, worker_name
+      ) workforce
+      order by worker_name, worker_email
+    `
+  );
+  return result.rows;
+}
+
+async function existingAuthRows(client) {
+  try {
+    const result = await client.query(
+      `
+        select
+          username,
+          display_name,
+          email,
+          worker_key,
+          worker_name,
+          worker_email,
+          role,
+          active,
+          password_hash,
+          temporary_password,
+          last_login_at,
+          source_synced_at
+        from core.app_users
+      `
+    );
+    return result.rows;
+  } catch {
+    return [];
+  }
+}
+
+function mergeRosterRows(workForceRows, authRows) {
+  const byEmail = new Map();
+  for (const row of authRows) {
+    const email = normalizeEmail(row.email || row.worker_email || row.username);
+    if (!email) continue;
+    byEmail.set(email, {
+      username: email,
+      display_name: row.display_name || row.worker_name || email,
+      email,
+      worker_key: row.worker_key || workerKeyFromEmail(email, row.display_name || row.worker_name || email),
+      worker_name: row.worker_name || row.display_name || email,
+      worker_email: normalizeEmail(row.worker_email || email),
+      source_synced_at: row.source_synced_at || null
+    });
+  }
+
+  for (const row of workForceRows) {
+    const email = normalizeEmail(row.email || row.worker_email || row.username);
+    if (!email) continue;
+    byEmail.set(email, {
+      username: email,
+      display_name: row.display_name || row.worker_name || email,
+      email,
+      worker_key: row.worker_key || workerKeyFromEmail(email, row.display_name || row.worker_name || email),
+      worker_name: row.worker_name || row.display_name || email,
+      worker_email: normalizeEmail(row.worker_email || email),
+      source_synced_at: row.source_synced_at || null
+    });
+  }
+
+  return [...byEmail.values()].sort((left, right) =>
+    String(left.display_name || left.email).localeCompare(String(right.display_name || right.email))
+  );
+}
+
+function assertRosterSpecsMatched(rows, adminSpecs, managerSpecs) {
+  const allSpecs = [
+    ...adminSpecs.map(spec => ({ role: "admin", spec })),
+    ...managerSpecs.map(spec => ({ role: "manager", spec }))
+  ];
+  const unmatched = allSpecs.filter(({ spec }) => !rows.some(row => rosterSpecMatches(spec, row)));
+  if (unmatched.length) {
+    const details = unmatched.map(item => `${item.role}:${item.spec}`).join(", ");
+    throw new Error(`Could not match these requested pilot roles to roster emails: ${details}`);
+  }
+}
+
+async function rosterUserRows(client) {
+  const result = await client.query(
+    `
+      select username, display_name, email, role, active, worker_key, worker_name, worker_email, temporary_password, last_login_at, password_hash
+      from core.app_users
+      order by active desc, role desc, display_name nulls last, username
+    `
+  );
+  return result.rows;
 }
 
 function userSummary(row) {
@@ -120,9 +305,120 @@ async function listUsers(client) {
   console.table(result.rows.map(userSummary));
 }
 
-async function setPassword(client, email, options) {
+function passwordRequired(command) {
   const password = process.env.HAWLEY_AUTH_PASSWORD;
-  if (!password) throw new Error("Set HAWLEY_AUTH_PASSWORD before running set-password.");
+  if (!password) throw new Error(`Set HAWLEY_AUTH_PASSWORD before running ${command}.`);
+  return password;
+}
+
+function pilotRosterSummary(row, passwordVerified = null) {
+  return {
+    name: row.display_name || row.worker_name || "",
+    email: row.email || row.worker_email || row.username || "",
+    role: row.role,
+    active: Boolean(row.active),
+    temporaryPassword: Boolean(row.temporary_password),
+    passwordVerified: passwordVerified === null ? "" : Boolean(passwordVerified),
+    lastLoginAt: row.last_login_at || ""
+  };
+}
+
+async function setupPilotRoster(client, options) {
+  const password = passwordRequired("setup-pilot-roster");
+  const adminSpecs = options.admins.length ? options.admins : DEFAULT_PILOT_ADMINS;
+  const managerSpecs = options.managers.length ? options.managers : DEFAULT_PILOT_MANAGERS;
+  const rosterRows = mergeRosterRows(await activeWorkForceRows(client), await existingAuthRows(client));
+  if (!rosterRows.length) throw new Error("No active workforce rows with email addresses were found.");
+  assertRosterSpecsMatched(rosterRows, adminSpecs, managerSpecs);
+
+  await client.query("begin");
+  try {
+    for (const row of rosterRows) {
+      const email = normalizeEmail(row.email || row.worker_email || row.username);
+      const role = roleForRosterRow(row, adminSpecs, managerSpecs);
+      const passwordHash = await hashPassword(password);
+      await client.query(
+        `
+          insert into core.app_users (
+            username,
+            display_name,
+            email,
+            worker_key,
+            worker_name,
+            worker_email,
+            role,
+            active,
+            password_hash,
+            password_set_at,
+            temporary_password,
+            source_system,
+            source_synced_at,
+            updated_at
+          )
+          values ($1, $2, $1, $3, $4, $5, $6, true, $7, now(), true, 'hawley_auth_admin_cli', $8, now())
+          on conflict (username) do update set
+            display_name = excluded.display_name,
+            email = excluded.email,
+            worker_key = excluded.worker_key,
+            worker_name = excluded.worker_name,
+            worker_email = excluded.worker_email,
+            role = excluded.role,
+            active = true,
+            password_hash = excluded.password_hash,
+            password_set_at = now(),
+            temporary_password = true,
+            source_system = excluded.source_system,
+            source_synced_at = excluded.source_synced_at,
+            updated_at = now()
+        `,
+        [
+          email,
+          row.display_name || row.worker_name || email,
+          row.worker_key || workerKeyFromEmail(email, row.display_name || row.worker_name || email),
+          row.worker_name || row.display_name || email,
+          normalizeEmail(row.worker_email || email),
+          role,
+          passwordHash,
+          row.source_synced_at || null
+        ]
+      );
+      await recordAdminEvent(client, "admin_setup_pilot_roster_user", email, { role });
+    }
+    await recordAdminEvent(client, "admin_setup_pilot_roster", "bulk", {
+      users: rosterRows.length,
+      admins: adminSpecs,
+      managers: managerSpecs
+    });
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  }
+
+  const users = await rosterUserRows(client);
+  const summaries = [];
+  for (const row of users) {
+    summaries.push(pilotRosterSummary(row, await verifyPassword(password, row.password_hash)));
+  }
+  console.table(summaries);
+}
+
+async function verifyRosterPasswords(client) {
+  const password = passwordRequired("verify-passwords");
+  const users = await rosterUserRows(client);
+  const summaries = [];
+  for (const row of users) {
+    summaries.push(pilotRosterSummary(row, await verifyPassword(password, row.password_hash)));
+  }
+  console.table(summaries);
+  const failed = summaries.filter(row => row.active && !row.passwordVerified);
+  if (failed.length) {
+    throw new Error(`${failed.length} active users did not verify against HAWLEY_AUTH_PASSWORD.`);
+  }
+}
+
+async function setPassword(client, email, options) {
+  const password = passwordRequired("set-password");
   const role = assertRole(options.role || "worker");
   const active = options.active === undefined ? false : Boolean(options.active);
   const worker = await findWorker(client, email);
@@ -231,6 +527,10 @@ async function main() {
   try {
     if (command === "list") {
       await listUsers(client);
+    } else if (command === "setup-pilot-roster") {
+      await setupPilotRoster(client, options);
+    } else if (command === "verify-passwords") {
+      await verifyRosterPasswords(client);
     } else if (command === "set-password") {
       const email = normalizeEmail(positional[0]);
       if (!email) throw new Error("set-password requires an email.");
