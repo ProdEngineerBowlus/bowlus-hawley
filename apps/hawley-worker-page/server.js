@@ -92,6 +92,16 @@ const scheduleCorrectionState = {
   lastSamples: []
 };
 
+const authRuntimeState = {
+  lastLoginAt: "",
+  lastLoginStep: "",
+  lastLoginError: "",
+  lastLoginStatus: "",
+  lastSessionCheckAt: "",
+  lastSessionCheckStep: "",
+  lastSessionCheckError: ""
+};
+
 const asanaEventWatcherState = {
   enabled: false,
   requested: false,
@@ -2974,7 +2984,8 @@ function appAuthBaseStatus(user = null) {
     rosterSeedOnStart: APP_AUTH_SEED_ROSTER_ON_START,
     bootstrapEnabled: APP_AUTH_BOOTSTRAP_ENABLED,
     managerEmailsConfigured: APP_AUTH_MANAGER_EMAILS.size,
-    adminEmailsConfigured: APP_AUTH_ADMIN_EMAILS.size
+    adminEmailsConfigured: APP_AUTH_ADMIN_EMAILS.size,
+    runtime: { ...authRuntimeState }
   };
 }
 
@@ -3094,6 +3105,10 @@ async function recordAuthEvent(client, eventType, details = {}) {
       JSON.stringify(details.payload || {})
     ]
   );
+}
+
+async function prepareAuthClient(client) {
+  await client.query("set statement_timeout = 5000");
 }
 
 async function seedInactiveAuthUsersFromWorkForce() {
@@ -3243,8 +3258,13 @@ async function authActorFromRequest(req) {
   const token = parseCookies(req)[APP_AUTH_COOKIE_NAME];
   if (!token) return null;
   const tokenHash = sessionTokenHash(token);
+  authRuntimeState.lastSessionCheckAt = new Date().toISOString();
+  authRuntimeState.lastSessionCheckStep = "connect";
+  authRuntimeState.lastSessionCheckError = "";
   const client = await pool.connect();
   try {
+    await prepareAuthClient(client);
+    authRuntimeState.lastSessionCheckStep = "select_session";
     const result = await client.query(
       `
         select
@@ -3260,11 +3280,16 @@ async function authActorFromRequest(req) {
       [tokenHash]
     );
     if (!result.rows[0]) return null;
+    authRuntimeState.lastSessionCheckStep = "touch_session";
     await client.query(
       "update core.app_sessions set last_seen_at = now() where session_token_hash = $1",
       [tokenHash]
     );
+    authRuntimeState.lastSessionCheckStep = "ok";
     return authUserPayload(result.rows[0]);
+  } catch (error) {
+    authRuntimeState.lastSessionCheckError = error.message || String(error);
+    throw error;
   } finally {
     client.release();
   }
@@ -5165,8 +5190,14 @@ async function handleAuthLogin(req, res) {
   const body = await readJsonBody(req);
   const username = normalizeEmail(body.username || body.email);
   const password = String(body.password || "");
+  authRuntimeState.lastLoginAt = new Date().toISOString();
+  authRuntimeState.lastLoginStep = "connect";
+  authRuntimeState.lastLoginError = "";
+  authRuntimeState.lastLoginStatus = "";
   const client = await pool.connect();
   try {
+    await prepareAuthClient(client);
+    authRuntimeState.lastLoginStep = "select_user";
     const result = await client.query(
       `
         select *
@@ -5186,17 +5217,21 @@ async function handleAuthLogin(req, res) {
     };
 
     if (!row || !row.active || !row.password_hash || (row.locked_until && new Date(row.locked_until) > new Date())) {
+      authRuntimeState.lastLoginStep = "record_rejected_login";
       await recordAuthEvent(client, "login", {
         ...requestDetails,
         user,
         success: false,
         reason: !row ? "not_found" : !row.active ? "inactive" : !row.password_hash ? "password_not_set" : "locked"
       });
+      authRuntimeState.lastLoginStatus = "rejected";
       throw actionError(genericReason, 401, { code: "LOGIN_FAILED" });
     }
 
+    authRuntimeState.lastLoginStep = "verify_password";
     const validPassword = await verifyPassword(password, row.password_hash);
     if (!validPassword) {
+      authRuntimeState.lastLoginStep = "update_bad_password";
       await client.query(
         `
           update core.app_users
@@ -5208,15 +5243,18 @@ async function handleAuthLogin(req, res) {
         `,
         [row.app_user_id]
       );
+      authRuntimeState.lastLoginStep = "record_bad_password";
       await recordAuthEvent(client, "login", {
         ...requestDetails,
         user,
         success: false,
         reason: "bad_password"
       });
+      authRuntimeState.lastLoginStatus = "rejected";
       throw actionError(genericReason, 401, { code: "LOGIN_FAILED" });
     }
 
+    authRuntimeState.lastLoginStep = "create_session";
     const token = crypto.randomBytes(32).toString("base64url");
     const tokenHash = sessionTokenHash(token);
     const ttlSeconds = authSessionTtlSeconds();
@@ -5234,6 +5272,7 @@ async function handleAuthLogin(req, res) {
       `,
       [tokenHash, row.app_user_id, expiresAt, requestIp(req), String(req.headers["user-agent"] || "")]
     );
+    authRuntimeState.lastLoginStep = "update_user_login";
     await client.query(
       `
         update core.app_users
@@ -5246,6 +5285,7 @@ async function handleAuthLogin(req, res) {
       `,
       [row.app_user_id]
     );
+    authRuntimeState.lastLoginStep = "record_success";
     await recordAuthEvent(client, "login", {
       ...requestDetails,
       user,
@@ -5253,6 +5293,8 @@ async function handleAuthLogin(req, res) {
       reason: "ok"
     });
 
+    authRuntimeState.lastLoginStep = "ok";
+    authRuntimeState.lastLoginStatus = "success";
     sendJson(res, 200, {
       ok: true,
       accountAuth: appAuthBaseStatus(user),
@@ -5261,6 +5303,9 @@ async function handleAuthLogin(req, res) {
     }, {
       "Set-Cookie": cookieHeader(APP_AUTH_COOKIE_NAME, token, { maxAge: ttlSeconds })
     });
+  } catch (error) {
+    authRuntimeState.lastLoginError = error.message || String(error);
+    throw error;
   } finally {
     client.release();
   }
@@ -5271,6 +5316,7 @@ async function handleAuthLogout(req, res) {
   if (APP_AUTH_ACTIVE && token) {
     const client = await pool.connect();
     try {
+      await prepareAuthClient(client);
       await client.query(
         "update core.app_sessions set revoked_at = now() where session_token_hash = $1 and revoked_at is null",
         [sessionTokenHash(token)]
