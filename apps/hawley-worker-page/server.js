@@ -57,11 +57,27 @@ const SHOP_WORK_WINDOWS = Object.freeze([
 const SHOP_DAILY_AVAILABLE_MINUTES = 460;
 const SHOP_DAILY_AVAILABLE_HOURS = SHOP_DAILY_AVAILABLE_MINUTES / 60;
 const SHOP_SCHEDULE_CORRECTION_SOURCE = "7:00-15:30 America/Los_Angeles minus 09:00-09:10, 11:00-11:30, 13:30-13:40";
+const OVER_CAPACITY_FLAG = "over_daily_capacity";
 
 const pool = new Pool(getDatabaseConfig());
 const writePool = new Pool(getDatabaseConfig({ useSyncUrl: true }));
 const migrationsDir = path.join(repoRoot, "db", "migrations");
 const viewsDir = path.join(repoRoot, "db", "views");
+
+const scheduleCorrectionState = {
+  enabled: true,
+  lastDate: "",
+  lastStartedAt: "",
+  lastFinishedAt: "",
+  lastCandidateRows: 0,
+  lastCandidateSessions: 0,
+  lastCorrectedRows: 0,
+  lastCorrectedSessions: 0,
+  lastSkippedRows: 0,
+  lastError: "",
+  lastReason: "",
+  lastSamples: []
+};
 
 const asanaEventWatcherState = {
   enabled: false,
@@ -239,6 +255,10 @@ function shouldStartNightlyRefreshScheduler() {
 
 function syncDatabaseConfigured() {
   return Boolean(process.env.HAWLEY_SYNC_DATABASE_URL || process.env.HAWLEY_MIGRATION_DATABASE_URL);
+}
+
+function scheduleCorrectionStatus() {
+  return { ...scheduleCorrectionState, lastSamples: [...scheduleCorrectionState.lastSamples] };
 }
 
 function asanaEventWatcherStatus() {
@@ -1328,6 +1348,7 @@ function buildManagerSignals(workers) {
   ), 0);
   const actualTimeLoggedMinutes = actualTimeCompletedMinutes + actualTimeWipMinutes;
   const targetMinutes = workersWithWork.length * SHOP_DAILY_AVAILABLE_MINUTES;
+  const dataQualityFlags = dataQualityFlagsForWorkers(workerList);
 
   return {
     workerCount: workerList.length,
@@ -1347,6 +1368,9 @@ function buildManagerSignals(workers) {
     targetMinutes,
     targetHours: round(targetMinutes / 60),
     pacingDeltaMinutes: actualTimeLoggedMinutes - targetMinutes,
+    dataQualityFlags,
+    overCapacityCount: dataQualityFlags.length,
+    overCapacityWorkers: dataQualityFlags,
     outlierCount: 0,
     outliers: [],
     totalWorkers: workerList.length
@@ -2550,6 +2574,8 @@ async function dailyAssignmentsPayload(url) {
     managerLineOverview.cycle = cycleDayPayload.cycle;
   }
 
+  const dataQualityFlags = dataQualityFlagsForWorkers(workers);
+
   return {
     ok: true,
     source: "hawley-brain",
@@ -2564,6 +2590,11 @@ async function dailyAssignmentsPayload(url) {
     },
     lineOverview: managerLineOverview,
     managerSignals: employee ? null : buildManagerSignals(workers),
+    dataQuality: {
+      maxProductiveMinutes: SHOP_DAILY_AVAILABLE_MINUTES,
+      overCapacityCount: dataQualityFlags.length,
+      flags: dataQualityFlags
+    },
     cycleDays: cycleDayPayload,
     latestTrackerDate: useTrackerSnapshot ? latestTrackerSnapshotDate || latestDate : latestDate,
     workers,
@@ -3311,6 +3342,7 @@ function scheduleCorrectionForActualRow(row, workDate) {
   const effectiveStopAt = effectiveScheduledStopDate(rawStopAt, workDate) || rawStopAt;
   return {
     rawMinutes,
+    scheduledMinutes,
     correctedMinutes,
     rawStopAt: rawStopAt.toISOString(),
     effectiveStopAt: effectiveStopAt.toISOString(),
@@ -3333,6 +3365,7 @@ function scheduleCorrectionForSession(row, workDate) {
   const effectiveStopAt = effectiveScheduledStopDate(stoppedAt, workDate) || stoppedAt;
   return {
     rawMinutes,
+    scheduledMinutes,
     correctedMinutes,
     rawStopAt: stoppedAt.toISOString(),
     effectiveStopAt: effectiveStopAt.toISOString()
@@ -3340,7 +3373,28 @@ function scheduleCorrectionForSession(row, workDate) {
 }
 
 async function enforceScheduledActualsForDate(date) {
-  if (!isIsoDate(date) || !syncDatabaseConfigured()) return { actualRows: 0, sessions: 0 };
+  scheduleCorrectionState.lastDate = date;
+  scheduleCorrectionState.lastStartedAt = new Date().toISOString();
+  scheduleCorrectionState.lastFinishedAt = "";
+  scheduleCorrectionState.lastCandidateRows = 0;
+  scheduleCorrectionState.lastCandidateSessions = 0;
+  scheduleCorrectionState.lastCorrectedRows = 0;
+  scheduleCorrectionState.lastCorrectedSessions = 0;
+  scheduleCorrectionState.lastSkippedRows = 0;
+  scheduleCorrectionState.lastError = "";
+  scheduleCorrectionState.lastReason = "";
+  scheduleCorrectionState.lastSamples = [];
+
+  if (!isIsoDate(date)) {
+    scheduleCorrectionState.lastReason = "invalid_date";
+    scheduleCorrectionState.lastFinishedAt = new Date().toISOString();
+    return { actualRows: 0, sessions: 0 };
+  }
+  if (!syncDatabaseConfigured()) {
+    scheduleCorrectionState.lastReason = "missing_sync_database_url";
+    scheduleCorrectionState.lastFinishedAt = new Date().toISOString();
+    return { actualRows: 0, sessions: 0 };
+  }
 
   const client = await writePool.connect();
   const counts = { actualRows: 0, sessions: 0 };
@@ -3370,10 +3424,25 @@ async function enforceScheduledActualsForDate(date) {
       `,
       [date, LIVE_WORKER_SOURCE]
     );
+    scheduleCorrectionState.lastCandidateRows = actualRows.rowCount;
 
     for (const row of actualRows.rows) {
       const correction = scheduleCorrectionForActualRow(row, date);
-      if (!correction) continue;
+      if (!correction) {
+        scheduleCorrectionState.lastSkippedRows += 1;
+        continue;
+      }
+      if (scheduleCorrectionState.lastSamples.length < 8) {
+        scheduleCorrectionState.lastSamples.push({
+          type: "actual",
+          id: String(row.worker_daily_actual_id || ""),
+          rawMinutes: correction.rawMinutes,
+          scheduledMinutes: correction.scheduledMinutes,
+          correctedMinutes: correction.correctedMinutes,
+          rawStopAt: correction.rawStopAt,
+          effectiveStopAt: correction.effectiveStopAt
+        });
+      }
 
       await client.query(
         `
@@ -3433,10 +3502,22 @@ async function enforceScheduledActualsForDate(date) {
       `,
       [date]
     );
+    scheduleCorrectionState.lastCandidateSessions = sessions.rowCount;
 
     for (const row of sessions.rows) {
       const correction = scheduleCorrectionForSession(row, date);
       if (!correction) continue;
+      if (scheduleCorrectionState.lastSamples.length < 8) {
+        scheduleCorrectionState.lastSamples.push({
+          type: "session",
+          id: String(row.time_session_id || ""),
+          rawMinutes: correction.rawMinutes,
+          scheduledMinutes: correction.scheduledMinutes,
+          correctedMinutes: correction.correctedMinutes,
+          rawStopAt: correction.rawStopAt,
+          effectiveStopAt: correction.effectiveStopAt
+        });
+      }
 
       await client.query(
         `
@@ -3521,10 +3602,16 @@ async function enforceScheduledActualsForDate(date) {
     }
 
     await client.query("commit");
+    scheduleCorrectionState.lastCorrectedRows = counts.actualRows;
+    scheduleCorrectionState.lastCorrectedSessions = counts.sessions;
+    scheduleCorrectionState.lastReason = counts.actualRows || counts.sessions ? "corrected" : "no_corrections_needed";
   } catch (error) {
     await client.query("rollback").catch(() => {});
+    scheduleCorrectionState.lastError = error.message;
+    scheduleCorrectionState.lastReason = "error";
     console.warn(`Hawley schedule correction skipped: ${error.message}`);
   } finally {
+    scheduleCorrectionState.lastFinishedAt = new Date().toISOString();
     client.release();
   }
 
@@ -4036,6 +4123,30 @@ function numberField(row, key) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function workerCapacityFlagPayload(worker) {
+  const productiveMinutes = Number(worker.productiveTaskMinutes ?? worker.actualTimeLoggedMinutes ?? worker.actualTimeTotalMinutes ?? 0);
+  const productiveUtilizationPercent = Number(worker.productiveUtilizationPercent || (
+    SHOP_DAILY_AVAILABLE_MINUTES ? productiveMinutes / SHOP_DAILY_AVAILABLE_MINUTES * 100 : 0
+  ));
+  if (productiveMinutes <= SHOP_DAILY_AVAILABLE_MINUTES && productiveUtilizationPercent <= 100) return null;
+  return {
+    code: OVER_CAPACITY_FLAG,
+    severity: "red",
+    workerKey: worker.workerKey || worker.id || "",
+    workerName: worker.workerName || worker.name || "",
+    productiveTaskMinutes: productiveMinutes,
+    productiveTaskHours: round(productiveMinutes / 60, 2),
+    maxProductiveMinutes: SHOP_DAILY_AVAILABLE_MINUTES,
+    maxProductiveHours: SHOP_DAILY_AVAILABLE_HOURS,
+    productiveUtilizationPercent: round(productiveUtilizationPercent, 2),
+    message: "Daily productive time exceeds the 7h40m shop capacity."
+  };
+}
+
+function dataQualityFlagsForWorkers(workers) {
+  return (workers || []).map(workerCapacityFlagPayload).filter(Boolean);
+}
+
 function textKey(value) {
   return String(value || "")
     .trim()
@@ -4272,30 +4383,40 @@ async function utilizationReportPayload(url) {
     ));
   const workerDaily = workerDailyResult.rows
     .filter(row => workerMatches(row, workerFilter))
-    .map(row => ({
-      workDate: row.work_date ? String(row.work_date).slice(0, 10) : "",
-      workerKey: row.worker_key || "",
-      workerName: row.worker_name || "",
-      workerEmail: row.worker_email || "",
-      workerSlug: slugifyWorker({ workerEmail: row.worker_email, workerName: row.worker_name }),
-      scheduledHours: numberField(row, "scheduled_hours"),
-      productiveTaskMinutes: numberField(row, "productive_task_minutes"),
-      estimatedMinutes: numberField(row, "estimated_minutes"),
-      totalTransitionMinutes: numberField(row, "total_transition_minutes"),
-      excessTransitionMinutes: numberField(row, "excess_transition_minutes"),
-      unaccountedMinutes: numberField(row, "unaccounted_minutes"),
-      productiveUtilizationPercent: numberField(row, "productive_utilization_percent"),
-      accountedUtilizationPercent: numberField(row, "accounted_utilization_percent"),
-      taskEfficiencyPercent: numberField(row, "task_efficiency_percent"),
-      assignedTaskCount: numberField(row, "assigned_task_count"),
-      completedTaskCount: numberField(row, "completed_task_count"),
-      taskCountStarted: numberField(row, "task_count_started"),
-      taskSessionCount: numberField(row, "task_session_count"),
-      transitionCount: numberField(row, "transition_count"),
-      reviewRequiredCount: numberField(row, "review_required_count"),
-      unreviewedTransitionCount: numberField(row, "unreviewed_transition_count")
-    }));
+    .map(row => {
+      const productiveTaskMinutes = numberField(row, "productive_task_minutes");
+      const totalTransitionMinutes = numberField(row, "total_transition_minutes");
+      const worker = {
+        workDate: row.work_date ? String(row.work_date).slice(0, 10) : "",
+        workerKey: row.worker_key || "",
+        workerName: row.worker_name || "",
+        workerEmail: row.worker_email || "",
+        workerSlug: slugifyWorker({ workerEmail: row.worker_email, workerName: row.worker_name }),
+        scheduledHours: SHOP_DAILY_AVAILABLE_HOURS,
+        productiveTaskMinutes,
+        estimatedMinutes: numberField(row, "estimated_minutes"),
+        totalTransitionMinutes,
+        excessTransitionMinutes: numberField(row, "excess_transition_minutes"),
+        unaccountedMinutes: numberField(row, "unaccounted_minutes"),
+        productiveUtilizationPercent: round(productiveTaskMinutes / SHOP_DAILY_AVAILABLE_MINUTES * 100, 2),
+        accountedUtilizationPercent: round((productiveTaskMinutes + totalTransitionMinutes) / SHOP_DAILY_AVAILABLE_MINUTES * 100, 2),
+        taskEfficiencyPercent: numberField(row, "task_efficiency_percent"),
+        assignedTaskCount: numberField(row, "assigned_task_count"),
+        completedTaskCount: numberField(row, "completed_task_count"),
+        taskCountStarted: numberField(row, "task_count_started"),
+        taskSessionCount: numberField(row, "task_session_count"),
+        transitionCount: numberField(row, "transition_count"),
+        reviewRequiredCount: numberField(row, "review_required_count"),
+        unreviewedTransitionCount: numberField(row, "unreviewed_transition_count")
+      };
+      const flag = workerCapacityFlagPayload(worker);
+      return {
+        ...worker,
+        dataQualityFlags: flag ? [flag] : []
+      };
+    });
   const stats = transitionStats(transitions);
+  const dataQualityFlags = workerDaily.flatMap(row => row.dataQualityFlags || []);
 
   return {
     ok: true,
@@ -4304,6 +4425,11 @@ async function utilizationReportPayload(url) {
     worker: workerFilter || null,
     reviewControlsEnabled: Boolean(TRANSITION_REVIEWS_ENABLED && WORKER_WRITES_ENABLED),
     categories,
+    dataQuality: {
+      maxProductiveMinutes: SHOP_DAILY_AVAILABLE_MINUTES,
+      overCapacityCount: dataQualityFlags.length,
+      flags: dataQualityFlags
+    },
     summary: {
       ...stats,
       phaseCount: phases.length,
@@ -4427,6 +4553,7 @@ async function postgresWorkerActualsPayload(url) {
     source: "postgres",
     date,
     worker,
+    scheduleCorrection: scheduleCorrectionStatus(),
     tables: {
       "hb.worker_daily_task_actuals": actualsResult.rows,
       "core.time_sessions": sessionsResult.rows
@@ -4581,6 +4708,7 @@ async function healthPayload() {
     app: "hawley-worker-page",
     database: db.rows[0],
     counts: counts.rows[0],
+    scheduleCorrection: scheduleCorrectionStatus(),
     latestRuns,
     watcher: asanaEventWatcherStatus(),
     watchers: watcherStatuses()
@@ -4594,6 +4722,7 @@ async function syncStatusPayload() {
     mode: "hawley-brain",
     watcher: asanaEventWatcherStatus(),
     watchers: watcherStatuses(),
+    scheduleCorrection: scheduleCorrectionStatus(),
     latestRuns: await latestImportRuns(),
     refreshedAt: new Date().toISOString()
   };
