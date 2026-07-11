@@ -550,6 +550,91 @@ function unique(values) {
   return Array.from(new Set((values || []).filter(value => value !== null && value !== undefined && value !== "")));
 }
 
+function timestampMillis(value) {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function maxActualMinutes(row) {
+  return Math.max(
+    Number(row.actual_minutes || 0),
+    Number(row.timer_minutes || 0),
+    Number(row.asana_posted_minutes || 0),
+    Number(row.daily_logged_minutes || 0)
+  );
+}
+
+function compareActualRows(left, right) {
+  const leftTime = Math.max(
+    timestampMillis(left.last_seen_at),
+    timestampMillis(left.efficiency_snapshot_at),
+    timestampMillis(left.source_synced_at)
+  );
+  const rightTime = Math.max(
+    timestampMillis(right.last_seen_at),
+    timestampMillis(right.efficiency_snapshot_at),
+    timestampMillis(right.source_synced_at)
+  );
+  if (leftTime !== rightTime) return leftTime - rightTime;
+
+  const leftMinutes = maxActualMinutes(left);
+  const rightMinutes = maxActualMinutes(right);
+  if (leftMinutes !== rightMinutes) return leftMinutes - rightMinutes;
+
+  return String(left.airtable_record_id || "").localeCompare(String(right.airtable_record_id || ""));
+}
+
+function dedupeActualRowsByLedger(rows) {
+  const byLedger = new Map();
+  for (const row of rows) {
+    const current = byLedger.get(row.ledger_key);
+    if (!current || compareActualRows(row, current) > 0) {
+      byLedger.set(row.ledger_key, row);
+    }
+  }
+  return {
+    rows: Array.from(byLedger.values()),
+    duplicateLedgers: rows.length - byLedger.size
+  };
+}
+
+async function upsertWorkerDailyActualRows(client, rows) {
+  if (!rows.length) return;
+
+  const recordIds = unique(rows.map(row => row.airtable_record_id));
+  if (recordIds.length) {
+    await client.query(
+      `
+        delete from hb.worker_daily_task_actuals
+        where source_system is distinct from 'hawley_worker_live_pilot'
+          and airtable_record_id = any($1::text[])
+      `,
+      [recordIds]
+    );
+  }
+
+  const columns = Object.keys(rows[0]);
+  const updates = columns
+    .filter(column => column !== "ledger_key")
+    .map(column => `${quoteIdent(column)} = excluded.${quoteIdent(column)}`);
+
+  for (const row of rows) {
+    await client.query(
+      `
+        insert into hb.worker_daily_task_actuals
+          (${columns.map(quoteIdent).join(", ")})
+        values
+          (${columns.map((_, index) => `$${index + 1}`).join(", ")})
+        on conflict (ledger_key) do update set
+          ${updates.join(", ")}
+        where hb.worker_daily_task_actuals.source_system is distinct from 'hawley_worker_live_pilot'
+      `,
+      columns.map(column => row[column])
+    );
+  }
+}
+
 function firstPresentField(fields, names) {
   for (const name of names) {
     if (Object.prototype.hasOwnProperty.call(fields, name)) return fields[name];
@@ -1379,13 +1464,15 @@ async function normalizeBaseTables(client) {
   );
 
   const actualsRaw = await rawRows(client, "raw.airtable_worker_daily_actuals");
-  const actualRows = actualsRaw.map(actualsRow).filter(row => row.ledger_key);
-  await upsertRows(client, "hb.worker_daily_task_actuals", "airtable_record_id", actualRows);
-  await deleteBootstrapRowsNotSeen(
+  const actualDeduped = dedupeActualRowsByLedger(actualsRaw.map(actualsRow).filter(row => row.ledger_key));
+  const actualRows = actualDeduped.rows;
+  await upsertWorkerDailyActualRows(client, actualRows);
+  await deleteSourceRowsNotSeen(
     client,
     "hb.worker_daily_task_actuals",
-    "airtable_record_id",
-    actualRows.map(row => row.airtable_record_id)
+    "ledger_key",
+    "airtable_bootstrap",
+    actualRows.map(row => row.ledger_key)
   );
 
   return {
@@ -1398,7 +1485,8 @@ async function normalizeBaseTables(client) {
     airtableTaskInstances: taskRows.length,
     asanaOnlyTaskInstances: asanaOnlyRows.length,
     asanaOverlayTaskInstances: taskRows.filter(row => row.fields_json?._asana).length,
-    workerDailyActuals: actualRows.length
+    workerDailyActuals: actualRows.length,
+    workerDailyActualDuplicateLedgers: actualDeduped.duplicateLedgers
   };
 }
 
