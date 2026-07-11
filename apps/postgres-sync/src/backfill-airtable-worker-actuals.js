@@ -8,6 +8,28 @@ const LIVE_WORKER_SOURCE = "hawley_worker_live_pilot";
 const DEFAULT_WINDOW_DAYS = 2;
 const DEFAULT_TIME_ZONE = "America/Los_Angeles";
 const JOB_NAME = "backfill_airtable_worker_actuals";
+const WORKER_DAILY_ACTUALS_WRITABLE_FIELDS = new Set([
+  "Ledger Key",
+  "Work Date",
+  "Worker Key",
+  "Worker Name",
+  "Worker Email",
+  "Asana Task GID",
+  "Task Name",
+  "Task URL",
+  "VIN",
+  "Cycle",
+  "Phase",
+  "Assigned Hours",
+  "Allocated Hours",
+  "Actual Minutes",
+  "Timer Minutes",
+  "Asana Posted Minutes",
+  "Source",
+  "Completed?",
+  "Last Seen At",
+  "Was Assigned In DAT?"
+]);
 
 function requiredEnv(name) {
   const value = process.env[name];
@@ -163,6 +185,14 @@ function compactFields(fields) {
   );
 }
 
+function writableAirtableFields(fields) {
+  return Object.fromEntries(
+    Object.entries(compactFields(fields)).filter(([fieldName]) =>
+      WORKER_DAILY_ACTUALS_WRITABLE_FIELDS.has(fieldName)
+    )
+  );
+}
+
 function rowLedgerKey(row) {
   return row.ledger_key || `${row.worker_key || ""}::${row.work_date || ""}::${row.asana_task_gid || ""}`;
 }
@@ -173,8 +203,7 @@ function recordLedgerKey(record) {
 }
 
 function airtableFieldsFromHbRow(row) {
-  const fieldsJson = row.fields_json || {};
-  return compactFields({
+  return writableAirtableFields({
     "Ledger Key": rowLedgerKey(row),
     "Work Date": row.work_date,
     "Worker Key": row.worker_key || "",
@@ -190,12 +219,9 @@ function airtableFieldsFromHbRow(row) {
     "Allocated Hours": row.allocated_hours === null ? undefined : Number(row.allocated_hours || 0),
     "Actual Minutes": Number(row.actual_minutes || 0),
     "Timer Minutes": Number(row.timer_minutes || 0),
-    "Timer Started At": fieldsJson["Timer Started At"] || null,
     "Asana Posted Minutes": Number(row.asana_posted_minutes || 0),
     Source: row.source_label || "Hawley live worker pilot",
     "Completed?": Boolean(row.completed),
-    "Completion Pending?": Boolean(fieldsJson["Completion Pending?"]),
-    "Time Entry Created?": Boolean(fieldsJson["Time Entry Created?"]),
     "Last Seen At": row.last_seen_at || null,
     "Was Assigned In DAT?": Boolean(row.was_assigned_in_dat)
   });
