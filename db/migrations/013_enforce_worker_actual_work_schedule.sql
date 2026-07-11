@@ -95,6 +95,7 @@ with actual_candidates as (
   where actuals.source_system = 'hawley_worker_live_pilot'
     and not actuals.daily_summary
     and actuals.work_date is not null
+    and not (coalesce(actuals.fields_json, '{}'::jsonb) ? 'Schedule Corrected At')
 ),
 actual_corrected as (
   select
@@ -168,6 +169,7 @@ with session_corrected as (
     and sessions.started_at is not null
     and sessions.stopped_at is not null
     and coalesce(sessions.duration_minutes, 0) > 0
+    and not (coalesce(sessions.source_payload, '{}'::jsonb) ? 'scheduleCorrectedAt')
 ),
 session_updates as (
   select *

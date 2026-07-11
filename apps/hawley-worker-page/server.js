@@ -56,6 +56,7 @@ const SHOP_WORK_WINDOWS = Object.freeze([
 ]);
 const SHOP_DAILY_AVAILABLE_MINUTES = 460;
 const SHOP_DAILY_AVAILABLE_HOURS = SHOP_DAILY_AVAILABLE_MINUTES / 60;
+const SHOP_SCHEDULE_CORRECTION_SOURCE = "7:00-15:30 America/Los_Angeles minus 09:00-09:10, 11:00-11:30, 13:30-13:40";
 
 const pool = new Pool(getDatabaseConfig());
 const writePool = new Pool(getDatabaseConfig({ useSyncUrl: true }));
@@ -2493,6 +2494,7 @@ async function dailyAssignmentsPayload(url) {
   }
 
   await autoCloseScheduledTimersForDate(date);
+  await enforceScheduledActualsForDate(date);
 
   const [rows, configuredRows, latestRuns, latestDate, trackerSnapshots, actualRows] = await Promise.all([
     workerAssignments(date),
@@ -3293,6 +3295,242 @@ async function autoCloseScheduledTimersForDate(date) {
   return closedCount;
 }
 
+function scheduleCorrectionForActualRow(row, workDate) {
+  const actualMinutes = Number(row.actual_minutes || 0);
+  const timerMinutes = Number(row.timer_minutes || 0);
+  const asanaPostedMinutes = Number(row.asana_posted_minutes || 0);
+  const rawMinutes = Math.max(actualMinutes, timerMinutes, asanaPostedMinutes);
+  const rawStopAt = new Date(row.last_seen_at || row.source_synced_at || row.normalized_at || "");
+  if (!rawMinutes || Number.isNaN(rawStopAt.getTime())) return null;
+
+  const rawStartAt = new Date(rawStopAt.getTime() - rawMinutes * 60000);
+  const scheduledMinutes = scheduledWorkMinutesBetween(rawStartAt, rawStopAt, workDate);
+  const correctedMinutes = Math.min(rawMinutes, scheduledMinutes);
+  if (correctedMinutes >= rawMinutes) return null;
+
+  const effectiveStopAt = effectiveScheduledStopDate(rawStopAt, workDate) || rawStopAt;
+  return {
+    rawMinutes,
+    correctedMinutes,
+    rawStopAt: rawStopAt.toISOString(),
+    effectiveStopAt: effectiveStopAt.toISOString(),
+    newActualMinutes: actualMinutes > 0 ? correctedMinutes : actualMinutes,
+    newTimerMinutes: timerMinutes > 0 ? Math.min(timerMinutes, correctedMinutes) : timerMinutes,
+    newAsanaPostedMinutes: asanaPostedMinutes > 0 ? Math.min(asanaPostedMinutes, correctedMinutes) : asanaPostedMinutes
+  };
+}
+
+function scheduleCorrectionForSession(row, workDate) {
+  const rawMinutes = Number(row.duration_minutes || 0);
+  const startedAt = new Date(row.started_at || "");
+  const stoppedAt = new Date(row.stopped_at || "");
+  if (!rawMinutes || Number.isNaN(startedAt.getTime()) || Number.isNaN(stoppedAt.getTime())) return null;
+
+  const scheduledMinutes = scheduledWorkMinutesBetween(startedAt, stoppedAt, workDate);
+  const correctedMinutes = Math.min(rawMinutes, scheduledMinutes);
+  if (correctedMinutes >= rawMinutes) return null;
+
+  const effectiveStopAt = effectiveScheduledStopDate(stoppedAt, workDate) || stoppedAt;
+  return {
+    rawMinutes,
+    correctedMinutes,
+    rawStopAt: stoppedAt.toISOString(),
+    effectiveStopAt: effectiveStopAt.toISOString()
+  };
+}
+
+async function enforceScheduledActualsForDate(date) {
+  if (!isIsoDate(date) || !syncDatabaseConfigured()) return { actualRows: 0, sessions: 0 };
+
+  const client = await writePool.connect();
+  const counts = { actualRows: 0, sessions: 0 };
+
+  try {
+    await client.query("begin");
+    const actualRows = await client.query(
+      `
+        select
+          worker_daily_actual_id,
+          actual_minutes,
+          timer_minutes,
+          asana_posted_minutes,
+          last_seen_at,
+          source_synced_at,
+          normalized_at
+        from hb.worker_daily_task_actuals
+        where work_date = $1::date
+          and source_system = $2
+          and not daily_summary
+          and greatest(
+            coalesce(actual_minutes, 0),
+            coalesce(timer_minutes, 0),
+            coalesce(asana_posted_minutes, 0)
+          ) > 0
+          and not (coalesce(fields_json, '{}'::jsonb) ? 'Schedule Corrected At')
+      `,
+      [date, LIVE_WORKER_SOURCE]
+    );
+
+    for (const row of actualRows.rows) {
+      const correction = scheduleCorrectionForActualRow(row, date);
+      if (!correction) continue;
+
+      await client.query(
+        `
+          update hb.worker_daily_task_actuals
+          set
+            actual_minutes = $2,
+            timer_minutes = $3,
+            asana_posted_minutes = $4,
+            last_seen_at = $5::timestamptz,
+            source_synced_at = $5::timestamptz,
+            fields_json = coalesce(fields_json, '{}'::jsonb)
+              || jsonb_build_object(
+                'Schedule Raw Actual Minutes', actual_minutes,
+                'Schedule Raw Timer Minutes', timer_minutes,
+                'Schedule Raw Asana Posted Minutes', asana_posted_minutes,
+                'Schedule Raw Logged Minutes', $6,
+                'Schedule Raw Stop At', $7,
+                'Schedule Effective Stop At', $5,
+                'Schedule Corrected At', now()::text,
+                'Schedule Correction Source', $8,
+                'Actual Minutes', $2,
+                'Timer Minutes', $3,
+                'Asana Posted Minutes', $4
+              ),
+            normalized_at = now()
+          where worker_daily_actual_id = $1
+            and not (coalesce(fields_json, '{}'::jsonb) ? 'Schedule Corrected At')
+        `,
+        [
+          row.worker_daily_actual_id,
+          correction.newActualMinutes,
+          correction.newTimerMinutes,
+          correction.newAsanaPostedMinutes,
+          correction.effectiveStopAt,
+          correction.rawMinutes,
+          correction.rawStopAt,
+          SHOP_SCHEDULE_CORRECTION_SOURCE
+        ]
+      );
+      counts.actualRows += 1;
+    }
+
+    const sessions = await client.query(
+      `
+        select
+          time_session_id,
+          started_at,
+          stopped_at,
+          duration_minutes
+        from core.time_sessions
+        where work_date = $1::date
+          and source = 'hawley_worker_app'
+          and started_at is not null
+          and stopped_at is not null
+          and coalesce(duration_minutes, 0) > 0
+          and not (coalesce(source_payload, '{}'::jsonb) ? 'scheduleCorrectedAt')
+      `,
+      [date]
+    );
+
+    for (const row of sessions.rows) {
+      const correction = scheduleCorrectionForSession(row, date);
+      if (!correction) continue;
+
+      await client.query(
+        `
+          update core.time_sessions
+          set
+            duration_minutes = $2,
+            stopped_at = $3::timestamptz,
+            source_payload = coalesce(source_payload, '{}'::jsonb)
+              || jsonb_build_object(
+                'scheduleRawDurationMinutes', $4,
+                'scheduleCorrectedDurationMinutes', $2,
+                'scheduleRawStoppedAt', $5,
+                'scheduleEffectiveStoppedAt', $3,
+                'scheduleCorrectedAt', now()::text,
+                'scheduleCorrectionSource', $6
+              ),
+            updated_at = now()
+          where time_session_id = $1
+            and not (coalesce(source_payload, '{}'::jsonb) ? 'scheduleCorrectedAt')
+        `,
+        [
+          row.time_session_id,
+          correction.correctedMinutes,
+          correction.effectiveStopAt,
+          correction.rawMinutes,
+          correction.rawStopAt,
+          SHOP_SCHEDULE_CORRECTION_SOURCE
+        ]
+      );
+      counts.sessions += 1;
+    }
+
+    if (counts.actualRows || counts.sessions) {
+      await client.query(
+        `
+          with daily_rollups as (
+            select
+              worker_key,
+              work_date,
+              sum(greatest(
+                coalesce(actual_minutes, 0),
+                coalesce(timer_minutes, 0),
+                coalesce(asana_posted_minutes, 0)
+              ))::integer as logged_minutes
+            from hb.worker_daily_task_actuals
+            where source_system = $1
+              and work_date = $2::date
+              and not daily_summary
+            group by worker_key, work_date
+          )
+          update hb.worker_daily_task_actuals summaries
+          set
+            actual_minutes = rollups.logged_minutes,
+            timer_minutes = case when coalesce(summaries.timer_minutes, 0) > 0 then rollups.logged_minutes else summaries.timer_minutes end,
+            source_synced_at = now(),
+            last_seen_at = now(),
+            daily_available_minutes = $3,
+            daily_logged_minutes = rollups.logged_minutes,
+            daily_efficiency_percent = round((rollups.logged_minutes / $3::numeric * 100)::numeric, 2),
+            daily_efficiency_under_75 = rollups.logged_minutes < round(($3 * 0.75)::numeric, 0),
+            efficiency_snapshot_at = now(),
+            fields_json = coalesce(summaries.fields_json, '{}'::jsonb)
+              || jsonb_build_object(
+                'Actual Minutes', rollups.logged_minutes,
+                'Daily Available Minutes', $3,
+                'Daily Logged Minutes', rollups.logged_minutes,
+                'Daily Efficiency Percent', round((rollups.logged_minutes / $3::numeric * 100)::numeric, 2),
+                'Daily Efficiency Under 75?', rollups.logged_minutes < round(($3 * 0.75)::numeric, 0),
+                'Efficiency Snapshot At', now()::text,
+                'Schedule Corrected At', now()::text,
+                'Schedule Correction Source', 'daily summary recomputed from schedule-corrected task actuals'
+              ),
+            normalized_at = now()
+          from daily_rollups rollups
+          where summaries.source_system = $1
+            and summaries.daily_summary
+            and summaries.worker_key = rollups.worker_key
+            and summaries.work_date = rollups.work_date
+        `,
+        [LIVE_WORKER_SOURCE, date, SHOP_DAILY_AVAILABLE_MINUTES]
+      );
+    }
+
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    console.warn(`Hawley schedule correction skipped: ${error.message}`);
+  } finally {
+    client.release();
+  }
+
+  return counts;
+}
+
 function transitionBucketKey(minutes) {
   const value = Number(minutes || 0);
   if (value < 2) return "micro_transition";
@@ -4010,6 +4248,8 @@ async function utilizationReportPayload(url) {
   const workerFilter = url.searchParams.get("worker") || "";
   if (!isIsoDate(date)) throw actionError("Date must be YYYY-MM-DD.", 400);
 
+  await enforceScheduledActualsForDate(date);
+
   const [phaseResult, workerPhaseResult, workerDailyResult, transitionResult, categories] = await Promise.all([
     pool.query("select * from reporting.phase_day_summary where work_date = $1::date order by total_actual_task_minutes desc, total_estimated_minutes desc, phase_name", [date]),
     pool.query("select * from reporting.worker_phase_day_summary where work_date = $1::date order by actual_task_minutes desc, estimated_minutes desc, worker_name", [date]),
@@ -4084,6 +4324,8 @@ async function postgresWorkerActualsPayload(url) {
   const worker = String(url.searchParams.get("worker") || "").trim();
   if (!isIsoDate(date)) throw actionError("Date must be YYYY-MM-DD.", 400);
   if (worker.length < 2) throw actionError("worker must be at least 2 characters.", 400);
+
+  await enforceScheduledActualsForDate(date);
 
   const workerNeedle = `%${worker.toLowerCase()}%`;
   const actualsResult = await pool.query(
