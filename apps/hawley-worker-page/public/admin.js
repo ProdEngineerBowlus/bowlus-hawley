@@ -517,7 +517,7 @@
                   ${visibleTiers.map(tier => matrixCell(row.tiers?.[tier.key] ?? row[tier.key])).join("")}
                   ${matrixCell(row.total ?? row.totalPressureHours)}
                 </tr>
-              `).join("") || `<tr><td colspan="${visibleTiers.length + 2}">No phase-cycle burn-down rows found in Postgres yet. PCL groups: ${escapeHtml(formatNumber(diagnostics.phaseCycleLoadGroupCount || 0))}.</td></tr>`}
+              `).join("") || `<tr><td colspan="${visibleTiers.length + 2}">No phase-cycle burn-down rows found yet. Source: ${escapeHtml(diagnostics.phaseCycleLoadSource || "unknown")}; PCL groups: ${escapeHtml(formatNumber(diagnostics.phaseCycleLoadGroupCount || 0))}; raw rows parsed: ${escapeHtml(formatNumber(diagnostics.rawPhaseCycleLoadParsedRowCount || 0))}/${escapeHtml(formatNumber(diagnostics.rawPhaseCycleLoadRowCount || 0))}; raw positive: ${escapeHtml(formatNumber(diagnostics.rawPhaseCycleLoadPositiveRowCount || 0))}.</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -589,7 +589,7 @@
                 })}
               </div>
             `;
-          }).join("") || `<div class="notice visual-empty">No Daily Assignment Tracker line overview phases found in Postgres yet. DAT phases: ${escapeHtml(formatNumber(diagnostics.latestLineOverviewPhaseCount || 0))}; current-cycle load rows: ${escapeHtml(formatNumber(diagnostics.currentCycleLoadRowCount || 0))}.</div>`}
+          }).join("") || `<div class="notice visual-empty">No Daily Assignment Tracker line overview phases or current-cycle PCL rows found yet. DAT phases: ${escapeHtml(formatNumber(diagnostics.latestLineOverviewPhaseCount || 0))}; current-cycle load rows: ${escapeHtml(formatNumber(diagnostics.currentCycleLoadRowCount || 0))}; source: ${escapeHtml(diagnostics.phaseCycleLoadSource || "unknown")}.</div>`}
         </div>
       </article>
     `;
@@ -624,7 +624,7 @@
               `<div class="surface-cell ${tone}"><span class="surface-value">${escapeHtml(formatPercent(row.completionPct))}</span></div>`,
               `<div class="surface-cell ${tone}"><span class="surface-value">${escapeHtml(formatPercent(row.cyclePct ?? row.cycleProgressPct ?? cycleProgress))}</span><span class="surface-note">${escapeHtml(formatNumber(row.workerCount || 0))} worker${Number(row.workerCount || 0) === 1 ? "" : "s"}</span></div>`
             ];
-          }).join("") || `<div class="notice surface-empty visual-empty">No live capacity rows found from the latest line overview yet. Capacity phase groups: ${escapeHtml(formatNumber(diagnostics.capacityPresentationPhaseCount || 0))}.</div>`}
+          }).join("") || `<div class="notice surface-empty visual-empty">No live capacity rows found from the latest line overview or current-cycle PCL rows yet. Capacity phase groups: ${escapeHtml(formatNumber(diagnostics.capacityPresentationPhaseCount || 0))}; current-cycle load rows: ${escapeHtml(formatNumber(diagnostics.currentCycleLoadRowCount || 0))}.</div>`}
         </div>
       </article>
     `;

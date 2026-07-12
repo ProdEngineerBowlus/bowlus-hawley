@@ -5529,6 +5529,9 @@ async function healthPayload() {
         (select count(*)::int from reporting.hawley_worker_page_assignments) as assignment_rows,
         (select count(distinct worker_email)::int from reporting.hawley_worker_page_assignments where worker_email is not null) as assigned_worker_count,
         (select count(*)::int from raw.asana_tasks where project_gid = $1) as daily_tracker_rows,
+        (select count(*)::int from raw.airtable_phase_cycle_load) as raw_phase_cycle_load_rows,
+        (select count(*)::int from raw.airtable_worker_cycle_bank) as raw_worker_cycle_bank_rows,
+        (select count(*)::int from raw.airtable_worker_phase_allocation) as raw_worker_phase_allocation_rows,
         (select count(*)::int from hb.rev1_task_instances) as rev1_task_instance_rows,
         (select count(*)::int from hb.phase_cycle_load_rev1) as phase_cycle_load_rows,
         (select count(*)::int from hb.worker_phase_allocation_rev1) as worker_phase_allocation_rows,
@@ -5848,6 +5851,213 @@ async function adminLatestLineOverview() {
     )[0] || null;
 }
 
+const ADMIN_RAW_PCL_FIELDS = Object.freeze({
+  bucketKey: ["PhaseCycleBucketKey", "Phase Cycle Bucket Key", "Display Bucket Key", "PhaseCycleKey", "Phase Cycle Key"],
+  phase: ["Phase Name", "Phase", "Primary Phase", "Section/Column"],
+  cycle: ["Cycle Label", "Cycle", "Cycle Number"],
+  remainingHours: ["Remaining Task Hours", "Remaining Task Hrs", "Remaining Hrs", "Remaining Hours", "Open Est. Hours"],
+  totalLoadHours: ["Total Load Hrs.", "Total Load Hrs", "Total Load Hours", "Total Load", "Load Hours"],
+  completedHours: ["Completed Task Hours", "Completed Hrs", "Completed Hours", "Competed Est. Hours"],
+  status: ["Status", "PLH Status", "Tracker Status"]
+});
+
+function adminRawFieldKey(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function adminRawField(fields, names) {
+  if (!fields || typeof fields !== "object") return undefined;
+  for (const name of names) {
+    if (Object.prototype.hasOwnProperty.call(fields, name)) return fields[name];
+  }
+  const wanted = new Set(names.map(adminRawFieldKey).filter(Boolean));
+  for (const [key, value] of Object.entries(fields)) {
+    if (wanted.has(adminRawFieldKey(key))) return value;
+  }
+  return undefined;
+}
+
+function adminRawTextValue(value) {
+  if (value === null || value === undefined || value === "") return "";
+  if (Array.isArray(value)) return value.map(adminRawTextValue).filter(Boolean).join(", ");
+  if (typeof value === "object") {
+    return adminRawTextValue(value.name ?? value.email ?? value.value ?? value.text ?? value.display_value ?? value.id);
+  }
+  return String(value).trim();
+}
+
+function adminRawTextFromFields(fields, names) {
+  return adminRawTextValue(adminRawField(fields, names));
+}
+
+function adminRawNumberValue(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (Array.isArray(value)) {
+    const numbers = value
+      .map(adminRawNumberValue)
+      .filter(number => number !== null && Number.isFinite(number));
+    return numbers.length ? numbers.reduce((sum, number) => sum + number, 0) : null;
+  }
+  if (typeof value === "object") {
+    return adminRawNumberValue(value.number_value ?? value.value ?? value.name ?? value.display_value ?? value.id);
+  }
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const cleaned = String(value).replace(/,/g, "").replace(/[^0-9.\-]+/g, "");
+  if (!cleaned || cleaned === "-" || cleaned === "." || cleaned === "-.") return null;
+  const number = Number(cleaned);
+  return Number.isFinite(number) ? number : null;
+}
+
+function adminRawNumberFromFields(fields, names) {
+  return adminRawNumberValue(adminRawField(fields, names));
+}
+
+function adminNormalizeRawPclPhase(value) {
+  const phase = String(value || "").trim();
+  if (!phase || /^rec[a-z0-9]+$/i.test(phase)) return "";
+  if (/^A\s*&\s*Frames$/i.test(phase)) return "Phase A";
+  if (/^FAB$/i.test(phase)) return "FAB";
+  if (/^CNC$/i.test(phase)) return "CNC";
+  if (/^Frames?$/i.test(phase)) return "Frames";
+  return formatPhaseName(phase);
+}
+
+function adminParseRawPclBucketText(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+
+  let match = text.match(/^C?\s*(\d{1,3})\s*[-:|/]+\s*(.+)$/i);
+  if (match) {
+    const phaseName = adminNormalizeRawPclPhase(match[2]);
+    return phaseName ? {
+      cycleNumber: Number(match[1]),
+      cycleLabel: `C${Number(match[1])}`,
+      phaseName
+    } : null;
+  }
+
+  match = text.match(/^(.+?)\s*[-:|/]+\s*C?\s*(\d{1,3})$/i);
+  if (match) {
+    const phaseName = adminNormalizeRawPclPhase(match[1]);
+    return phaseName ? {
+      cycleNumber: Number(match[2]),
+      cycleLabel: `C${Number(match[2])}`,
+      phaseName
+    } : null;
+  }
+
+  match = text.match(/\bC\s*(\d{1,3})\b/i);
+  if (match) {
+    const phaseText = text
+      .replace(match[0], "")
+      .replace(/^[\s\-:|/]+|[\s\-:|/]+$/g, "")
+      .trim();
+    const phaseName = adminNormalizeRawPclPhase(phaseText);
+    return phaseName ? {
+      cycleNumber: Number(match[1]),
+      cycleLabel: `C${Number(match[1])}`,
+      phaseName
+    } : null;
+  }
+
+  return null;
+}
+
+function adminParseRawPclCycle(fields) {
+  const cycleText = adminRawTextFromFields(fields, ADMIN_RAW_PCL_FIELDS.cycle);
+  const cycleNumber = cycleNumberFromName(cycleText);
+  return {
+    cycleNumber,
+    cycleLabel: cycleNumber ? `C${cycleNumber}` : formatCycleName(cycleText)
+  };
+}
+
+function adminRawPhaseCycleLoadSnapshot(rawRows) {
+  const groups = new Map();
+  const stats = {
+    rawRowCount: rawRows.length,
+    parsedRowCount: 0,
+    positiveRowCount: 0,
+    groupedRowCount: 0,
+    skippedNoPhaseCycle: 0,
+    totalRemainingHours: 0,
+    totalLoadHours: 0,
+    completedHours: 0,
+    latestSyncedAt: ""
+  };
+
+  for (const rawRow of rawRows) {
+    const fields = rawRow.fields_json || {};
+    const bucketTexts = ADMIN_RAW_PCL_FIELDS.bucketKey
+      .map(fieldName => adminRawTextFromFields(fields, [fieldName]))
+      .filter(Boolean);
+    let parsed = null;
+    for (const bucketText of bucketTexts) {
+      parsed = adminParseRawPclBucketText(bucketText);
+      if (parsed) break;
+    }
+
+    if (!parsed) {
+      const phaseName = adminNormalizeRawPclPhase(adminRawTextFromFields(fields, ADMIN_RAW_PCL_FIELDS.phase));
+      const cycle = adminParseRawPclCycle(fields);
+      if (phaseName && (cycle.cycleNumber || cycle.cycleLabel)) parsed = { ...cycle, phaseName };
+    }
+
+    if (!parsed || !parsed.phaseName || (!parsed.cycleNumber && !parsed.cycleLabel)) {
+      stats.skippedNoPhaseCycle += 1;
+      continue;
+    }
+
+    stats.parsedRowCount += 1;
+    const remainingHours = round(adminRawNumberFromFields(fields, ADMIN_RAW_PCL_FIELDS.remainingHours) || 0, 2);
+    const completedHours = round(adminRawNumberFromFields(fields, ADMIN_RAW_PCL_FIELDS.completedHours) || 0, 2);
+    const rawTotalLoadHours = round(adminRawNumberFromFields(fields, ADMIN_RAW_PCL_FIELDS.totalLoadHours) || 0, 2);
+    const totalLoadHours = rawTotalLoadHours > 0
+      ? rawTotalLoadHours
+      : round(remainingHours + completedHours, 2);
+    const hasHours = remainingHours > 0 || completedHours > 0 || totalLoadHours > 0;
+    if (!hasHours) continue;
+
+    stats.positiveRowCount += 1;
+    stats.totalRemainingHours = round(stats.totalRemainingHours + remainingHours, 2);
+    stats.totalLoadHours = round(stats.totalLoadHours + totalLoadHours, 2);
+    stats.completedHours = round(stats.completedHours + completedHours, 2);
+    if (rawRow.synced_at && String(rawRow.synced_at) > stats.latestSyncedAt) stats.latestSyncedAt = String(rawRow.synced_at);
+
+    const cycleNumber = parsed.cycleNumber === null || parsed.cycleNumber === undefined
+      ? null
+      : Number(parsed.cycleNumber);
+    const cycleLabel = parsed.cycleLabel || (cycleNumber ? `C${cycleNumber}` : "");
+    const phaseName = formatPhaseName(parsed.phaseName) || "Unassigned";
+    const key = `${cycleNumber || cycleLabel || "unknown"}::${phaseName}`;
+    const existing = groups.get(key) || {
+      phase_name: phaseName,
+      cycle_number: cycleNumber,
+      cycle_label: cycleLabel,
+      remaining_hours: 0,
+      total_load_hours: 0,
+      completed_hours: 0,
+      status: ""
+    };
+    const status = adminRawTextFromFields(fields, ADMIN_RAW_PCL_FIELDS.status);
+    existing.remaining_hours = round(existing.remaining_hours + remainingHours, 2);
+    existing.total_load_hours = round(existing.total_load_hours + totalLoadHours, 2);
+    existing.completed_hours = round(existing.completed_hours + completedHours, 2);
+    existing.status = adminPhaseStatusRank(status) > adminPhaseStatusRank(existing.status)
+      ? status
+      : existing.status;
+    groups.set(key, existing);
+  }
+
+  const rows = Array.from(groups.values())
+    .sort((left, right) =>
+      Number(left.cycle_number || 9999) - Number(right.cycle_number || 9999) ||
+      String(left.phase_name || "").localeCompare(String(right.phase_name || ""))
+    );
+  stats.groupedRowCount = rows.length;
+  return { rows, stats };
+}
+
 function adminDebtTier(key, label, shortLabel, tone, cycleNumbers = []) {
   return {
     key,
@@ -5923,7 +6133,7 @@ function adminMergeCurrentRowsForPresentation(rows) {
 async function adminPlhMetricsPayload() {
   const baselineCycleNumber = cycleNumberFromName(ADMIN_PLH_BASELINE_CYCLE) || 5;
   const today = todayIso();
-  const [cycleResult, debtResult, dailyResult, latestLineOverviewSnapshot] = await Promise.all([
+  const [cycleResult, debtResult, rawPhaseCycleLoadResult, dailyResult, latestLineOverviewSnapshot] = await Promise.all([
     pool.query(`
       with cycle_rows as (
         select
@@ -6000,6 +6210,13 @@ async function adminPlhMetricsPayload() {
     `),
     pool.query(`
       select
+        record_id,
+        fields_json,
+        synced_at::text
+      from raw.airtable_phase_cycle_load
+    `),
+    pool.query(`
+      select
         count(*) filter (where productive_task_minutes > 0 or assigned_task_count > 0)::int as worker_count,
         coalesce(sum(productive_task_minutes), 0)::integer as productive_minutes,
         coalesce(sum(estimated_minutes), 0)::integer as estimated_minutes,
@@ -6054,6 +6271,11 @@ async function adminPlhMetricsPayload() {
   const tierOrder = ["current", ...(carryoverTierKeys.length ? carryoverTierKeys.slice().reverse() : ["carryover"]), "original"];
   const matrix = new Map();
   const currentRows = [];
+  const rawPhaseCycleLoad = adminRawPhaseCycleLoadSnapshot(rawPhaseCycleLoadResult.rows);
+  const debtRows = rawPhaseCycleLoad.rows.length ? rawPhaseCycleLoad.rows : debtResult.rows;
+  const phaseCycleLoadSource = rawPhaseCycleLoad.rows.length
+    ? "raw.airtable_phase_cycle_load"
+    : "hb.phase_cycle_load_rev1";
   const capacityResult = currentCycleNumber
     ? await pool.query(`
       with worker_phase_capacity as (
@@ -6128,7 +6350,7 @@ async function adminPlhMetricsPayload() {
     capacityByPresentation.set(presentationName, existing);
   }
 
-  for (const row of debtResult.rows) {
+  for (const row of debtRows) {
     const cycleNumber = row.cycle_number === null || row.cycle_number === undefined ? null : Number(row.cycle_number);
     if (currentCycleNumber && cycleNumber && cycleNumber > currentCycleNumber) continue;
     const phaseName = formatPhaseName(row.phase_name) || "Unassigned";
@@ -6356,7 +6578,7 @@ async function adminPlhMetricsPayload() {
       matrix: debtMatrix,
       totalRecoveryDebt: round(tiers.carryover.totalHours + tiers.original.totalHours, 2),
       totalPressure: round(tiers.current.totalHours + tiers.carryover.totalHours + tiers.original.totalHours, 2),
-      source: "hb.phase_cycle_load_rev1"
+      source: phaseCycleLoadSource
     },
     tracker: {
       latestLineOverviewDate: lineOverview?.trackerDate || "",
@@ -6380,7 +6602,17 @@ async function adminPlhMetricsPayload() {
       latestLineOverviewName: latestLineOverviewSnapshot?.name || "",
       latestLineOverviewDate: latestLineOverviewSnapshot?.trackerDate || "",
       latestLineOverviewPhaseCount: lineOverviewPhases.length,
-      phaseCycleLoadGroupCount: debtResult.rows.length,
+      phaseCycleLoadSource,
+      phaseCycleLoadGroupCount: debtRows.length,
+      hbPhaseCycleLoadGroupCount: debtResult.rows.length,
+      rawPhaseCycleLoadRowCount: rawPhaseCycleLoad.stats.rawRowCount,
+      rawPhaseCycleLoadParsedRowCount: rawPhaseCycleLoad.stats.parsedRowCount,
+      rawPhaseCycleLoadPositiveRowCount: rawPhaseCycleLoad.stats.positiveRowCount,
+      rawPhaseCycleLoadGroupCount: rawPhaseCycleLoad.stats.groupedRowCount,
+      rawPhaseCycleLoadRemainingHours: rawPhaseCycleLoad.stats.totalRemainingHours,
+      rawPhaseCycleLoadTotalHours: rawPhaseCycleLoad.stats.totalLoadHours,
+      rawPhaseCycleLoadCompletedHours: rawPhaseCycleLoad.stats.completedHours,
+      rawPhaseCycleLoadLatestSyncedAt: rawPhaseCycleLoad.stats.latestSyncedAt,
       currentCycleLoadRowCount: currentRows.length,
       currentPresentationPhaseCount: currentPresentationRows.length,
       capacityPhaseCount: capacityByPhase.size,
@@ -6389,8 +6621,8 @@ async function adminPlhMetricsPayload() {
       phaseFilterValues: Array.from(ADMIN_PLH_PHASES)
     },
     source: hasLineOverviewPhases
-      ? "raw.asana_tasks line overview + hb.cycles + hb.phase_cycle_load_rev1"
-      : "hb.cycles + hb.phase_cycle_load_rev1 + hb.worker_cycle_bank_rev1"
+      ? `raw.asana_tasks line overview + hb.cycles + ${phaseCycleLoadSource}`
+      : `hb.cycles + ${phaseCycleLoadSource} + hb.worker_cycle_bank_rev1`
   };
 }
 
