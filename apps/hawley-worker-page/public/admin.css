@@ -626,6 +626,56 @@ a {
   font-weight: 900;
 }
 
+.config-drawer {
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(20, 28, 19, 0.72);
+}
+
+.config-drawer > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 58px;
+  padding: 14px 18px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.config-drawer > summary::-webkit-details-marker {
+  display: none;
+}
+
+.config-drawer > summary span:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.config-drawer > summary strong {
+  color: var(--ink);
+  font-size: 0.98rem;
+  font-weight: 950;
+}
+
+.config-drawer > summary small {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.config-drawer-body {
+  display: grid;
+  gap: 12px;
+  padding: 0 14px 14px;
+}
+
+.config-drawer .schedule-alignment-panel,
+.config-inner-panel {
+  background: rgba(16, 20, 15, 0.54);
+}
+
 .phase-pace-list {
   display: grid;
   gap: 12px;

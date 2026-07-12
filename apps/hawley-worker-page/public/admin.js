@@ -895,9 +895,54 @@
     return `
       <section class="plh-visual-grid">
         ${renderPhasePaceProjection(plh)}
-        ${renderScheduleAlignment(plh)}
         ${renderPhaseCycleBurnDown(plh)}
       </section>
+    `;
+  }
+
+  function renderSourceRuns(latestRuns) {
+    return `
+      <div class="panel-body table-wrap">
+        <table class="table">
+          <thead><tr><th>Job</th><th>Status</th><th>Ended</th><th>Read</th><th>Written</th><th>Errors</th></tr></thead>
+          <tbody>
+            ${latestRuns.map(row => `
+              <tr>
+                <td>${escapeHtml(row.job_name)}</td>
+                <td>${pill(row.status || "unknown", row.status === "success" ? "good" : "warn")}</td>
+                <td>${escapeHtml(row.ended_at ? new Date(row.ended_at).toLocaleString() : "")}</td>
+                <td>${formatNumber(row.records_read)}</td>
+                <td>${formatNumber(row.records_written)}</td>
+                <td>${formatNumber(row.error_count)}</td>
+              </tr>
+            `).join("") || `<tr><td colspan="6">No runs.</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function renderConfigurationDrawer(plh, latestRuns) {
+    const diagnostics = plh?.diagnostics || {};
+    return `
+      <details class="config-drawer">
+        <summary>
+          <span>
+            <strong>Configuration</strong>
+            <small>${escapeHtml(diagnostics.currentCyclePacingSource || "source checks")}</small>
+          </span>
+          <span class="section-tag">Open</span>
+        </summary>
+        <div class="config-drawer-body">
+          ${renderScheduleAlignment(plh)}
+          <article class="panel config-inner-panel">
+            <div class="panel-header">
+              <h3 class="panel-title">Source Runs</h3>
+            </div>
+            ${renderSourceRuns(latestRuns)}
+          </article>
+        </div>
+      </details>
     `;
   }
 
@@ -927,6 +972,7 @@
         ${state.dashboard?.plh ? "" : `<div class="notice risk">The admin API response did not include the PLH payload. Server build: ${escapeHtml(build.label || "unknown")}.</div>`}
         ${renderPlhVisuals(plh)}
         ${renderPlhSnapshot(plh)}
+        ${renderConfigurationDrawer(plh, latestRuns)}
         <section class="split-grid">
           <article class="panel">
             <div class="panel-header">
@@ -1013,28 +1059,6 @@
               </table>
             </div>
           </article>
-        </section>
-        <section class="panel">
-          <div class="panel-header">
-            <h3 class="panel-title">Source Runs</h3>
-          </div>
-          <div class="panel-body table-wrap">
-            <table class="table">
-              <thead><tr><th>Job</th><th>Status</th><th>Ended</th><th>Read</th><th>Written</th><th>Errors</th></tr></thead>
-              <tbody>
-                ${latestRuns.map(row => `
-                  <tr>
-                    <td>${escapeHtml(row.job_name)}</td>
-                    <td>${pill(row.status || "unknown", row.status === "success" ? "good" : "warn")}</td>
-                    <td>${escapeHtml(row.ended_at ? new Date(row.ended_at).toLocaleString() : "")}</td>
-                    <td>${formatNumber(row.records_read)}</td>
-                    <td>${formatNumber(row.records_written)}</td>
-                    <td>${formatNumber(row.error_count)}</td>
-                  </tr>
-                `).join("") || `<tr><td colspan="6">No runs.</td></tr>`}
-              </tbody>
-            </table>
-          </div>
         </section>
       </div>
     `;
