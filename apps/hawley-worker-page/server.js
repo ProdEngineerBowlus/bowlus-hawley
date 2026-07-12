@@ -45,6 +45,11 @@ const WORKER_WRITE_IDS = new Set(
 const TRANSITION_REVIEWS_ENABLED = booleanEnv("HAWLEY_TRANSITION_REVIEWS_ENABLED", true);
 const ADMIN_PROJECT_CREATE_ENABLED = booleanEnv("HAWLEY_ADMIN_PROJECT_CREATE_ENABLED", false);
 const ADMIN_PLH_BASELINE_CYCLE = process.env.HAWLEY_ADMIN_PLH_BASELINE_CYCLE || "C5";
+const ADMIN_PLH_PHASES = new Set(
+  envList(process.env.HAWLEY_ADMIN_PLH_PHASES || "Phase B,Phase C,Phase D,Phase E,Phase F,Phase G")
+    .map(formatPhaseName)
+    .filter(Boolean)
+);
 const LIVE_WORKER_SOURCE = "hawley_worker_live_pilot";
 const APP_AUTH_ACTIVE = booleanEnv("HAWLEY_AUTH_ACTIVE", false);
 const APP_AUTH_SEED_ROSTER_ON_START = booleanEnv("HAWLEY_AUTH_SEED_ROSTER_ON_START", true);
@@ -1396,6 +1401,16 @@ function formatPhaseName(value) {
   return text;
 }
 
+function adminPhaseFamilyName(value) {
+  const phase = formatPhaseName(value);
+  const clean = phase.replace(/^Phase\s+/i, "").trim();
+  if (/^A[12]$/i.test(clean)) return "Phase A";
+  if (/^FAB[-\s]?[AB]?$/i.test(clean)) return "FAB";
+  if (/^CNC[-\s]?[AB]?$/i.test(clean)) return "CNC";
+  if (/^Frame[-\s]?[AB]?$/i.test(clean) || /^Frames?$/i.test(clean)) return "Frames";
+  return phase || "Unassigned";
+}
+
 function formatPhaseList(value) {
   return cleanDisplayList(value)
     .split(",")
@@ -1837,6 +1852,7 @@ function normalizeTrackerSnapshot(row) {
     capacityHours: numberValue(fields["Capacity Hours"]),
     capacityDeltaHours: numberValue(fields["Capacity Delta Hours"]),
     completionPercent: numberValue(fields["Completion %"]),
+    cycleProgressPercent: numberValue(fields["Cycle Progress %"]),
     loadCapacityPercent: numberValue(fields["Load / Capacity %"]),
     taskOrderRange: textValue(fields["Task Order Range"]),
     vinRange: textValue(fields["VIN Range"]),
@@ -5595,6 +5611,9 @@ function adminCycleStatus(row) {
     ? workdays.filter(date => date <= effectiveToday).length
     : 0;
   const totalWorkdays = Number(workdays.length || row.days_in_cycle || 0) || null;
+  const remainingWorkdays = totalWorkdays
+    ? Math.max(0, totalWorkdays - Math.max(1, Math.min(totalWorkdays, elapsedWorkday || 0)) + 1)
+    : null;
   const progressPct = totalWorkdays
     ? round(Math.max(0, Math.min(100, (elapsedWorkday / totalWorkdays) * 100)), 1)
     : adminPercentValue(row.cycle_percent);
@@ -5607,26 +5626,225 @@ function adminCycleStatus(row) {
     progressPct,
     totalWorkdays,
     elapsedWorkday: totalWorkdays ? Math.max(0, Math.min(totalWorkdays, elapsedWorkday)) : null,
-    remainingWorkdays: totalWorkdays
-      ? Math.max(0, totalWorkdays - Math.max(1, Math.min(totalWorkdays, elapsedWorkday)) + 1)
-      : null,
+    remainingWorkdays,
     source: "hb.cycles"
   };
 }
 
-function adminDebtTier(label, shortLabel, tone) {
+function adminNumberOrNull(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function adminPhaseStatusRank(status) {
+  const value = String(status || "").toLowerCase();
+  if (value.includes("off")) return 3;
+  if (value.includes("risk")) return 2;
+  if (value.includes("track")) return 1;
+  return 0;
+}
+
+function adminPresentationPhaseName(phaseName) {
+  const phase = adminPhaseFamilyName(phaseName);
+  if (phase === "Phase A" || phase === "Frames") return "Phase A & Frames";
+  return phase || "Unassigned";
+}
+
+function adminMergePresentationPhases(phases) {
+  const byPhase = new Map();
+  for (const phase of phases || []) {
+    const key = adminPresentationPhaseName(phase.phase);
+    const existing = byPhase.get(key) || {
+      phase: key,
+      status: phase.status || "",
+      remainingHours: 0,
+      capacityHours: 0,
+      capacityLabel: phase.capacityLabel || "Gap",
+      capacityDeltaHours: 0,
+      completionPct: null,
+      cyclePct: phase.cyclePct ?? null,
+      workerCount: 0,
+      totalLoadHours: 0,
+      completedHours: 0
+    };
+
+    existing.status = adminPhaseStatusRank(phase.status) > adminPhaseStatusRank(existing.status)
+      ? phase.status
+      : existing.status;
+    existing.remainingHours = round(existing.remainingHours + Number(phase.remainingHours || 0), 2);
+    existing.capacityHours = round(existing.capacityHours + Number(phase.capacityHours || 0), 2);
+    existing.capacityDeltaHours = round(existing.capacityDeltaHours + Number(phase.capacityDeltaHours || 0), 2);
+    existing.workerCount += Number(phase.workerCount || 0);
+    existing.totalLoadHours = round(existing.totalLoadHours + Number(phase.totalLoadHours || 0), 2);
+    existing.completedHours = round(existing.completedHours + Number(phase.completedHours || 0), 2);
+    if (existing.cyclePct === null || existing.cyclePct === undefined) existing.cyclePct = phase.cyclePct ?? null;
+    byPhase.set(key, existing);
+  }
+
+  return Array.from(byPhase.values()).map(phase => ({
+    ...phase,
+    phaseName: phase.phase,
+    capacityHours: phase.capacityHours || null,
+    capacityDeltaHours: phase.capacityDeltaHours || null,
+    completionPct: phase.totalLoadHours > 0 ? round((phase.completedHours / phase.totalLoadHours) * 100, 1) : phase.completionPct,
+    workerCount: phase.workerCount || null,
+    totalLoadHours: phase.totalLoadHours || null,
+    completedHours: phase.completedHours || null
+  }));
+}
+
+function adminParseLineOverviewPhases(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  const phases = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const phaseMatch = line.match(/(Phase [A-I]|FAB|Frames?)\s*-\s*(On Track|At Risk|Off Track)/i);
+    if (!phaseMatch) continue;
+
+    const statsLine = lines[index + 1] || "";
+    const progressLine = lines[index + 2] || "";
+    const loadLine = lines[index + 3] || "";
+    const statsMatch = statsLine.match(
+      /Remaining:\s*([0-9.]+)h\s*\|\s*Station Capacity:\s*([0-9.]+)h\s*\|\s*(Cushion|Gap):\s*([0-9.]+)h/i
+    );
+    const progressMatch = progressLine.match(
+      /Complete:\s*([0-9.]+)%\s*\|\s*Cycle:\s*([0-9.]+)%\s*\|\s*([0-9]+)\s*worker/i
+    );
+    const loadMatch = loadLine.match(/Load:\s*([0-9.]+)h\s*\|\s*Done:\s*([0-9.]+)h/i);
+
+    phases.push({
+      phase: formatPhaseName(phaseMatch[1]),
+      status: phaseMatch[2],
+      remainingHours: statsMatch ? round(Number(statsMatch[1]), 2) : null,
+      capacityHours: statsMatch ? round(Number(statsMatch[2]), 2) : null,
+      capacityLabel: statsMatch ? statsMatch[3] : "Gap",
+      capacityDeltaHours: statsMatch ? round(Number(statsMatch[4]), 2) : null,
+      completionPct: progressMatch ? round(Number(progressMatch[1]), 1) : null,
+      cyclePct: progressMatch ? round(Number(progressMatch[2]), 1) : null,
+      workerCount: progressMatch ? Number(progressMatch[3]) : null,
+      totalLoadHours: loadMatch ? round(Number(loadMatch[1]), 2) : null,
+      completedHours: loadMatch ? round(Number(loadMatch[2]), 2) : null
+    });
+  }
+
+  return adminMergePresentationPhases(phases);
+}
+
+function adminParseLineOverviewRemainingWorkdays(text) {
+  const match = String(text || "").match(/Remaining Workdays:\s*([0-9.]+)/i);
+  return match ? round(Number(match[1]), 2) : null;
+}
+
+function adminComputedPhaseStatus(phase, fallbackCycleProgress = null) {
+  const remaining = adminNumberOrNull(phase.remainingHours);
+  const capacity = adminNumberOrNull(phase.capacityHours);
+  const completion = adminNumberOrNull(phase.completionPct);
+  const cycle = adminNumberOrNull(phase.cyclePct) ?? adminNumberOrNull(fallbackCycleProgress);
+  const status = String(phase.status || "");
+
+  if (remaining !== null && remaining <= 0.05) return "On Track";
+  if (capacity !== null && capacity <= 0.05) return "Off Track";
+  if (remaining !== null && capacity !== null && remaining > capacity + 0.05) return "Off Track";
+  if (completion !== null && cycle !== null && completion + 0.01 < cycle) return "At Risk";
+  return status || "On Track";
+}
+
+function adminIsLineOverviewSnapshot(snapshot) {
+  return /line overview/i.test(String(snapshot?.trackerType || "")) ||
+    /^Line Overview\s*\|/i.test(String(snapshot?.name || "")) ||
+    /^LINE OVERVIEW SNAPSHOT/i.test(String(snapshot?.notes || ""));
+}
+
+function adminLineOverviewFromSnapshot(snapshot) {
+  if (!snapshot) return null;
+  const phases = adminParseLineOverviewPhases(snapshot.notes || "");
+  const phaseCyclePct = phases.find(phase => adminNumberOrNull(phase.cyclePct) !== null)?.cyclePct ?? null;
+  const snapshotCyclePct = adminNumberOrNull(snapshot.cycleProgressPercent);
+  const totalLoadHours = round(phases.reduce((sum, phase) => sum + Number(phase.totalLoadHours || 0), 0), 2);
+  const completedHours = round(phases.reduce((sum, phase) => sum + Number(phase.completedHours || 0), 0), 2);
+  const computedCompletionPct = totalLoadHours ? round((completedHours / totalLoadHours) * 100, 1) : null;
+  const snapshotCompletionPct = adminNumberOrNull(snapshot.completionPercent);
+  const cycleProgressPct = snapshotCyclePct && snapshotCyclePct > 0 ? snapshotCyclePct : (phaseCyclePct ?? snapshotCyclePct);
+  const completionPct = snapshotCompletionPct && snapshotCompletionPct > 0 ? snapshotCompletionPct : (computedCompletionPct ?? snapshotCompletionPct);
+
   return {
+    gid: snapshot.gid,
+    name: snapshot.name,
+    cycle: snapshot.cycle,
+    cycleLabel: snapshot.cycle,
+    status: snapshot.trackerStatus,
+    trackerDate: snapshot.trackerDate,
+    completionPct,
+    cycleProgressPct,
+    remainingWorkdays: adminParseLineOverviewRemainingWorkdays(snapshot.notes || ""),
+    remainingAssignedHours: snapshot.remainingHours,
+    remainingHours: snapshot.remainingHours,
+    assignedHours: snapshot.assignedHours,
+    completedHours: snapshot.completedHours,
+    taskCount: snapshot.taskCount,
+    completedTaskCount: snapshot.completedTaskCount,
+    capacityHours: snapshot.capacityHours,
+    capacityDeltaHours: snapshot.capacityDeltaHours,
+    loadCapacityPercent: snapshot.loadCapacityPercent,
+    phases,
+    trackerUrl: snapshot.url,
+    source: "raw.asana_tasks"
+  };
+}
+
+async function adminLatestLineOverview() {
+  const result = await pool.query(
+    `
+      select
+        gid,
+        name,
+        completed,
+        due_on::text,
+        permalink_url,
+        custom_fields_json,
+        raw_json,
+        synced_at::text
+      from raw.asana_tasks
+      where project_gid = $1
+      order by
+        due_on desc nulls last,
+        modified_at desc nulls last,
+        synced_at desc nulls last,
+        name
+      limit 500
+    `,
+    [DAILY_TRACKER_PROJECT_ID]
+  );
+
+  return result.rows
+    .map(normalizeTrackerSnapshot)
+    .filter(snapshot => !snapshot.archivedSection)
+    .filter(adminIsLineOverviewSnapshot)
+    .sort((left, right) =>
+      String(right.trackerDate || right.dueOn || "").localeCompare(String(left.trackerDate || left.dueOn || "")) ||
+      String(right.syncedAt || "").localeCompare(String(left.syncedAt || ""))
+    )[0] || null;
+}
+
+function adminDebtTier(key, label, shortLabel, tone, cycleNumbers = []) {
+  return {
+    key,
     label,
     shortLabel,
     tone,
+    total: 0,
     totalHours: 0,
-    byPhase: {}
+    byPhase: {},
+    cycleNumbers
   };
 }
 
 function addAdminDebtHours(tier, phaseName, hours) {
   const value = round(Number(hours || 0), 2);
   if (value <= 0) return;
+  tier.total = round(Number(tier.total || 0) + value, 2);
   tier.totalHours = round(tier.totalHours + value, 2);
   tier.byPhase[phaseName] = round((tier.byPhase[phaseName] || 0) + value, 2);
 }
@@ -5640,11 +5858,51 @@ function adminPhasePacingStatus(row, cycleProgressPct) {
   return "Watch pace";
 }
 
+function adminPhaseCapacityStatus(row) {
+  const remainingHours = Number(row.remainingHours || 0);
+  const capacityHours = Number(row.capacityHours || 0);
+  const workerCount = Number(row.workerCount || 0);
+  const pacingStatus = String(row.status || "").toLowerCase();
+  if (remainingHours <= 0.05) return "Complete";
+  if (!workerCount || capacityHours <= 0.05) return "No capacity";
+  if (remainingHours > capacityHours + 0.05) return "Off track";
+  if (pacingStatus.includes("behind") || pacingStatus.includes("watch")) return "At risk";
+  return "On track";
+}
+
 async function adminPlhMetricsPayload() {
   const baselineCycleNumber = cycleNumberFromName(ADMIN_PLH_BASELINE_CYCLE) || 5;
   const today = todayIso();
-  const [cycleResult, debtResult, dailyResult] = await Promise.all([
+  const [cycleResult, debtResult, dailyResult, latestLineOverviewSnapshot] = await Promise.all([
     pool.query(`
+      with cycle_rows as (
+        select
+          cycle_record_id,
+          cycle_number,
+          cycle_label,
+          start_date,
+          end_date,
+          days_in_cycle,
+          holidays,
+          cycle_percent,
+          0 as source_rank
+        from hb.cycles
+        where cycle_number is not null
+        union all
+        select
+          max(cycle_record_id) as cycle_record_id,
+          cycle_number,
+          coalesce(max(nullif(short_cycle_label, '')), max(nullif(cycle_label, '')), 'C' || cycle_number::text) as cycle_label,
+          min(start_date) as start_date,
+          max(end_date) as end_date,
+          max(days_in_cycle) as days_in_cycle,
+          null::text as holidays,
+          null::numeric as cycle_percent,
+          1 as source_rank
+        from hb.production_schedule
+        where cycle_number is not null
+        group by cycle_number
+      )
       select
         cycle_record_id,
         cycle_number,
@@ -5654,10 +5912,10 @@ async function adminPlhMetricsPayload() {
         days_in_cycle,
         holidays,
         cycle_percent
-      from hb.cycles
-      where cycle_number is not null
+      from cycle_rows
       order by
         case when $1::date between coalesce(start_date, $1::date) and coalesce(end_date, $1::date) then 0 else 1 end,
+        source_rank,
         start_date desc nulls last,
         cycle_number desc
       limit 1
@@ -5700,32 +5958,123 @@ async function adminPlhMetricsPayload() {
         coalesce(sum(review_required_count), 0)::integer as review_required_count
       from reporting.worker_daily_utilization
       where work_date = $1::date
-    `, [today])
+    `, [today]),
+    adminLatestLineOverview()
   ]);
 
   const cycleStatus = adminCycleStatus(cycleResult.rows[0] || null);
   const currentCycleNumber = cycleStatus.cycleNumber;
+  const carryoverCycleNumbers = baselineCycleNumber && currentCycleNumber
+    ? Array.from(
+      { length: Math.max(currentCycleNumber - baselineCycleNumber - 1, 0) },
+      (_item, index) => baselineCycleNumber + index + 1
+    )
+    : [];
+  const carryoverCycleLabels = carryoverCycleNumbers.map(cycleNumber => `C${cycleNumber}`);
   const tiers = {
-    current: adminDebtTier(`${cycleStatus.label || "Current"} Current Work`, cycleStatus.label || "Current", "blue"),
-    carryover: adminDebtTier("Carryover Debt", "Carryover", "warn"),
-    original: adminDebtTier(`C1-${ADMIN_PLH_BASELINE_CYCLE} Original Debt`, `C1-${ADMIN_PLH_BASELINE_CYCLE}`, "risk")
+    current: adminDebtTier(
+      "current",
+      `${cycleStatus.label || "Current"} Current Work`,
+      cycleStatus.label || "Current",
+      "blue",
+      currentCycleNumber ? [currentCycleNumber] : []
+    ),
+    carryover: adminDebtTier(
+      "carryover",
+      `${carryoverCycleLabels.join(" + ") || "Prior Cycle"} Carryover`,
+      carryoverCycleLabels.join(" + ") || "Carryover",
+      "warn",
+      carryoverCycleNumbers
+    ),
+    original: adminDebtTier(
+      "original",
+      `C1-${ADMIN_PLH_BASELINE_CYCLE} Original Debt`,
+      `C1-${ADMIN_PLH_BASELINE_CYCLE}`,
+      "risk",
+      baselineCycleNumber ? Array.from({ length: baselineCycleNumber }, (_item, index) => index + 1) : []
+    )
   };
+  const carryoverTierKeys = [];
+  for (const cycleNumber of carryoverCycleNumbers) {
+    const label = `C${cycleNumber}`;
+    const key = `carryover${label}`;
+    carryoverTierKeys.push(key);
+    tiers[key] = adminDebtTier(key, `${label} Carryover`, label, "warn", [cycleNumber]);
+  }
+  const tierOrder = ["current", ...(carryoverTierKeys.length ? carryoverTierKeys.slice().reverse() : ["carryover"]), "original"];
   const matrix = new Map();
   const currentRows = [];
+  const capacityResult = currentCycleNumber
+    ? await pool.query(`
+      with worker_phase_capacity as (
+        select
+          coalesce(nullif(wpa.home_phase_text, ''), nullif(wpa.worked_phase_text, ''), 'Unassigned') as phase_name,
+          wpa.worker_record_id,
+          max(coalesce(wcb.effective_hours_bank, wcb.cycle_capacity, 0)) as effective_hours_bank,
+          max(coalesce(wcb.remaining_hours, 0)) as remaining_bank_hours,
+          max(coalesce(wcb.assigned_hours_total, 0)) as assigned_hours_total
+        from hb.worker_phase_allocation_rev1 wpa
+        join hb.worker_cycle_bank_rev1 wcb on wcb.worker_cycle_key = wpa.worker_cycle_key
+        left join hb.cycles cycles on cycles.cycle_record_id = wpa.cycle_record_id
+        where coalesce(
+          cycles.cycle_number,
+          nullif(substring(coalesce(wpa.cycle_label, '') from 'C[[:space:]]*([0-9]{1,3})'), '')::int,
+          nullif(substring(coalesce(wpa.cycle_label, '') from '([0-9]{1,3})'), '')::int
+        ) = $1::int
+          and coalesce(wcb.actively_employed, false)
+        group by 1, wpa.worker_record_id
+      )
+      select
+        phase_name,
+        count(*)::int as worker_count,
+        coalesce(sum(effective_hours_bank), 0)::numeric(12, 2) as effective_hours_bank,
+        coalesce(sum(remaining_bank_hours), 0)::numeric(12, 2) as remaining_bank_hours,
+        coalesce(sum(assigned_hours_total), 0)::numeric(12, 2) as assigned_hours_total
+      from worker_phase_capacity
+      group by phase_name
+    `, [currentCycleNumber])
+    : { rows: [] };
+  const remainingCapacityRatio = cycleStatus.totalWorkdays
+    ? Math.max(0, Math.min(1, Number(cycleStatus.remainingWorkdays || 0) / Number(cycleStatus.totalWorkdays || 1)))
+    : 1;
+  const capacityByPhase = new Map();
+  for (const row of capacityResult.rows) {
+    const phaseName = formatPhaseName(row.phase_name) || "Unassigned";
+    const phaseKey = adminPhaseFamilyName(phaseName);
+    const existing = capacityByPhase.get(phaseKey) || {
+      phaseName: phaseKey,
+      phaseKey,
+      workerCount: 0,
+      capacityHours: 0,
+      fullCycleCapacityHours: 0,
+      bankRemainingHours: 0,
+      assignedHoursTotal: 0
+    };
+    const fullCycleCapacityHours = Number(row.effective_hours_bank || 0);
+    existing.workerCount += Number(row.worker_count || 0);
+    existing.fullCycleCapacityHours = round(existing.fullCycleCapacityHours + fullCycleCapacityHours, 2);
+    existing.capacityHours = round(existing.capacityHours + (fullCycleCapacityHours * remainingCapacityRatio), 2);
+    existing.bankRemainingHours = round(existing.bankRemainingHours + Number(row.remaining_bank_hours || 0), 2);
+    existing.assignedHoursTotal = round(existing.assignedHoursTotal + Number(row.assigned_hours_total || 0), 2);
+    capacityByPhase.set(phaseKey, existing);
+  }
 
   for (const row of debtResult.rows) {
     const cycleNumber = row.cycle_number === null || row.cycle_number === undefined ? null : Number(row.cycle_number);
     if (currentCycleNumber && cycleNumber && cycleNumber > currentCycleNumber) continue;
     const phaseName = formatPhaseName(row.phase_name) || "Unassigned";
+    if (ADMIN_PLH_PHASES.size && !ADMIN_PLH_PHASES.has(phaseName)) continue;
     const remainingHours = round(row.remaining_hours, 2);
     const totalLoadHours = round(row.total_load_hours, 2);
     const completedHours = round(row.completed_hours, 2);
     let tierKey = "original";
+    let isCarryover = false;
 
     if (currentCycleNumber && cycleNumber === currentCycleNumber) {
       tierKey = "current";
       currentRows.push({
         phaseName,
+        phaseKey: adminPhaseFamilyName(phaseName),
         cycleNumber,
         cycleLabel: row.cycle_label || cycleStatus.label,
         remainingHours,
@@ -5733,31 +6082,67 @@ async function adminPlhMetricsPayload() {
         completedHours,
         status: row.status || ""
       });
+    } else if (cycleNumber && carryoverCycleNumbers.includes(cycleNumber)) {
+      tierKey = `carryoverC${cycleNumber}`;
+      isCarryover = true;
     } else if (cycleNumber && cycleNumber > baselineCycleNumber) {
       tierKey = "carryover";
+      isCarryover = true;
     }
 
     addAdminDebtHours(tiers[tierKey], phaseName, remainingHours);
+    if (isCarryover && tierKey !== "carryover") addAdminDebtHours(tiers.carryover, phaseName, remainingHours);
 
     const existing = matrix.get(phaseName) || {
+      phase: phaseName,
       phaseName,
+      tiers: {},
       currentHours: 0,
       carryoverHours: 0,
       originalDebtHours: 0,
-      totalPressureHours: 0
+      totalPressureHours: 0,
+      carryover: 0,
+      total: 0
     };
+    existing.tiers[tierKey] = round((existing.tiers[tierKey] || 0) + remainingHours, 2);
     if (tierKey === "current") existing.currentHours = round(existing.currentHours + remainingHours, 2);
-    if (tierKey === "carryover") existing.carryoverHours = round(existing.carryoverHours + remainingHours, 2);
+    if (isCarryover || tierKey === "carryover") {
+      existing.carryoverHours = round(existing.carryoverHours + remainingHours, 2);
+      existing.carryover = existing.carryoverHours;
+    }
     if (tierKey === "original") existing.originalDebtHours = round(existing.originalDebtHours + remainingHours, 2);
     existing.totalPressureHours = round(existing.currentHours + existing.carryoverHours + existing.originalDebtHours, 2);
+    existing.total = existing.totalPressureHours;
     matrix.set(phaseName, existing);
   }
 
-  const currentTotalLoadHours = round(currentRows.reduce((sum, row) => sum + Number(row.totalLoadHours || 0), 0), 2);
-  const currentCompletedHours = round(currentRows.reduce((sum, row) => sum + Number(row.completedHours || 0), 0), 2);
-  const currentRemainingHours = round(currentRows.reduce((sum, row) => sum + Number(row.remainingHours || 0), 0), 2);
-  const completionPct = currentTotalLoadHours ? round((currentCompletedHours / currentTotalLoadHours) * 100, 1) : null;
-  const cycleProgressPct = cycleStatus.progressPct;
+  const lineOverview = adminLineOverviewFromSnapshot(latestLineOverviewSnapshot);
+  const lineOverviewPhases = Array.isArray(lineOverview?.phases) ? lineOverview.phases : [];
+  const hasLineOverviewPhases = lineOverviewPhases.length > 0;
+  const lineOverviewTotalLoadHours = round(
+    lineOverviewPhases.reduce((sum, phase) => sum + Number(phase.totalLoadHours || 0), 0),
+    2
+  );
+  const lineOverviewCompletedHours = round(
+    lineOverviewPhases.reduce((sum, phase) => sum + Number(phase.completedHours || 0), 0),
+    2
+  );
+  const lineOverviewRemainingHours = round(
+    lineOverviewPhases.reduce((sum, phase) => sum + Number(phase.remainingHours || 0), 0),
+    2
+  );
+  const currentTotalLoadHours = hasLineOverviewPhases
+    ? lineOverviewTotalLoadHours
+    : round(currentRows.reduce((sum, row) => sum + Number(row.totalLoadHours || 0), 0), 2);
+  const currentCompletedHours = hasLineOverviewPhases
+    ? lineOverviewCompletedHours
+    : round(currentRows.reduce((sum, row) => sum + Number(row.completedHours || 0), 0), 2);
+  const currentRemainingHours = hasLineOverviewPhases
+    ? lineOverviewRemainingHours
+    : round(currentRows.reduce((sum, row) => sum + Number(row.remainingHours || 0), 0), 2);
+  const completionPct = adminNumberOrNull(lineOverview?.completionPct) ??
+    (currentTotalLoadHours ? round((currentCompletedHours / currentTotalLoadHours) * 100, 1) : null);
+  const cycleProgressPct = adminNumberOrNull(lineOverview?.cycleProgressPct) ?? cycleStatus.progressPct;
   const expectedCompletedHours = cycleProgressPct === null || cycleProgressPct === undefined
     ? null
     : round(currentTotalLoadHours * (cycleProgressPct / 100), 2);
@@ -5771,32 +6156,93 @@ async function adminPlhMetricsPayload() {
     paceDeltaPct <= -10 ? "Behind pace" :
     "Watch pace";
 
-  const phasePacing = currentRows
-    .map(row => {
-      const rowCompletionPct = row.totalLoadHours ? round((row.completedHours / row.totalLoadHours) * 100, 1) : null;
-      const rowExpectedHours = cycleProgressPct === null || cycleProgressPct === undefined
+  const phasePacing = hasLineOverviewPhases
+    ? lineOverviewPhases.map(phase => {
+      const phaseCyclePct = adminNumberOrNull(phase.cyclePct) ?? cycleProgressPct;
+      const phaseCompletionPct = adminNumberOrNull(phase.completionPct);
+      const totalLoadHours = adminNumberOrNull(phase.totalLoadHours) ??
+        round(Number(phase.completedHours || 0) + Number(phase.remainingHours || 0), 2);
+      const expectedHours = phaseCyclePct === null || phaseCyclePct === undefined
         ? null
-        : round(row.totalLoadHours * (cycleProgressPct / 100), 2);
-      const rowPaceDeltaHours = rowExpectedHours === null ? null : round(row.completedHours - rowExpectedHours, 2);
-      const rowPaceDeltaPct = rowCompletionPct === null || cycleProgressPct === null || cycleProgressPct === undefined
+        : round(totalLoadHours * (phaseCyclePct / 100), 2);
+      const completedHours = round(Number(phase.completedHours || 0), 2);
+      const paceDeltaHours = expectedHours === null ? null : round(completedHours - expectedHours, 2);
+      const paceDeltaPct = phaseCompletionPct === null || phaseCyclePct === null || phaseCyclePct === undefined
         ? null
-        : round(rowCompletionPct - cycleProgressPct, 1);
-      const payload = {
-        ...row,
-        completionPct: rowCompletionPct,
-        cycleProgressPct,
-        expectedCompletedHours: rowExpectedHours,
-        paceDeltaHours: rowPaceDeltaHours,
-        paceDeltaPct: rowPaceDeltaPct
-      };
+        : round(phaseCompletionPct - phaseCyclePct, 1);
+      const status = adminComputedPhaseStatus(phase, cycleProgressPct);
       return {
-        ...payload,
-        status: adminPhasePacingStatus(payload, cycleProgressPct)
+        ...phase,
+        phaseName: phase.phaseName || phase.phase,
+        cycleProgressPct: phaseCyclePct,
+        expectedCompletedHours: expectedHours,
+        paceDeltaHours,
+        paceDeltaPct,
+        status,
+        sourceStatus: phase.status || "",
+        capacityStatus: status,
+        totalLoadHours,
+        completedHours,
+        remainingHours: round(Number(phase.remainingHours || 0), 2),
+        capacityHours: round(Number(phase.capacityHours || 0), 2),
+        fullCycleCapacityHours: round(Number(phase.capacityHours || 0), 2),
+        capacityDeltaHours: round(Number(phase.capacityDeltaHours || 0), 2),
+        capacityLabel: phase.capacityLabel || (Number(phase.capacityHours || 0) >= Number(phase.remainingHours || 0) ? "Cushion" : "Gap"),
+        workerCount: Number(phase.workerCount || 0),
+        lineOverviewSource: true
       };
     })
-    .sort((left, right) => Number(left.paceDeltaHours || -9999) - Number(right.paceDeltaHours || -9999));
+    : currentRows
+      .map(row => {
+        const capacity = capacityByPhase.get(row.phaseKey) || {};
+        const rowCompletionPct = row.totalLoadHours ? round((row.completedHours / row.totalLoadHours) * 100, 1) : null;
+        const rowExpectedHours = cycleProgressPct === null || cycleProgressPct === undefined
+          ? null
+          : round(row.totalLoadHours * (cycleProgressPct / 100), 2);
+        const rowPaceDeltaHours = rowExpectedHours === null ? null : round(row.completedHours - rowExpectedHours, 2);
+        const rowPaceDeltaPct = rowCompletionPct === null || cycleProgressPct === null || cycleProgressPct === undefined
+          ? null
+          : round(rowCompletionPct - cycleProgressPct, 1);
+        const payload = {
+          ...row,
+          completionPct: rowCompletionPct,
+          cycleProgressPct,
+          expectedCompletedHours: rowExpectedHours,
+          paceDeltaHours: rowPaceDeltaHours,
+          paceDeltaPct: rowPaceDeltaPct,
+          workerCount: Number(capacity.workerCount || 0),
+          capacityHours: round(capacity.capacityHours || 0, 2),
+          fullCycleCapacityHours: round(capacity.fullCycleCapacityHours || 0, 2),
+          bankRemainingHours: round(capacity.bankRemainingHours || 0, 2),
+          assignedHoursTotal: round(capacity.assignedHoursTotal || 0, 2)
+        };
+        const capacityDeltaSignedHours = round(Number(payload.capacityHours || 0) - Number(row.remainingHours || 0), 2);
+        return {
+          ...payload,
+          capacityDeltaHours: Math.abs(capacityDeltaSignedHours),
+          capacityDeltaSignedHours,
+          capacityLabel: capacityDeltaSignedHours >= 0 ? "Cushion" : "Gap",
+          status: adminPhasePacingStatus(payload, cycleProgressPct),
+          capacityStatus: adminPhaseCapacityStatus({ ...payload, capacityDeltaHours: capacityDeltaSignedHours })
+        };
+      })
+      .sort((left, right) => Number(left.paceDeltaHours || -9999) - Number(right.paceDeltaHours || -9999));
 
   const debtMatrix = Array.from(matrix.values())
+    .map(row => {
+      const tierValues = Object.fromEntries(
+        tierOrder.map(tierKey => [tierKey, round(row.tiers?.[tierKey] || 0, 2)])
+      );
+      const total = round(tierOrder.reduce((sum, tierKey) => sum + (tierValues[tierKey] || 0), 0), 2);
+      return {
+        ...row,
+        ...tierValues,
+        tiers: tierValues,
+        total,
+        totalPressureHours: total,
+        carryover: row.carryoverHours
+      };
+    })
     .filter(row => row.totalPressureHours > 0)
     .sort((left, right) => right.totalPressureHours - left.totalPressureHours);
   const daily = dailyResult.rows[0] || {};
@@ -5823,6 +6269,30 @@ async function adminPlhMetricsPayload() {
       totalRecoveryDebtHours: round(tiers.carryover.totalHours + tiers.original.totalHours, 2),
       tiers
     },
+    debtTiers: {
+      baselineCycle: ADMIN_PLH_BASELINE_CYCLE,
+      currentCycle: cycleStatus.label,
+      cycleStatus,
+      cycleStartDate: cycleStatus.startDate,
+      cycleEndDate: cycleStatus.endDate,
+      cycleProgressPct: cycleStatus.progressPct,
+      totalWorkdays: cycleStatus.totalWorkdays,
+      elapsedWorkday: cycleStatus.elapsedWorkday,
+      remainingWorkdays: cycleStatus.remainingWorkdays,
+      carryoverCycle: carryoverCycleLabels[carryoverCycleLabels.length - 1] || "",
+      carryoverCycles: carryoverCycleLabels,
+      tiers,
+      tierOrder,
+      matrix: debtMatrix,
+      totalRecoveryDebt: round(tiers.carryover.totalHours + tiers.original.totalHours, 2),
+      totalPressure: round(tiers.current.totalHours + tiers.carryover.totalHours + tiers.original.totalHours, 2),
+      source: "hb.phase_cycle_load_rev1"
+    },
+    tracker: {
+      latestLineOverviewDate: lineOverview?.trackerDate || "",
+      lineOverview,
+      source: lineOverview ? "raw.asana_tasks" : ""
+    },
     phasePacing,
     debtMatrix,
     daily: {
@@ -5834,7 +6304,9 @@ async function adminPlhMetricsPayload() {
       completedTaskCount: Number(daily.completed_task_count || 0),
       reviewRequiredCount: Number(daily.review_required_count || 0)
     },
-    source: "hb.cycles + hb.phase_cycle_load_rev1"
+    source: hasLineOverviewPhases
+      ? "raw.asana_tasks line overview + hb.cycles + hb.phase_cycle_load_rev1"
+      : "hb.cycles + hb.phase_cycle_load_rev1 + hb.worker_cycle_bank_rev1"
   };
 }
 

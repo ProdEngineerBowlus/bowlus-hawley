@@ -38,6 +38,11 @@
     return `${Number.isFinite(number) ? number.toFixed(number >= 10 ? 1 : 2) : "0"}h`;
   }
 
+  function formatHoursPrecise(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? `${number.toFixed(2)}h` : "--";
+  }
+
   function formatPercent(value) {
     const number = Number(value);
     return Number.isFinite(number) ? `${number.toFixed(1)}%` : "n/a";
@@ -62,6 +67,67 @@
     const date = new Date(`${value}T12:00:00`);
     if (Number.isNaN(date.getTime())) return String(value);
     return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
+
+  function clamp(value, min, max) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return min;
+    return Math.max(min, Math.min(max, number));
+  }
+
+  function formatWorkdays(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return "no pace";
+    if (number < 1) return "<1d";
+    return `${number.toFixed(number >= 10 ? 0 : 1)}d`;
+  }
+
+  function phaseShortName(value) {
+    return String(value || "Phase")
+      .replace(/^Phase\s+/i, "")
+      .replace(/\s+/g, " ")
+      .trim() || "Phase";
+  }
+
+  function sparklinePath(points, width, height, maxValue) {
+    const safePoints = points.length ? points : [0];
+    const safeMax = Math.max(Number(maxValue) || 0, 1);
+    return safePoints.map((point, index) => {
+      const x = safePoints.length === 1 ? width / 2 : (index / (safePoints.length - 1)) * width;
+      const y = height - (clamp(point, 0, safeMax) / safeMax) * height;
+      return `${index === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`;
+    }).join(" ");
+  }
+
+  function renderPaceSparkline({ totalLoad, completed, remaining, idealDailyCapacity, currentDailyPace, totalWorkdays, elapsedWorkdays }) {
+    const width = 122;
+    const height = 40;
+    const days = Math.max(2, Math.round(Number(totalWorkdays) || 10));
+    const safeTotal = Math.max(Number(totalLoad) || (Number(completed) || 0) + (Number(remaining) || 0), 1);
+    const safeCompleted = Math.max(Number(completed) || 0, 0);
+    const elapsed = clamp(Number(elapsedWorkdays) || 0, 0, days);
+    const safeIdealDaily = Number(idealDailyCapacity) || (safeTotal / days);
+    const safeCurrentDaily = Number(currentDailyPace) || (elapsed > 0 ? safeCompleted / elapsed : 0);
+    const idealPoints = Array.from({ length: days }, (_, index) => Math.max(safeTotal - safeIdealDaily * (index + 1), 0));
+    const pacePoints = Array.from({ length: days }, (_, index) => {
+      if (!safeCurrentDaily) return safeTotal;
+      return Math.max(safeTotal - safeCurrentDaily * (index + 1), 0);
+    });
+    const maxValue = Math.max(safeTotal, ...idealPoints, ...pacePoints, 1);
+    const elapsedIndex = clamp(Math.round(elapsed) - 1, 0, days - 1);
+    const markerX = days === 1 ? width / 2 : (elapsedIndex / (days - 1)) * width;
+    const markerY = height - (Math.max(safeTotal - safeCompleted, 0) / maxValue) * height;
+
+    return `
+      <div class="pace-spark" title="Target burn-down, current pace projection, and current remaining work.">
+        <svg viewBox="0 0 ${width} ${height}" aria-hidden="true">
+          <line x1="0" y1="${height}" x2="${width}" y2="${height}" stroke="rgba(240,245,233,0.16)" stroke-width="1"></line>
+          <path d="${sparklinePath(idealPoints, width, height, maxValue)}" fill="none" stroke="var(--primary)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path>
+          <path d="${sparklinePath(pacePoints, width, height, maxValue)}" fill="none" stroke="var(--warn)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path>
+          <circle cx="${markerX.toFixed(1)}" cy="${markerY.toFixed(1)}" r="3.4" fill="var(--ink)"></circle>
+        </svg>
+      </div>
+    `;
   }
 
   function accountAuth() {
@@ -277,9 +343,42 @@
 
   function toneForPacingStatus(status) {
     const normalized = String(status || "").toLowerCase();
-    if (normalized.includes("behind") || normalized.includes("off")) return "risk";
+    if (normalized.includes("behind") || normalized.includes("off") || normalized.includes("no capacity")) return "risk";
     if (normalized.includes("watch") || normalized.includes("risk")) return "warn";
     return "good";
+  }
+
+  function surfaceTone(status) {
+    const normalized = String(status || "").toLowerCase();
+    if (normalized.includes("off") || normalized.includes("no capacity")) return "high";
+    if (normalized.includes("risk") || normalized.includes("watch")) return "med";
+    return "low";
+  }
+
+  function numberOrNull(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function computedPhaseStatus(phase, fallbackCycleProgress = null) {
+    const remaining = numberOrNull(phase?.remainingHours);
+    const capacity = numberOrNull(phase?.capacityHours);
+    const completion = numberOrNull(phase?.completionPct);
+    const cycle = numberOrNull(phase?.cyclePct) ?? numberOrNull(phase?.cycleProgressPct) ?? numberOrNull(fallbackCycleProgress);
+    const status = String(phase?.status || "");
+
+    if (remaining !== null && remaining <= 0.05) return "On Track";
+    if (capacity !== null && capacity <= 0.05) return "Off Track";
+    if (remaining !== null && capacity !== null && remaining > capacity + 0.05) return "Off Track";
+    if (completion !== null && cycle !== null && completion + 0.01 < cycle) return "At Risk";
+    return status || "On Track";
+  }
+
+  function matrixCell(value) {
+    const number = Number(value || 0);
+    const className = number > 0.05 ? "" : "zero";
+    return `<td class="${className}">${escapeHtml(number > 0.05 ? formatHoursPrecise(number) : "-")}</td>`;
   }
 
   function progressBar(label, value, tone = "good") {
@@ -379,19 +478,185 @@
     `;
   }
 
+  function renderPhaseCycleBurnDown(plh) {
+    const debt = plh?.debtTiers || {};
+    const recovery = plh?.recovery || {};
+    const rows = debt.matrix || plh?.debtMatrix || [];
+    const tiers = debt.tiers || recovery.tiers || {};
+    const tierOrder = debt.tierOrder || ["current", "carryover", "original"];
+    const visibleTiers = tierOrder
+      .map(key => ({ key, ...(tiers[key] || {}) }))
+      .filter(tier => tier.key && tiers[tier.key]);
+    const visibleRows = rows.slice(0, 10);
+    const hiddenCount = Math.max(rows.length - visibleRows.length, 0);
+    const recoveryDebt = debt.totalRecoveryDebt ?? recovery.totalRecoveryDebtHours;
+    const totalPressure = debt.totalPressure ?? recovery.totalPressureHours;
+    return `
+      <article class="panel visual-panel plh-reference-panel burn-panel">
+        <div class="visual-head">
+          <div>
+            <h3 class="panel-title">Phase-Cycle Burn-Down</h3>
+            <p class="muted">Phase work split by current cycle pressure, carryover cycle, and original recovery debt.</p>
+          </div>
+          <span class="section-tag">Phase Matrix</span>
+        </div>
+        <div class="burn-matrix-wrap">
+          <table class="burn-matrix">
+            <thead>
+              <tr>
+                <th>Phase</th>
+                ${visibleTiers.map(tier => `<th>${escapeHtml(tier.shortLabel || tier.label || tier.key)}</th>`).join("")}
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${visibleRows.map(row => `
+                <tr>
+                  <td>${escapeHtml(phaseShortName(row.phaseName || row.phase))}</td>
+                  ${visibleTiers.map(tier => matrixCell(row.tiers?.[tier.key] ?? row[tier.key])).join("")}
+                  ${matrixCell(row.total ?? row.totalPressureHours)}
+                </tr>
+              `).join("") || `<tr><td colspan="${visibleTiers.length + 2}">No phase-cycle burn-down rows found in Postgres yet.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+        <p class="matrix-meta">Recovery debt ${escapeHtml(formatHours(recoveryDebt))} excludes current-cycle work. Total pressure including current work is ${escapeHtml(formatHours(totalPressure))}.${hiddenCount ? ` ${escapeHtml(formatNumber(hiddenCount))} lower-pressure phase rows hidden.` : ""}</p>
+      </article>
+    `;
+  }
+
+  function renderPhasePaceProjection(plh) {
+    const lineOverview = plh?.tracker?.lineOverview || {};
+    const rows = lineOverview.phases?.length ? lineOverview.phases : (plh?.phasePacing || []);
+    const cycle = plh?.cycleStatus || {};
+    const debt = plh?.debtTiers || {};
+    const cycleProgress = Number(debt.cycleProgressPct ?? lineOverview.cycleProgressPct ?? cycle.progressPct);
+    const totalWorkdays = Number(debt.totalWorkdays ?? cycle.totalWorkdays);
+    const remainingWorkdays = Number(debt.remainingWorkdays ?? lineOverview.remainingWorkdays ?? cycle.remainingWorkdays);
+    const elapsedWorkdays = Number.isFinite(cycleProgress) && cycleProgress > 0 && Number.isFinite(totalWorkdays)
+      ? totalWorkdays * (cycleProgress / 100)
+      : Number(cycle.elapsedWorkday || 0);
+    return `
+      <article class="panel visual-panel plh-reference-panel pace-panel">
+        <div class="visual-head">
+          <div>
+            <h3 class="panel-title">Phase Pace Projection</h3>
+            <p class="muted">Daily Assignment Tracker pace by phase, projected forward if the current completion rate continues.</p>
+          </div>
+          <span class="section-tag">A-F Pace</span>
+        </div>
+        <div class="phase-pace-list">
+          ${rows.map(row => {
+            const status = computedPhaseStatus(row, cycleProgress);
+            const tone = toneForPacingStatus(status);
+            const completed = Number(row.completedHours || 0);
+            const remaining = Number(row.remainingHours || 0);
+            const totalLoad = Number(row.totalLoadHours || completed + remaining || 0);
+            const workerCount = Number(row.workerCount || 0);
+            const hoursPerWorker = workerCount > 0 ? remaining / workerCount : null;
+            const capacityHours = Number(row.capacityHours || 0);
+            const idealDailyCapacity = Number.isFinite(remainingWorkdays) && remainingWorkdays > 0
+              ? capacityHours / remainingWorkdays
+              : null;
+            const idealWorkdays = idealDailyCapacity && idealDailyCapacity > 0 ? remaining / idealDailyCapacity : null;
+            const dailyPace = elapsedWorkdays && completed > 0 ? completed / elapsedWorkdays : null;
+            const projectedWorkdays = dailyPace && dailyPace > 0 ? remaining / dailyPace : null;
+            const progress = clamp(row.completionPct, 0, 100).toFixed(1);
+            return `
+              <div class="pace-row ${tone}">
+                <div class="pace-phase">${escapeHtml(phaseShortName(row.phaseName || row.phase))}</div>
+                <div class="pace-copy">
+                  <strong>${escapeHtml(status)}</strong>
+                  <small>${escapeHtml(formatHours(remaining))} remaining / ${escapeHtml(formatNumber(workerCount))} worker${workerCount === 1 ? "" : "s"} = ${escapeHtml(hoursPerWorker === null ? "--" : formatHours(hoursPerWorker))} per worker</small>
+                  <small>ideal ${escapeHtml(formatWorkdays(idealWorkdays))} | current pace ${escapeHtml(formatWorkdays(projectedWorkdays))}</small>
+                </div>
+                <div class="pace-meter">
+                  <div class="pace-meter-track">
+                    <span class="pace-meter-fill ${escapeAttr(tone)}" style="width: ${progress}%"></span>
+                  </div>
+                  <small>${escapeHtml(formatPercent(row.completionPct))} / ${escapeHtml(formatPercent(row.cyclePct ?? row.cycleProgressPct ?? cycleProgress))}</small>
+                </div>
+                ${renderPaceSparkline({
+                  totalLoad,
+                  completed,
+                  remaining,
+                  idealDailyCapacity,
+                  currentDailyPace: dailyPace,
+                  totalWorkdays,
+                  elapsedWorkdays
+                })}
+              </div>
+            `;
+          }).join("") || `<div class="notice visual-empty">No Daily Assignment Tracker line overview phases found in Postgres yet.</div>`}
+        </div>
+      </article>
+    `;
+  }
+
+  function renderLiveCapacitySurface(plh) {
+    const lineOverview = plh?.tracker?.lineOverview || {};
+    const rows = lineOverview.phases?.length ? lineOverview.phases : (plh?.phasePacing || []);
+    const cycleProgress = plh?.debtTiers?.cycleProgressPct ?? lineOverview.cycleProgressPct;
+    const headers = ["Phase", "Status", "Remaining", "Capacity", "Gap / Cushion", "Complete", "Cycle"];
+    return `
+      <article class="panel visual-panel plh-reference-panel capacity-panel">
+        <div class="visual-head">
+          <div>
+            <h3 class="panel-title">Live Capacity Surface</h3>
+            <p class="muted">Current phase capacity and remaining-work signal parsed from the latest Daily Assignment Tracker line overview task.</p>
+          </div>
+          <span class="section-tag">Tracker Surface</span>
+        </div>
+        <div class="surface-grid">
+          ${headers.map(label => `<div class="surface-head">${escapeHtml(label)}</div>`).join("")}
+          ${rows.flatMap(row => {
+            const status = computedPhaseStatus(row, cycleProgress);
+            const tone = surfaceTone(status);
+            return [
+              `<div class="surface-label">${escapeHtml(phaseShortName(row.phaseName || row.phase))}</div>`,
+              `<div class="surface-cell ${tone}"><span class="surface-value">${escapeHtml(status)}</span></div>`,
+              `<div class="surface-cell ${tone}"><span class="surface-value">${escapeHtml(formatHoursPrecise(row.remainingHours))}</span></div>`,
+              `<div class="surface-cell ${tone}"><span class="surface-value">${escapeHtml(formatHoursPrecise(row.capacityHours))}</span></div>`,
+              `<div class="surface-cell ${tone}"><span class="surface-value">${escapeHtml(row.capacityLabel || "Gap")}: ${escapeHtml(formatHoursPrecise(row.capacityDeltaHours))}</span></div>`,
+              `<div class="surface-cell ${tone}"><span class="surface-value">${escapeHtml(formatPercent(row.completionPct))}</span></div>`,
+              `<div class="surface-cell ${tone}"><span class="surface-value">${escapeHtml(formatPercent(row.cyclePct ?? row.cycleProgressPct ?? cycleProgress))}</span><span class="surface-note">${escapeHtml(formatNumber(row.workerCount || 0))} worker${Number(row.workerCount || 0) === 1 ? "" : "s"}</span></div>`
+            ];
+          }).join("") || `<div class="notice surface-empty visual-empty">No live capacity rows found from the latest line overview yet.</div>`}
+        </div>
+      </article>
+    `;
+  }
+
+  function renderPlhVisuals(plh) {
+    return `
+      <section class="plh-visual-grid">
+        ${renderPhasePaceProjection(plh)}
+        ${renderLiveCapacitySurface(plh)}
+        ${renderPhaseCycleBurnDown(plh)}
+      </section>
+    `;
+  }
+
   function renderDashboard() {
     const latestRuns = state.dashboard?.latestRuns || [];
     const cycles = state.dashboard?.cycles || [];
     const phases = state.dashboard?.taskTemplatePhases || [];
     const plh = state.dashboard?.plh || {};
     const phasePacing = plh.phasePacing || [];
-    const debtMatrix = plh.debtMatrix || [];
+    const debt = plh.debtTiers || {};
+    const debtMatrix = debt.matrix || plh.debtMatrix || [];
+    const debtTiers = debt.tiers || {};
+    const debtTierOrder = debt.tierOrder || ["current", "carryover", "original"];
+    const visibleDebtTiers = debtTierOrder
+      .map(key => ({ key, ...(debtTiers[key] || {}) }))
+      .filter(tier => tier.key && debtTiers[tier.key]);
     return `
       <div class="content-stack">
         <section>
           <h2 class="section-title">Dashboard</h2>
           <p class="muted">Checked ${escapeHtml(new Date(state.dashboard?.checkedAt || Date.now()).toLocaleString())}</p>
         </section>
+        ${renderPlhVisuals(plh)}
         ${renderPlhSnapshot(plh)}
         <section class="split-grid">
           <article class="panel">
@@ -422,17 +687,15 @@
             </div>
             <div class="panel-body table-wrap">
               <table class="table">
-                <thead><tr><th>Phase</th><th>Current</th><th>Carryover</th><th>Original</th><th>Total</th></tr></thead>
+                <thead><tr><th>Phase</th>${visibleDebtTiers.map(tier => `<th>${escapeHtml(tier.shortLabel || tier.label || tier.key)}</th>`).join("")}<th>Total</th></tr></thead>
                 <tbody>
                   ${debtMatrix.map(row => `
                     <tr>
-                      <td>${escapeHtml(row.phaseName)}</td>
-                      <td>${escapeHtml(formatHours(row.currentHours))}</td>
-                      <td>${escapeHtml(formatHours(row.carryoverHours))}</td>
-                      <td>${escapeHtml(formatHours(row.originalDebtHours))}</td>
-                      <td>${escapeHtml(formatHours(row.totalPressureHours))}</td>
+                      <td>${escapeHtml(row.phaseName || row.phase)}</td>
+                      ${visibleDebtTiers.map(tier => `<td>${escapeHtml(formatHours(row.tiers?.[tier.key] ?? row[tier.key]))}</td>`).join("")}
+                      <td>${escapeHtml(formatHours(row.total ?? row.totalPressureHours))}</td>
                     </tr>
-                  `).join("") || `<tr><td colspan="5">No cycle debt rows.</td></tr>`}
+                  `).join("") || `<tr><td colspan="${visibleDebtTiers.length + 2}">No cycle debt rows.</td></tr>`}
                 </tbody>
               </table>
             </div>
