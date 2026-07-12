@@ -62,6 +62,12 @@
     return `${sign}${number.toFixed(1)}%`;
   }
 
+  function formatPaceIndex(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "n/a";
+    return `${(number / 100).toFixed(1)}x`;
+  }
+
   function formatDate(value) {
     if (!value) return "";
     const date = new Date(`${value}T12:00:00`);
@@ -172,19 +178,20 @@
   }
 
   function renderEfficiencyGauge(gauge) {
-    const efficiency = Number(gauge.efficiencyPct);
-    const scaleMax = 140;
-    const fill = Number.isFinite(efficiency) ? clamp((efficiency / scaleMax) * 100, 0, 100) : 0;
-    const value = Number.isFinite(efficiency) ? `${efficiency.toFixed(0)}%` : "n/a";
+    const completion = Number(gauge.completionPct);
+    const paceIndex = Number(gauge.efficiencyPct);
+    const fill = Number.isFinite(completion) ? clamp(completion, 0, 100) : 0;
+    const value = Number.isFinite(completion) ? `${completion.toFixed(0)}%` : "n/a";
     const deltaTone = Number(gauge.capacityDelta || 0) >= 0 ? "Cushion" : "Gap";
     const completionText = gauge.completionPct === null ? "n/a" : formatPercent(gauge.completionPct);
     const targetText = gauge.targetPct === null ? "n/a" : formatPercent(gauge.targetPct);
+    const paceText = formatPaceIndex(paceIndex);
     return `
       <article class="efficiency-card ${escapeAttr(gauge.tone)}">
         <div class="efficiency-dial" style="--dial-fill: ${fill.toFixed(1)}%;">
           <div class="efficiency-dial-core">
             <strong>${escapeHtml(value)}</strong>
-            <span>efficiency</span>
+            <span>complete</span>
           </div>
         </div>
         <div class="efficiency-copy">
@@ -195,7 +202,7 @@
         <div class="efficiency-details">
           <span><em>Remaining</em>${escapeHtml(formatHours(gauge.remaining))}</span>
           <span><em>${escapeHtml(deltaTone)}</em>${escapeHtml(formatHours(Math.abs(gauge.capacityDelta || 0)))}</span>
-          <span><em>Phases</em>${escapeHtml(gauge.phaseText)}</span>
+          <span><em>Pace Index</em>${escapeHtml(paceText)}</span>
         </div>
       </article>
     `;
@@ -665,6 +672,69 @@
     `;
   }
 
+  function renderScheduleAlignment(plh) {
+    const alignment = plh?.scheduleAlignment || {};
+    const currentCycleNumber = Number(alignment.currentCycleNumber || plh?.cycleStatus?.cycleNumber || 0);
+    const rows = (alignment.rows || []).filter(row => Number(row.cycleNumber || 0) === currentCycleNumber);
+    const phaseTotals = alignment.phaseTotals || [];
+    const positionsByPhase = new Map();
+
+    for (const row of rows) {
+      const key = row.presentationPhaseName || row.phaseName || "Unassigned";
+      const position = row.vin ? `VIN ${row.vin}` : (row.scheduleName || key);
+      const prior = row.priorPhaseName
+        ? `${row.priorCycleLabel || `C${Number(row.cycleNumber || 0) - 1}`} ${phaseShortName(row.priorPhaseName)} -> `
+        : "";
+      const label = `${position} (${prior}${row.cycleLabel || ""} ${phaseShortName(row.phaseName)})`;
+      if (!positionsByPhase.has(key)) positionsByPhase.set(key, []);
+      positionsByPhase.get(key).push(label);
+    }
+
+    return `
+      <article class="panel visual-panel schedule-alignment-panel">
+        <div class="visual-head">
+          <div>
+            <h3 class="panel-title">Production / Asana Mirror Check</h3>
+            <p class="muted">Current schedule positions from Postgres, summed against linked Rev1 task instances and mirrored Asana rows.</p>
+          </div>
+          <span class="section-tag">Schedule Proof</span>
+        </div>
+        <div class="alignment-table-wrap">
+          <table class="alignment-table">
+            <thead>
+              <tr>
+                <th>Phase</th>
+                <th>Current Position</th>
+                <th>Tasks</th>
+                <th>Mirror Hours</th>
+                <th>Pace Bucket</th>
+                <th>Delta</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${phaseTotals.map(row => {
+                const totalDelta = Number(row.mirrorVsPhaseCycleTotalDeltaHours || 0);
+                const doneDelta = Number(row.mirrorVsPhaseCycleCompletedDeltaHours || 0);
+                const deltaClass = Math.abs(totalDelta) > 0.05 || Math.abs(doneDelta) > 0.05 ? "warn" : "ok";
+                const positions = positionsByPhase.get(row.phaseName) || row.vins?.map(vin => `VIN ${vin}`) || [];
+                return `
+                  <tr>
+                    <td><strong>${escapeHtml(phaseShortName(row.phaseName))}</strong></td>
+                    <td>${escapeHtml(positions.join(", ") || "No VIN position")}</td>
+                    <td>${escapeHtml(formatNumber(row.rev1TaskCount))}/${escapeHtml(formatNumber(row.linkedTaskCount))} linked<br><small>${escapeHtml(formatNumber(row.asanaMirrorCount))} mirrored</small></td>
+                    <td>${escapeHtml(formatHours(row.mirrorCompletedHours))} done<br><small>${escapeHtml(formatHours(row.mirrorTotalHours))} total</small></td>
+                    <td>${escapeHtml(formatHours(row.phaseCycleCompletedHours))} done<br><small>${escapeHtml(formatHours(row.phaseCycleTotalHours))} total</small></td>
+                    <td class="${escapeAttr(deltaClass)}">${escapeHtml(formatSignedHours(totalDelta))} total<br><small>${escapeHtml(formatSignedHours(doneDelta))} done</small></td>
+                  </tr>
+                `;
+              }).join("") || `<tr><td colspan="6">No current-cycle production alignment rows found.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </article>
+    `;
+  }
+
   function renderPhasePaceProjection(plh) {
     const diagnostics = plh?.diagnostics || {};
     const sourceLabel = diagnostics.phaseCycleLoadSource || plh?.debtTiers?.source || plh?.source || "missing PLH payload";
@@ -818,6 +888,7 @@
     return `
       <section class="plh-visual-grid">
         ${renderPhasePaceProjection(plh)}
+        ${renderScheduleAlignment(plh)}
         ${renderPhaseCycleBurnDown(plh)}
       </section>
     `;

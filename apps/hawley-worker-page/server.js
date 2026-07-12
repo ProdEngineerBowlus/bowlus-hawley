@@ -18,7 +18,7 @@ const staticDir = path.join(appDir, "public");
 
 const HOST = process.env.HAWLEY_WORKER_HOST || (process.env.PORT ? "0.0.0.0" : "127.0.0.1");
 const PORT = Number(process.env.PORT || process.env.HAWLEY_WORKER_PORT || 5273);
-const APP_BUILD_LABEL = "hawley-native-plh-v1";
+const APP_BUILD_LABEL = "hawley-native-plh-v2";
 const APP_BUILD_COMMIT = process.env.SOURCE_COMMIT ||
   process.env.COMMIT_SHA ||
   process.env.GIT_SHA ||
@@ -5639,7 +5639,11 @@ function adminCycleStatus(row) {
     : 0;
   const totalWorkdays = Number(workdays.length || row.days_in_cycle || 0) || null;
   const remainingWorkdays = totalWorkdays
-    ? Math.max(0, totalWorkdays - Math.max(1, Math.min(totalWorkdays, elapsedWorkday || 0)) + 1)
+    ? (
+        endDate && today > endDate
+          ? 0
+          : workdays.filter(date => date >= effectiveToday).length
+      )
     : null;
   const progressPct = totalWorkdays
     ? round(Math.max(0, Math.min(100, (elapsedWorkday / totalWorkdays) * 100)), 1)
@@ -5655,6 +5659,220 @@ function adminCycleStatus(row) {
     elapsedWorkday: totalWorkdays ? Math.max(0, Math.min(totalWorkdays, elapsedWorkday)) : null,
     remainingWorkdays,
     source: "hb.cycles"
+  };
+}
+
+async function adminScheduleAlignmentPayload(currentCycleNumber) {
+  if (!currentCycleNumber) {
+    return {
+      currentCycleNumber: null,
+      rows: [],
+      phaseTotals: [],
+      source: "hb.production_schedule + hb.rev1_task_instances + raw.asana_tasks"
+    };
+  }
+
+  const result = await pool.query(`
+    with schedule_rows as (
+      select
+        ps.production_record_id,
+        ps.schedule_name,
+        ps.cycle_number,
+        coalesce(ps.short_cycle_label, ps.cycle_label, 'C' || ps.cycle_number::text) as cycle_label,
+        ps.cycle_record_id,
+        ps.phase_record_id,
+        coalesce(nullif(ps.phase_name, ''), nullif(ps.section_column, ''), 'Unassigned') as phase_name,
+        ps.section_column,
+        ps.vin,
+        ps.start_date,
+        ps.end_date,
+        ps.days_in_cycle,
+        ps.task_instance_record_ids,
+        ps.existing_rev1_task_instance_links,
+        prior.cycle_number as prior_cycle_number,
+        coalesce(prior.short_cycle_label, prior.cycle_label, 'C' || prior.cycle_number::text) as prior_cycle_label,
+        coalesce(nullif(prior.phase_name, ''), nullif(prior.section_column, '')) as prior_phase_name
+      from hb.production_schedule ps
+      left join hb.production_schedule prior
+        on prior.cycle_number = ps.cycle_number - 1
+       and nullif(prior.vin, '') is not null
+       and nullif(prior.vin, '') = nullif(ps.vin, '')
+      where ps.cycle_number in ($1::int - 1, $1::int)
+    ),
+    linked_tasks as (
+      select
+        sr.production_record_id,
+        sr.cycle_number,
+        sr.cycle_label,
+        sr.cycle_record_id,
+        sr.phase_record_id,
+        sr.phase_name,
+        sr.vin,
+        ti.rev1_task_instance_id,
+        ti.airtable_record_id,
+        ti.asana_task_gid,
+        ti.asana_project_gid,
+        ti.asana_project_name,
+        ti.task_completed,
+        ti.estimated_batch_task_time_seconds,
+        raw.gid as mirrored_asana_gid,
+        raw.completed as mirrored_asana_completed,
+        raw.synced_at as raw_asana_synced_at
+      from schedule_rows sr
+      left join lateral unnest(sr.task_instance_record_ids) link(record_id) on true
+      left join hb.rev1_task_instances ti on ti.airtable_record_id = link.record_id
+      left join raw.asana_tasks raw on raw.gid = ti.asana_task_gid
+    ),
+    task_rollups as (
+      select
+        production_record_id,
+        count(rev1_task_instance_id)::int as rev1_task_count,
+        count(mirrored_asana_gid)::int as asana_mirror_count,
+        count(rev1_task_instance_id) filter (where asana_task_gid is null or asana_task_gid = '')::int as missing_asana_gid_count,
+        count(rev1_task_instance_id) filter (where task_completed)::int as completed_task_count,
+        count(rev1_task_instance_id) filter (where mirrored_asana_completed)::int as mirrored_completed_task_count,
+        coalesce(sum(coalesce(estimated_batch_task_time_seconds, 0)) / 3600.0, 0)::numeric(12, 2) as mirror_total_hours,
+        coalesce(sum(case when task_completed then coalesce(estimated_batch_task_time_seconds, 0) else 0 end) / 3600.0, 0)::numeric(12, 2) as mirror_completed_hours,
+        coalesce(sum(case when not coalesce(task_completed, false) then coalesce(estimated_batch_task_time_seconds, 0) else 0 end) / 3600.0, 0)::numeric(12, 2) as mirror_remaining_hours,
+        max(asana_project_name) as sample_asana_project_name,
+        max(raw_asana_synced_at)::text as latest_asana_synced_at
+      from linked_tasks
+      group by production_record_id
+    )
+    select
+      sr.production_record_id,
+      sr.schedule_name,
+      sr.cycle_number,
+      sr.cycle_label,
+      sr.phase_name,
+      sr.section_column,
+      sr.vin,
+      sr.start_date::text,
+      sr.end_date::text,
+      sr.days_in_cycle,
+      sr.existing_rev1_task_instance_links,
+      sr.prior_cycle_number,
+      sr.prior_cycle_label,
+      sr.prior_phase_name,
+      coalesce(tr.rev1_task_count, 0)::int as rev1_task_count,
+      coalesce(tr.asana_mirror_count, 0)::int as asana_mirror_count,
+      coalesce(tr.missing_asana_gid_count, 0)::int as missing_asana_gid_count,
+      coalesce(tr.completed_task_count, 0)::int as completed_task_count,
+      coalesce(tr.mirrored_completed_task_count, 0)::int as mirrored_completed_task_count,
+      coalesce(tr.mirror_total_hours, 0)::numeric(12, 2) as mirror_total_hours,
+      coalesce(tr.mirror_completed_hours, 0)::numeric(12, 2) as mirror_completed_hours,
+      coalesce(tr.mirror_remaining_hours, 0)::numeric(12, 2) as mirror_remaining_hours,
+      tr.sample_asana_project_name,
+      tr.latest_asana_synced_at,
+      coalesce(pcl.total_load_hours, 0)::numeric(12, 2) as phase_cycle_total_hours,
+      coalesce(pcl.completed_task_hours, 0)::numeric(12, 2) as phase_cycle_completed_hours,
+      coalesce(pcl.remaining_task_hours, 0)::numeric(12, 2) as phase_cycle_remaining_hours
+    from schedule_rows sr
+    left join task_rollups tr on tr.production_record_id = sr.production_record_id
+    left join hb.phase_cycle_load_rev1 pcl
+      on pcl.cycle_record_id = sr.cycle_record_id
+     and pcl.phase_record_id = sr.phase_record_id
+    order by sr.cycle_number, nullif(sr.vin, '') nulls last, sr.phase_name, sr.schedule_name
+  `, [currentCycleNumber]);
+
+  const rows = result.rows.map(row => {
+    const phaseName = formatPhaseName(row.phase_name) || "Unassigned";
+    const phaseCycleTotalHours = round(row.phase_cycle_total_hours, 2);
+    const phaseCycleCompletedHours = round(row.phase_cycle_completed_hours, 2);
+    const mirrorTotalHours = round(row.mirror_total_hours, 2);
+    const mirrorCompletedHours = round(row.mirror_completed_hours, 2);
+    const mirrorMatchesPhaseCycle = row.cycle_number === currentCycleNumber &&
+      Math.abs(mirrorTotalHours - phaseCycleTotalHours) < 0.02 &&
+      Math.abs(mirrorCompletedHours - phaseCycleCompletedHours) < 0.02;
+
+    return {
+      productionRecordId: row.production_record_id,
+      scheduleName: row.schedule_name,
+      cycleNumber: Number(row.cycle_number || 0) || null,
+      cycleLabel: row.cycle_label || "",
+      phaseName,
+      phaseCycleKey: `${row.cycle_number || ""}::${phaseName}`,
+      presentationPhaseName: adminPresentationPhaseName(phaseName),
+      sectionColumn: row.section_column || "",
+      vin: row.vin || "",
+      startDate: row.start_date || "",
+      endDate: row.end_date || "",
+      daysInCycle: row.days_in_cycle === null || row.days_in_cycle === undefined ? null : Number(row.days_in_cycle),
+      priorCycleNumber: row.prior_cycle_number === null || row.prior_cycle_number === undefined ? null : Number(row.prior_cycle_number),
+      priorCycleLabel: row.prior_cycle_label || "",
+      priorPhaseName: formatPhaseName(row.prior_phase_name) || "",
+      linkedTaskCount: Number(row.existing_rev1_task_instance_links || 0),
+      rev1TaskCount: Number(row.rev1_task_count || 0),
+      asanaMirrorCount: Number(row.asana_mirror_count || 0),
+      missingAsanaGidCount: Number(row.missing_asana_gid_count || 0),
+      completedTaskCount: Number(row.completed_task_count || 0),
+      mirroredCompletedTaskCount: Number(row.mirrored_completed_task_count || 0),
+      mirrorTotalHours,
+      mirrorCompletedHours,
+      mirrorRemainingHours: round(row.mirror_remaining_hours, 2),
+      sampleAsanaProjectName: row.sample_asana_project_name || "",
+      latestAsanaSyncedAt: row.latest_asana_synced_at || "",
+      phaseCycleTotalHours,
+      phaseCycleCompletedHours,
+      phaseCycleRemainingHours: round(row.phase_cycle_remaining_hours, 2),
+      mirrorVsPhaseCycleTotalDeltaHours: round(mirrorTotalHours - phaseCycleTotalHours, 2),
+      mirrorVsPhaseCycleCompletedDeltaHours: round(mirrorCompletedHours - phaseCycleCompletedHours, 2),
+      mirrorMatchesPhaseCycle
+    };
+  });
+
+  const phaseTotalsByName = new Map();
+  for (const row of rows.filter(item => item.cycleNumber === currentCycleNumber)) {
+    const key = row.presentationPhaseName || row.phaseName || "Unassigned";
+    const existing = phaseTotalsByName.get(key) || {
+      phaseName: key,
+      scheduleRows: 0,
+      vins: [],
+      linkedTaskCount: 0,
+      rev1TaskCount: 0,
+      asanaMirrorCount: 0,
+      mirrorTotalHours: 0,
+      mirrorCompletedHours: 0,
+      mirrorRemainingHours: 0,
+      phaseCycleTotalHours: 0,
+      phaseCycleCompletedHours: 0,
+      phaseCycleRemainingHours: 0,
+      phaseCycleKeys: []
+    };
+    existing.scheduleRows += 1;
+    if (row.vin) existing.vins.push(row.vin);
+    existing.linkedTaskCount += row.linkedTaskCount;
+    existing.rev1TaskCount += row.rev1TaskCount;
+    existing.asanaMirrorCount += row.asanaMirrorCount;
+    existing.mirrorTotalHours = round(existing.mirrorTotalHours + row.mirrorTotalHours, 2);
+    existing.mirrorCompletedHours = round(existing.mirrorCompletedHours + row.mirrorCompletedHours, 2);
+    existing.mirrorRemainingHours = round(existing.mirrorRemainingHours + row.mirrorRemainingHours, 2);
+    if (!existing.phaseCycleKeys.includes(row.phaseCycleKey)) {
+      existing.phaseCycleKeys.push(row.phaseCycleKey);
+      existing.phaseCycleTotalHours = round(existing.phaseCycleTotalHours + row.phaseCycleTotalHours, 2);
+      existing.phaseCycleCompletedHours = round(existing.phaseCycleCompletedHours + row.phaseCycleCompletedHours, 2);
+      existing.phaseCycleRemainingHours = round(existing.phaseCycleRemainingHours + row.phaseCycleRemainingHours, 2);
+    }
+    phaseTotalsByName.set(key, existing);
+  }
+
+  const phaseTotals = Array.from(phaseTotalsByName.values())
+    .map(row => {
+      const { phaseCycleKeys, ...publicRow } = row;
+      return {
+        ...publicRow,
+        vins: Array.from(new Set(row.vins)),
+        mirrorVsPhaseCycleTotalDeltaHours: round(row.mirrorTotalHours - row.phaseCycleTotalHours, 2),
+        mirrorVsPhaseCycleCompletedDeltaHours: round(row.mirrorCompletedHours - row.phaseCycleCompletedHours, 2)
+      };
+    })
+    .sort((left, right) => String(left.phaseName).localeCompare(String(right.phaseName)));
+
+  return {
+    currentCycleNumber,
+    rows,
+    phaseTotals,
+    source: "hb.production_schedule + hb.rev1_task_instances + raw.asana_tasks"
   };
 }
 
@@ -6289,6 +6507,7 @@ async function adminPlhMetricsPayload() {
   const phaseCycleLoadSource = rawPhaseCycleLoad.rows.length
     ? "raw.airtable_phase_cycle_load"
     : "hb.phase_cycle_load_rev1";
+  const scheduleAlignment = await adminScheduleAlignmentPayload(currentCycleNumber);
   const capacityResult = currentCycleNumber
     ? await pool.query(`
       with worker_phase_capacity as (
@@ -6540,6 +6759,7 @@ async function adminPlhMetricsPayload() {
       lineOverview: null,
       source: "disabled"
     },
+    scheduleAlignment,
     phasePacing,
     debtMatrix,
     daily: {
@@ -6570,6 +6790,8 @@ async function adminPlhMetricsPayload() {
       rawPhaseCycleLoadLatestSyncedAt: rawPhaseCycleLoad.stats.latestSyncedAt,
       currentCycleLoadRowCount: currentRows.length,
       currentPresentationPhaseCount: currentPresentationRows.length,
+      scheduleAlignmentRowCount: scheduleAlignment.rows.length,
+      scheduleAlignmentPhaseCount: scheduleAlignment.phaseTotals.length,
       capacityPhaseCount: capacityByPhase.size,
       capacityPresentationPhaseCount: capacityByPresentation.size,
       phaseFilterActive: ADMIN_PLH_PHASES.size > 0,
