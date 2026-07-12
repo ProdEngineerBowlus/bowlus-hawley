@@ -118,7 +118,8 @@
     const label = String(row?.phaseName || row?.phase || "").toUpperCase();
     const normalized = label.replace(/[^A-Z0-9]+/g, " ").trim();
     const letter = phaseGroupLetter(row);
-    if (normalized.includes("FAB") || normalized.includes("FRAME") || letter === "A") return "fabrication";
+    if (normalized.includes("FRAME") || letter === "A") return "frames";
+    if (normalized.includes("FAB")) return "fabrication";
     if (["B", "C", "D", "E", "F"].includes(letter)) return "installation";
     if (letter === "G" || normalized.includes("POLISH")) return "polishing";
     if (letter === "H" || normalized.includes("SOQS")) return "soqs";
@@ -202,19 +203,20 @@
 
   function renderCycleEfficiencyGauges(rows, cycleProgress) {
     const withDepartments = rows.map(row => ({ row, department: phaseDepartment(row) }));
+    const frameRows = withDepartments
+      .filter(item => item.department === "frames")
+      .map(item => item.row);
     const fabricationRows = withDepartments
       .filter(item => item.department === "fabrication")
       .map(item => item.row);
     const installationRows = withDepartments
       .filter(item => item.department === "installation")
       .map(item => item.row);
-    const combinedRows = withDepartments
-      .filter(item => item.department === "fabrication" || item.department === "installation")
-      .map(item => item.row);
     const gauges = [
-      buildEfficiencyGauge("Fabrication", fabricationRows, cycleProgress, "Frames and FAB work"),
+      buildEfficiencyGauge("Frames", frameRows, cycleProgress, "Phase A / Frames"),
+      buildEfficiencyGauge("Fabrication", fabricationRows, cycleProgress, "FAB only"),
       buildEfficiencyGauge("Installation", installationRows, cycleProgress, "Phases B-F line work"),
-      buildEfficiencyGauge("Fabrication + Installation", combinedRows.length ? combinedRows : rows, cycleProgress, "Combined shop pace")
+      buildEfficiencyGauge("Shop", rows, cycleProgress, "All current shop load")
     ];
 
     return `

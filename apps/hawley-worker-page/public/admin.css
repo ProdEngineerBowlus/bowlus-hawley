@@ -617,7 +617,7 @@ a {
 
 .efficiency-strip {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -1178,7 +1178,7 @@ a {
   }
 
   .efficiency-strip {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .pace-detail-grid {
@@ -1233,6 +1233,7 @@ a {
   }
 
   .pace-context,
+  .efficiency-strip,
   .pace-detail-grid,
   .efficiency-details {
     grid-template-columns: 1fr;
