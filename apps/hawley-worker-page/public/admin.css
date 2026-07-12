@@ -260,6 +260,51 @@ a {
   align-items: start;
 }
 
+.project-setup-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.56fr) minmax(300px, 1fr);
+  align-items: end;
+  gap: 14px;
+}
+
+.setup-label {
+  display: block;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 750;
+}
+
+.segmented-control {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(148px, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(16, 20, 15, 0.48);
+}
+
+.segmented-control button {
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 6px;
+  color: var(--ink);
+  background: transparent;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.segmented-control button.active {
+  color: #07110c;
+  background: var(--primary);
+  box-shadow: 0 0 24px rgba(51, 196, 141, 0.2);
+}
+
+.project-name-field {
+  gap: 8px;
+}
+
 .metric,
 .feature-card {
   min-height: 96px;
@@ -1141,10 +1186,14 @@ a {
 .rail-button.active,
 .cycle-button.active,
 .schedule-row.active,
-.schedule-row:hover,
+.schedule-row:not(.readonly):hover,
 .cycle-button:hover {
   border-color: var(--primary);
   background: rgba(23, 63, 45, 0.9);
+}
+
+.schedule-row.readonly {
+  cursor: default;
 }
 
 .rail-button span,
@@ -1281,6 +1330,7 @@ a {
   .plh-grid,
   .plh-visual-grid,
   .split-grid,
+  .project-setup-grid,
   .creator-grid {
     grid-template-columns: 1fr;
   }

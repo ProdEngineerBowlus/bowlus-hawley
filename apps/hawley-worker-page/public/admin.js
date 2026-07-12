@@ -5,8 +5,11 @@
     activeView: "dashboard",
     dashboard: null,
     project: null,
+    projectType: "VIN",
     selectedCycle: "",
-    selectedProductionId: "",
+    selectedVin: "",
+    projectName: "",
+    projectNameDirty: false,
     loading: true,
     projectLoading: false,
     error: "",
@@ -331,17 +334,22 @@
 
   async function loadProjectCreator(options = {}) {
     const params = new URLSearchParams();
-    if (options.cycle || state.selectedCycle) params.set("cycle", options.cycle || state.selectedCycle);
-    if (options.productionRecordId || state.selectedProductionId) {
-      params.set("productionRecordId", options.productionRecordId || state.selectedProductionId);
-    }
+    const projectType = options.projectType || state.projectType || "VIN";
+    const cycle = options.cycle !== undefined ? options.cycle : state.selectedCycle;
+    const vin = options.vin !== undefined ? options.vin : state.selectedVin;
+    params.set("projectType", projectType);
+    if (cycle) params.set("cycle", cycle);
+    if (vin) params.set("vin", vin);
+    if (state.projectNameDirty && state.projectName) params.set("projectName", state.projectName);
     params.set("_", Date.now());
     state.projectLoading = true;
     render();
     try {
       state.project = await fetchJson(`/api/admin/project-creator?${params.toString()}`);
+      state.projectType = state.project.projectType || projectType;
       state.selectedCycle = String(state.project.selectedCycleNumber || state.selectedCycle || "");
-      state.selectedProductionId = state.project.preview?.schedule?.production_record_id || state.selectedProductionId || "";
+      state.selectedVin = state.project.selectedVin ? String(state.project.selectedVin) : "";
+      if (!state.projectNameDirty) state.projectName = state.project.preview?.projectName || "";
       state.createMessage = "";
     } finally {
       state.projectLoading = false;
@@ -1068,20 +1076,46 @@
     const project = state.project || {};
     const cycles = project.cycles || [];
     const scheduleRows = project.scheduleRows || [];
+    const vinChoices = project.vinChoices || [];
     const preview = project.preview || null;
+    const projectType = project.projectType || state.projectType || "VIN";
+    const isVinProject = projectType === "VIN";
+    const selectedVin = String(project.selectedVin || state.selectedVin || "");
+    const projectName = state.projectName || preview?.projectName || "";
     return `
       <div class="content-stack" id="project-creator">
         <section>
           <h2 class="section-title">Project Creator</h2>
           <div class="chip-row">
             ${pill(project.projectCreateEnabled ? "Write enabled" : "Preview mode", project.projectCreateEnabled ? "good" : "warn")}
+            ${pill(projectType, "good")}
             ${project.selectedCycleNumber ? pill(`C${project.selectedCycleNumber}`, "good") : ""}
+            ${selectedVin ? pill(`VIN ${selectedVin}`, "blue") : ""}
             ${state.projectLoading ? pill("Loading", "warn") : ""}
           </div>
         </section>
         <section class="panel">
           <div class="panel-header">
-            <h3 class="panel-title">Cycles</h3>
+            <h3 class="panel-title">Project Setup</h3>
+            <span class="pill">${isVinProject ? "VIN portfolio" : "Fabrication portfolio"}</span>
+          </div>
+          <div class="panel-body project-setup-grid">
+            <div>
+              <span class="setup-label">Project type</span>
+              <div class="segmented-control" role="group" aria-label="Project type">
+                <button class="${isVinProject ? "active" : ""}" type="button" data-project-type="VIN">VIN Project</button>
+                <button class="${!isVinProject ? "active" : ""}" type="button" data-project-type="Fabrication">Fabrication Project</button>
+              </div>
+            </div>
+            <label class="field project-name-field">
+              <span>Project name</span>
+              <input type="text" data-project-name value="${escapeAttr(projectName)}" placeholder="${isVinProject ? "VIN 324" : "C12 - Fabrication"}" />
+            </label>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title">${isVinProject ? "Cycle Context" : "Fabrication Cycle"}</h3>
           </div>
           <div class="panel-body cycle-strip">
             ${cycles.map(row => `
@@ -1096,20 +1130,30 @@
         <section class="creator-grid">
           <article class="panel">
             <div class="panel-header">
-              <h3 class="panel-title">Schedule Rows</h3>
-              <span class="pill">${formatNumber(scheduleRows.length)}</span>
+              <h3 class="panel-title">${isVinProject ? "VINs" : "Fabrication Support Rows"}</h3>
+              <span class="pill">${formatNumber(isVinProject ? vinChoices.length : scheduleRows.length)}</span>
             </div>
             <div class="panel-body schedule-list">
-              ${scheduleRows.map(row => `
-                <button class="schedule-row ${preview?.schedule?.production_record_id === row.production_record_id ? "active" : ""}" type="button" data-production-record-id="${escapeAttr(row.production_record_id)}">
+              ${isVinProject ? vinChoices.map(row => `
+                <button class="schedule-row ${String(row.vin) === selectedVin ? "active" : ""}" type="button" data-vin-choice="${escapeAttr(row.vin)}">
                   <span>
-                    <strong>${escapeHtml(row.vin ? `VIN ${row.vin}` : row.schedule_name || row.production_record_id)}</strong>
+                    <strong>VIN ${escapeHtml(row.vin)}</strong>
+                    <span>${escapeHtml(row.firstCycleLabel || "")} start - ${escapeHtml(formatDate(row.firstStartDate))}</span>
+                    <span>${formatNumber(row.scheduleRows)} schedule rows - ${escapeHtml((row.phases || []).slice(0, 8).join(", ") || "No phases")}</span>
+                  </span>
+                  <span class="pill">${escapeHtml(formatDate(row.lastEndDate))}</span>
+                </button>
+              `).join("") : scheduleRows.map(row => `
+                <div class="schedule-row readonly">
+                  <span>
+                    <strong>${escapeHtml(row.schedule_name || row.phase_name || row.production_record_id)}</strong>
                     <span>${escapeHtml(row.phase_name || row.section_column || "No phase")} - ${escapeHtml(row.asana_section || "No section")}</span>
                     <span>${escapeHtml(formatDate(row.start_date))} - ${escapeHtml(formatDate(row.end_date))}</span>
                   </span>
                   <span class="pill">${formatNumber(row.existing_rev1_task_instance_links)}</span>
-                </button>
-              `).join("") || `<div class="notice">No schedule rows for this cycle.</div>`}
+                </div>
+              `).join("")}
+              ${(isVinProject ? vinChoices : scheduleRows).length ? "" : `<div class="notice">${isVinProject ? "No VINs found in the production schedule." : "No fabrication support rows for this cycle."}</div>`}
             </div>
           </article>
           <article class="panel">
@@ -1135,39 +1179,53 @@
     const skipped = preview.skipped || {};
     const sourceCounts = preview.sourceCounts || {};
     const createBlocked = !preview.writeEnabled || !preview.creatableTaskCount || preview.existingSyncedTasks || preview.existingLegacyTasks;
+    const projectName = state.projectName || preview.projectName;
+    const scopeRows = preview.scheduleRows?.length ? preview.scheduleRows : (preview.schedule ? [preview.schedule] : []);
+    const startDates = scopeRows.map(row => row.start_date).filter(Boolean).sort();
+    const endDates = scopeRows.map(row => row.end_date).filter(Boolean).sort();
+    const firstDate = startDates[0] || preview.schedule?.start_date || "";
+    const lastDate = endDates[endDates.length - 1] || preview.schedule?.end_date || "";
+    const cycleLabels = [...new Set(scopeRows.map(row => row.short_cycle_label || row.cycle_label).filter(Boolean))];
+    const phaseLabels = [...new Set(scopeRows.map(row => row.phase_name || row.section_column || row.asana_section).filter(Boolean))];
+    const scopeLabel = preview.projectType === "VIN"
+      ? `VIN ${preview.selectedVin || ""}`.trim()
+      : (cycleLabels.join(", ") || `C${preview.selectedCycleNumber || ""}`.trim());
     return `
       <div class="content-stack">
         <div>
-          <h3 class="section-title" style="font-size: 1.22rem;">${escapeHtml(preview.projectName)}</h3>
+          <h3 class="section-title" style="font-size: 1.22rem;">${escapeHtml(projectName)}</h3>
           <div class="chip-row" style="margin-top: 10px;">
             ${pill(preview.mode, preview.writeEnabled ? "good" : "warn")}
             ${pill(preview.projectType || "Project", "good")}
+            ${preview.selectedVin ? pill(`VIN ${preview.selectedVin}`, "blue") : ""}
+            ${preview.selectedCycleNumber ? pill(`C${preview.selectedCycleNumber}`, "blue") : ""}
             ${preview.missingEstimates ? pill(`${formatNumber(preview.missingEstimates)} missing estimates`, "risk") : pill("Estimates ready", "good")}
             ${preview.existingSyncedTasks ? pill(`${formatNumber(preview.existingSyncedTasks)} already in Asana`, "risk") : ""}
             ${preview.existingLegacyTasks ? pill(`${formatNumber(preview.existingLegacyTasks)} legacy rows exist`, "risk") : ""}
             ${preview.existingNativePendingTasks ? pill(`${formatNumber(preview.existingNativePendingTasks)} Hawley pending`, "warn") : ""}
-            ${preview.schedule?.model_type ? pill(preview.schedule.model_type) : ""}
+            ${phaseLabels.length ? pill(`${phaseLabels.length} phases`) : ""}
           </div>
         </div>
         <div class="metric-grid">
-          ${metric("Tasks", formatNumber(preview.taskCount), preview.schedule?.phase_name || "")}
+          ${metric("Tasks", formatNumber(preview.taskCount), `${formatNumber(scopeRows.length)} schedule rows`)}
           ${metric("Creatable", formatNumber(preview.creatableTaskCount), "not Asana-linked")}
           ${metric("Estimated", formatHours(preview.estimatedHours), "batch time")}
-          ${metric("VIN", preview.schedule?.vin || "No VIN", preview.schedule?.cycle_label || "")}
-          ${metric("Dates", `${formatDate(preview.schedule?.start_date)} - ${formatDate(preview.schedule?.end_date)}`, `${formatNumber(preview.schedule?.days_in_cycle)} days`)}
+          ${metric("Scope", scopeLabel || "No scope", phaseLabels.slice(0, 3).join(", "))}
+          ${metric("Dates", `${formatDate(firstDate)} - ${formatDate(lastDate)}`, cycleLabels.slice(0, 3).join(", "))}
         </div>
         <div class="metric-grid small-metrics">
           ${metric("Source tasks", formatNumber(sourceCounts.taskTemplates), "active templates")}
           ${metric("VIN records", formatNumber(sourceCounts.vins), "model/frame rules")}
           ${metric("Models", formatNumber(sourceCounts.models), "lookup names")}
           ${metric("VIN anchors", formatNumber(sourceCounts.vinAnchors), "A-H schedule anchors")}
-          ${metric("Existing", formatNumber(sourceCounts.existingForSchedule), "for this row")}
+          ${metric("Existing", formatNumber(sourceCounts.existingForSchedule), "in scope")}
         </div>
         <div class="chip-row">
           ${skipped.missingVinAnchor ? pill(`${formatNumber(skipped.missingVinAnchor)} no VIN anchor`, "warn") : ""}
           ${skipped.missingProductionVin ? pill(`${formatNumber(skipped.missingProductionVin)} no production VIN`, "warn") : ""}
           ${skipped.missingVinRecord ? pill(`${formatNumber(skipped.missingVinRecord)} VINs missing`, "risk") : ""}
           ${skipped.modelFrameMismatch ? pill(`${formatNumber(skipped.modelFrameMismatch)} model/frame filtered`, "warn") : ""}
+          ${skipped.outsideProjectScope ? pill(`${formatNumber(skipped.outsideProjectScope)} outside scope`, "warn") : ""}
         </div>
         <div class="inline-actions">
           <button class="btn primary" type="button" data-action="create-project" ${createBlocked ? "disabled" : ""}>Create test project</button>
@@ -1179,7 +1237,7 @@
               <span class="pill">${escapeHtml(row.task_order ?? "")}</span>
               <span>
                 <strong>${escapeHtml(row.task_name)}</strong>
-                <small>${escapeHtml([row.parent_task_name || row.tasks_key || "", row.vin ? `VIN ${row.vin}` : "", row.vinSource ? `source ${row.vinSource}` : ""].filter(Boolean).join(" - "))}</small>
+                <small>${escapeHtml([row.parent_task_name || row.tasks_key || "", row.phaseLabel || "", row.schedule?.short_cycle_label || row.schedule?.cycle_label || "", row.vin ? `VIN ${row.vin}` : "", row.vinSource ? `source ${row.vinSource}` : ""].filter(Boolean).join(" - "))}</small>
               </span>
               <span>
                 ${formatHours(row.estimatedHours)}
@@ -1187,7 +1245,7 @@
                 ${row.existingTaskInstanceId && !row.existingAsanaTaskGid && row.existingSourceSystem !== "hawley_project_creator" ? `<small class="risk-text">legacy row exists</small>` : ""}
               </span>
             </div>
-          `).join("") || `<div class="notice">No matching task templates for this schedule row.</div>`}
+          `).join("") || `<div class="notice">No matching task templates for this project scope.</div>`}
         </div>
       </div>
     `;
@@ -1244,15 +1302,29 @@
     const cycleButton = event.target.closest("[data-cycle]");
     if (cycleButton) {
       state.selectedCycle = cycleButton.dataset.cycle || "";
-      state.selectedProductionId = "";
-      await loadProjectCreator({ cycle: state.selectedCycle, productionRecordId: "" });
+      state.projectName = "";
+      state.projectNameDirty = false;
+      if (state.projectType === "VIN") state.selectedVin = "";
+      await loadProjectCreator({ cycle: state.selectedCycle, vin: state.selectedVin });
       return;
     }
 
-    const scheduleButton = event.target.closest("[data-production-record-id]");
-    if (scheduleButton) {
-      state.selectedProductionId = scheduleButton.dataset.productionRecordId || "";
-      await loadProjectCreator({ productionRecordId: state.selectedProductionId });
+    const typeButton = event.target.closest("[data-project-type]");
+    if (typeButton) {
+      state.projectType = typeButton.dataset.projectType === "Fabrication" ? "Fabrication" : "VIN";
+      state.projectName = "";
+      state.projectNameDirty = false;
+      if (state.projectType === "Fabrication") state.selectedVin = "";
+      await loadProjectCreator({ projectType: state.projectType, vin: state.selectedVin });
+      return;
+    }
+
+    const vinButton = event.target.closest("[data-vin-choice]");
+    if (vinButton) {
+      state.selectedVin = vinButton.dataset.vinChoice || "";
+      state.projectName = "";
+      state.projectNameDirty = false;
+      await loadProjectCreator({ vin: state.selectedVin });
       return;
     }
 
@@ -1264,7 +1336,10 @@
     } else if (action === "create-project") {
       try {
         const payload = await postJson("/api/admin/project-creator/create", {
-          productionRecordId: state.project?.preview?.schedule?.production_record_id
+          projectType: state.projectType,
+          cycle: state.selectedCycle,
+          vin: state.selectedVin,
+          projectName: state.projectName || state.project?.preview?.projectName || ""
         });
         state.createMessage = payload.message || "Project created.";
       } catch (error) {
@@ -1272,6 +1347,13 @@
       }
       render();
     }
+  });
+
+  root.addEventListener("input", event => {
+    const nameInput = event.target.closest("[data-project-name]");
+    if (!nameInput) return;
+    state.projectName = nameInput.value;
+    state.projectNameDirty = true;
   });
 
   root.addEventListener("submit", event => {
