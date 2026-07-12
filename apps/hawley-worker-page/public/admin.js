@@ -83,9 +83,11 @@
   }
 
   function phaseShortName(value) {
-    return String(value || "Phase")
+    const raw = String(value || "Phase").replace(/\s+/g, " ").trim();
+    const normalized = raw.toUpperCase().replace(/[^A-Z0-9]+/g, " ").trim();
+    if (normalized === "A" || /\bPHASE A\b/.test(normalized) || normalized.includes("FRAME")) return "Frames";
+    return raw
       .replace(/^Phase\s+/i, "")
-      .replace(/\s+/g, " ")
       .trim() || "Phase";
   }
 
@@ -104,12 +106,23 @@
     const normalized = label.replace(/[^A-Z0-9]+/g, " ").trim();
     if (!normalized) return "";
     if (normalized.includes("FRAME")) return "A";
-    const fabMatch = normalized.match(/\bFAB\s*([A-G])\b/);
+    const fabMatch = normalized.match(/\bFAB\s*([A-H])\b/);
     if (fabMatch) return fabMatch[1];
-    const phaseMatch = normalized.match(/\bPHASE\s*([A-G])\b/);
+    const phaseMatch = normalized.match(/\bPHASE\s*([A-H])\b/);
     if (phaseMatch) return phaseMatch[1];
-    const bareMatch = normalized.match(/^([A-G])(?:\b|$)/);
+    const bareMatch = normalized.match(/^([A-H])(?:\b|$)/);
     return bareMatch ? bareMatch[1] : "";
+  }
+
+  function phaseDepartment(row) {
+    const label = String(row?.phaseName || row?.phase || "").toUpperCase();
+    const normalized = label.replace(/[^A-Z0-9]+/g, " ").trim();
+    const letter = phaseGroupLetter(row);
+    if (normalized.includes("FAB") || normalized.includes("FRAME") || letter === "A") return "fabrication";
+    if (["B", "C", "D", "E", "F"].includes(letter)) return "installation";
+    if (letter === "G" || normalized.includes("POLISH")) return "polishing";
+    if (letter === "H" || normalized.includes("SOQS")) return "soqs";
+    return "other";
   }
 
   function buildEfficiencyGauge(label, rows, cycleProgress, note) {
@@ -129,9 +142,9 @@
       ? (completionPct / targetPct) * 100
       : null;
     const capacityDelta = capacity - remaining;
-    const phaseNames = safeRows
+    const phaseNames = [...new Set(safeRows
       .map(row => phaseShortName(row.phaseName || row.phase))
-      .filter(Boolean);
+      .filter(Boolean))];
     const tone = efficiencyPct === null
       ? "neutral"
       : efficiencyPct >= 98
@@ -188,17 +201,20 @@
   }
 
   function renderCycleEfficiencyGauges(rows, cycleProgress) {
-    const withLetters = rows.map(row => ({ row, letter: phaseGroupLetter(row) }));
-    const fabRows = withLetters
-      .filter(item => ["B", "C", "D", "E", "F", "G"].includes(item.letter))
+    const withDepartments = rows.map(row => ({ row, department: phaseDepartment(row) }));
+    const fabricationRows = withDepartments
+      .filter(item => item.department === "fabrication")
       .map(item => item.row);
-    const productionRows = withLetters
-      .filter(item => item.letter === "A" || ["B", "C", "D", "E", "F", "G"].includes(item.letter))
+    const installationRows = withDepartments
+      .filter(item => item.department === "installation")
+      .map(item => item.row);
+    const combinedRows = withDepartments
+      .filter(item => item.department === "fabrication" || item.department === "installation")
       .map(item => item.row);
     const gauges = [
-      buildEfficiencyGauge("Line", rows, cycleProgress, "All current phase load"),
-      buildEfficiencyGauge("FAB B-G", fabRows, cycleProgress, "Fabrication phases"),
-      buildEfficiencyGauge("A / Frames / FAB", productionRows.length ? productionRows : rows, cycleProgress, "Shop execution family")
+      buildEfficiencyGauge("Fabrication", fabricationRows, cycleProgress, "Frames and FAB work"),
+      buildEfficiencyGauge("Installation", installationRows, cycleProgress, "Phases B-F line work"),
+      buildEfficiencyGauge("Fabrication + Installation", combinedRows.length ? combinedRows : rows, cycleProgress, "Combined shop pace")
     ];
 
     return `
@@ -670,23 +686,21 @@
       const totalLoad = Number(row.totalLoadHours || completed + remaining || 0);
       return Math.max(max, totalLoad, completed + remaining, remaining);
     }, 1);
-    const scaleLabel = `${formatHours(normalizedScaleHours)} shared`;
     const cycleMeta = [
       { label: "Cycle", value: cycleLabel },
       { label: "Day", value: Number.isFinite(totalWorkdays) && totalWorkdays > 0 ? `${formatNumber(Math.round(elapsedDay))}/${formatNumber(cycleDays)}` : "n/a" },
       { label: "Cycle Days", value: Number.isFinite(totalWorkdays) && totalWorkdays > 0 ? `${formatNumber(cycleDays)} workdays` : "n/a" },
       { label: "Remaining", value: Number.isFinite(remainingWorkdays) ? `${formatNumber(remainingWorkdays)} days` : "n/a" },
-      { label: "Progress", value: formatPercent(cycleProgress) },
-      { label: "Scale", value: scaleLabel }
+      { label: "Progress", value: formatPercent(cycleProgress) }
     ];
     return `
       <article class="panel visual-panel plh-reference-panel pace-panel">
         <div class="visual-head">
           <div>
             <h3 class="panel-title">Phase Pace Projection</h3>
-            <p class="muted">${escapeHtml(cycleLabel)}${cycleDates ? ` - ${escapeHtml(cycleDates)}` : ""}. All sparklines use the same hour scale and the current cycle's workday count.</p>
+            <p class="muted">${escapeHtml(cycleLabel)}${cycleDates ? ` - ${escapeHtml(cycleDates)}` : ""}. Pace is projected against the current cycle's workday count.</p>
           </div>
-          <span class="section-tag">A-F Pace</span>
+          <span class="section-tag">Shop Pace</span>
         </div>
         <div class="pace-context" aria-label="Cycle pace context">
           ${cycleMeta.map(item => `
