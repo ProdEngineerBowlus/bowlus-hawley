@@ -18,6 +18,15 @@ const staticDir = path.join(appDir, "public");
 
 const HOST = process.env.HAWLEY_WORKER_HOST || (process.env.PORT ? "0.0.0.0" : "127.0.0.1");
 const PORT = Number(process.env.PORT || process.env.HAWLEY_WORKER_PORT || 5273);
+const APP_BUILD_LABEL = "admin-plh-raw-pcl-v2";
+const APP_BUILD_COMMIT = process.env.SOURCE_COMMIT ||
+  process.env.COMMIT_SHA ||
+  process.env.GIT_SHA ||
+  process.env.GITHUB_SHA ||
+  "";
+const APP_DEPLOYMENT_ID = process.env.APP_PLATFORM_DEPLOYMENT_ID ||
+  process.env.DIGITALOCEAN_DEPLOYMENT_ID ||
+  "";
 const DAILY_TRACKER_PROJECT_ID = process.env.HAWLEY_DAILY_TRACKER_PROJECT_GID || "1214157321063250";
 const USE_DAT_SNAPSHOTS = process.env.HAWLEY_WORKER_USE_DAT_SNAPSHOTS === "true";
 const INCLUDE_NO_WORK_WORKERS = process.env.HAWLEY_WORKER_INCLUDE_NO_WORK === "true";
@@ -5550,6 +5559,11 @@ async function healthPayload() {
   return {
     ok: true,
     app: "hawley-worker-page",
+    build: {
+      label: APP_BUILD_LABEL,
+      commit: APP_BUILD_COMMIT,
+      deploymentId: APP_DEPLOYMENT_ID
+    },
     database: db.rows[0],
     databaseMode: {
       runtimePrefersSyncUrl: true,
@@ -6686,6 +6700,11 @@ async function adminDashboardPayload() {
   return {
     ok: true,
     checkedAt: new Date().toISOString(),
+    build: {
+      label: APP_BUILD_LABEL,
+      commit: APP_BUILD_COMMIT,
+      deploymentId: APP_DEPLOYMENT_ID
+    },
     projectCreateEnabled: ADMIN_PROJECT_CREATE_ENABLED,
     counts: countsResult.rows[0] || {},
     plh: plhMetrics,

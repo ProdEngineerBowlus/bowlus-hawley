@@ -482,6 +482,7 @@
     const debt = plh?.debtTiers || {};
     const recovery = plh?.recovery || {};
     const diagnostics = plh?.diagnostics || {};
+    const sourceLabel = diagnostics.phaseCycleLoadSource || debt.source || plh?.source || "missing PLH payload";
     const rows = debt.matrix || plh?.debtMatrix || [];
     const tiers = debt.tiers || recovery.tiers || {};
     const tierOrder = debt.tierOrder || ["current", "carryover", "original"];
@@ -517,7 +518,7 @@
                   ${visibleTiers.map(tier => matrixCell(row.tiers?.[tier.key] ?? row[tier.key])).join("")}
                   ${matrixCell(row.total ?? row.totalPressureHours)}
                 </tr>
-              `).join("") || `<tr><td colspan="${visibleTiers.length + 2}">No phase-cycle burn-down rows found yet. Source: ${escapeHtml(diagnostics.phaseCycleLoadSource || "unknown")}; PCL groups: ${escapeHtml(formatNumber(diagnostics.phaseCycleLoadGroupCount || 0))}; raw rows parsed: ${escapeHtml(formatNumber(diagnostics.rawPhaseCycleLoadParsedRowCount || 0))}/${escapeHtml(formatNumber(diagnostics.rawPhaseCycleLoadRowCount || 0))}; raw positive: ${escapeHtml(formatNumber(diagnostics.rawPhaseCycleLoadPositiveRowCount || 0))}.</td></tr>`}
+              `).join("") || `<tr><td colspan="${visibleTiers.length + 2}">No phase-cycle burn-down rows found yet. Source: ${escapeHtml(sourceLabel)}; PCL groups: ${escapeHtml(formatNumber(diagnostics.phaseCycleLoadGroupCount || 0))}; raw rows parsed: ${escapeHtml(formatNumber(diagnostics.rawPhaseCycleLoadParsedRowCount || 0))}/${escapeHtml(formatNumber(diagnostics.rawPhaseCycleLoadRowCount || 0))}; raw positive: ${escapeHtml(formatNumber(diagnostics.rawPhaseCycleLoadPositiveRowCount || 0))}.</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -529,6 +530,7 @@
   function renderPhasePaceProjection(plh) {
     const lineOverview = plh?.tracker?.lineOverview || {};
     const diagnostics = plh?.diagnostics || {};
+    const sourceLabel = diagnostics.phaseCycleLoadSource || plh?.debtTiers?.source || plh?.source || "missing PLH payload";
     const rows = lineOverview.phases?.length ? lineOverview.phases : (plh?.phasePacing || []);
     const cycle = plh?.cycleStatus || {};
     const debt = plh?.debtTiers || {};
@@ -589,7 +591,7 @@
                 })}
               </div>
             `;
-          }).join("") || `<div class="notice visual-empty">No Daily Assignment Tracker line overview phases or current-cycle PCL rows found yet. DAT phases: ${escapeHtml(formatNumber(diagnostics.latestLineOverviewPhaseCount || 0))}; current-cycle load rows: ${escapeHtml(formatNumber(diagnostics.currentCycleLoadRowCount || 0))}; source: ${escapeHtml(diagnostics.phaseCycleLoadSource || "unknown")}.</div>`}
+          }).join("") || `<div class="notice visual-empty">No Daily Assignment Tracker line overview phases or current-cycle PCL rows found yet. DAT phases: ${escapeHtml(formatNumber(diagnostics.latestLineOverviewPhaseCount || 0))}; current-cycle load rows: ${escapeHtml(formatNumber(diagnostics.currentCycleLoadRowCount || 0))}; source: ${escapeHtml(sourceLabel)}.</div>`}
         </div>
       </article>
     `;
@@ -645,6 +647,10 @@
     const cycles = state.dashboard?.cycles || [];
     const phases = state.dashboard?.taskTemplatePhases || [];
     const plh = state.dashboard?.plh || {};
+    const build = state.dashboard?.build || {};
+    const buildLabel = build.label
+      ? ` - ${build.label}${build.commit ? ` (${String(build.commit).slice(0, 7)})` : ""}`
+      : "";
     const phasePacing = plh.phasePacing || [];
     const debt = plh.debtTiers || {};
     const debtMatrix = debt.matrix || plh.debtMatrix || [];
@@ -657,8 +663,9 @@
       <div class="content-stack">
         <section>
           <h2 class="section-title">Dashboard</h2>
-          <p class="muted">Checked ${escapeHtml(new Date(state.dashboard?.checkedAt || Date.now()).toLocaleString())}</p>
+          <p class="muted">Checked ${escapeHtml(new Date(state.dashboard?.checkedAt || Date.now()).toLocaleString())}${escapeHtml(buildLabel)}</p>
         </section>
+        ${state.dashboard?.plh ? "" : `<div class="notice risk">The admin API response did not include the PLH payload. Server build: ${escapeHtml(build.label || "unknown")}.</div>`}
         ${renderPlhVisuals(plh)}
         ${renderPlhSnapshot(plh)}
         <section class="split-grid">
