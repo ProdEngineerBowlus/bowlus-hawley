@@ -5738,6 +5738,70 @@ async function adminScheduleAlignmentPayload(currentCycleNumber) {
         max(raw_asana_synced_at)::text as latest_asana_synced_at
       from linked_tasks
       group by production_record_id
+    ),
+    current_schedule_links as (
+      select
+        sr.cycle_record_id,
+        sr.phase_record_id,
+        link.record_id as airtable_record_id
+      from schedule_rows sr
+      left join lateral unnest(sr.task_instance_record_ids) link(record_id) on true
+      where sr.cycle_number = $1::int
+        and link.record_id is not null
+    ),
+    extra_phase_tasks as (
+      select
+        ti.rev1_task_instance_id,
+        ti.airtable_record_id,
+        ti.asana_task_gid,
+        ti.asana_project_name,
+        ti.task_name,
+        ti.task_completed,
+        ti.worker_name,
+        ti.cycle_record_id,
+        ti.phase_record_id,
+        ti.estimated_batch_task_time_seconds
+      from hb.rev1_task_instances ti
+      join hb.cycles cycles on cycles.cycle_record_id = ti.cycle_record_id
+      left join current_schedule_links scheduled
+        on scheduled.airtable_record_id = ti.airtable_record_id
+       and scheduled.cycle_record_id = ti.cycle_record_id
+       and scheduled.phase_record_id = ti.phase_record_id
+      where cycles.cycle_number = $1::int
+        and ti.phase_record_id is not null
+        and scheduled.airtable_record_id is null
+        and coalesce(ti.estimated_batch_task_time_seconds, 0) > 0
+    ),
+    extra_phase_ranked as (
+      select
+        extra_phase_tasks.*,
+        row_number() over (
+          partition by cycle_record_id, phase_record_id
+          order by task_completed desc, coalesce(estimated_batch_task_time_seconds, 0) desc, task_name
+        ) as sample_rank
+      from extra_phase_tasks
+    ),
+    extra_phase_rollups as (
+      select
+        cycle_record_id,
+        phase_record_id,
+        count(*)::int as extra_task_count,
+        count(*) filter (where task_completed)::int as extra_completed_task_count,
+        coalesce(sum(coalesce(estimated_batch_task_time_seconds, 0)) / 3600.0, 0)::numeric(12, 2) as extra_total_hours,
+        coalesce(sum(case when task_completed then coalesce(estimated_batch_task_time_seconds, 0) else 0 end) / 3600.0, 0)::numeric(12, 2) as extra_completed_hours,
+        jsonb_agg(
+          jsonb_build_object(
+            'gid', asana_task_gid,
+            'name', task_name,
+            'project', asana_project_name,
+            'worker', worker_name,
+            'completed', task_completed,
+            'hours', round((coalesce(estimated_batch_task_time_seconds, 0) / 3600.0)::numeric, 2)
+          )
+          order by sample_rank
+        ) filter (where sample_rank <= 6) as extra_task_samples
+      from extra_phase_ranked
+      group by cycle_record_id, phase_record_id
     )
     select
       sr.production_record_id,
@@ -5766,12 +5830,20 @@ async function adminScheduleAlignmentPayload(currentCycleNumber) {
       tr.latest_asana_synced_at,
       coalesce(pcl.total_load_hours, 0)::numeric(12, 2) as phase_cycle_total_hours,
       coalesce(pcl.completed_task_hours, 0)::numeric(12, 2) as phase_cycle_completed_hours,
-      coalesce(pcl.remaining_task_hours, 0)::numeric(12, 2) as phase_cycle_remaining_hours
+      coalesce(pcl.remaining_task_hours, 0)::numeric(12, 2) as phase_cycle_remaining_hours,
+      coalesce(extra.extra_task_count, 0)::int as extra_task_count,
+      coalesce(extra.extra_completed_task_count, 0)::int as extra_completed_task_count,
+      coalesce(extra.extra_total_hours, 0)::numeric(12, 2) as extra_total_hours,
+      coalesce(extra.extra_completed_hours, 0)::numeric(12, 2) as extra_completed_hours,
+      coalesce(extra.extra_task_samples, '[]'::jsonb) as extra_task_samples
     from schedule_rows sr
     left join task_rollups tr on tr.production_record_id = sr.production_record_id
     left join hb.phase_cycle_load_rev1 pcl
       on pcl.cycle_record_id = sr.cycle_record_id
      and pcl.phase_record_id = sr.phase_record_id
+    left join extra_phase_rollups extra
+      on extra.cycle_record_id = sr.cycle_record_id
+     and extra.phase_record_id = sr.phase_record_id
     order by sr.cycle_number, nullif(sr.vin, '') nulls last, sr.phase_name, sr.schedule_name
   `, [currentCycleNumber]);
 
@@ -5781,6 +5853,7 @@ async function adminScheduleAlignmentPayload(currentCycleNumber) {
     const phaseCycleCompletedHours = round(row.phase_cycle_completed_hours, 2);
     const mirrorTotalHours = round(row.mirror_total_hours, 2);
     const mirrorCompletedHours = round(row.mirror_completed_hours, 2);
+    const extraTaskSamples = Array.isArray(row.extra_task_samples) ? row.extra_task_samples : [];
     const mirrorMatchesPhaseCycle = row.cycle_number === currentCycleNumber &&
       Math.abs(mirrorTotalHours - phaseCycleTotalHours) < 0.02 &&
       Math.abs(mirrorCompletedHours - phaseCycleCompletedHours) < 0.02;
@@ -5815,6 +5888,11 @@ async function adminScheduleAlignmentPayload(currentCycleNumber) {
       phaseCycleTotalHours,
       phaseCycleCompletedHours,
       phaseCycleRemainingHours: round(row.phase_cycle_remaining_hours, 2),
+      extraTaskCount: Number(row.extra_task_count || 0),
+      extraCompletedTaskCount: Number(row.extra_completed_task_count || 0),
+      extraTotalHours: round(row.extra_total_hours, 2),
+      extraCompletedHours: round(row.extra_completed_hours, 2),
+      extraTaskSamples,
       mirrorVsPhaseCycleTotalDeltaHours: round(mirrorTotalHours - phaseCycleTotalHours, 2),
       mirrorVsPhaseCycleCompletedDeltaHours: round(mirrorCompletedHours - phaseCycleCompletedHours, 2),
       mirrorMatchesPhaseCycle
@@ -5837,6 +5915,11 @@ async function adminScheduleAlignmentPayload(currentCycleNumber) {
       phaseCycleTotalHours: 0,
       phaseCycleCompletedHours: 0,
       phaseCycleRemainingHours: 0,
+      extraTaskCount: 0,
+      extraCompletedTaskCount: 0,
+      extraTotalHours: 0,
+      extraCompletedHours: 0,
+      extraTaskSamples: [],
       phaseCycleKeys: []
     };
     existing.scheduleRows += 1;
@@ -5852,6 +5935,11 @@ async function adminScheduleAlignmentPayload(currentCycleNumber) {
       existing.phaseCycleTotalHours = round(existing.phaseCycleTotalHours + row.phaseCycleTotalHours, 2);
       existing.phaseCycleCompletedHours = round(existing.phaseCycleCompletedHours + row.phaseCycleCompletedHours, 2);
       existing.phaseCycleRemainingHours = round(existing.phaseCycleRemainingHours + row.phaseCycleRemainingHours, 2);
+      existing.extraTaskCount += row.extraTaskCount;
+      existing.extraCompletedTaskCount += row.extraCompletedTaskCount;
+      existing.extraTotalHours = round(existing.extraTotalHours + row.extraTotalHours, 2);
+      existing.extraCompletedHours = round(existing.extraCompletedHours + row.extraCompletedHours, 2);
+      existing.extraTaskSamples.push(...row.extraTaskSamples);
     }
     phaseTotalsByName.set(key, existing);
   }
@@ -5862,6 +5950,7 @@ async function adminScheduleAlignmentPayload(currentCycleNumber) {
       return {
         ...publicRow,
         vins: Array.from(new Set(row.vins)),
+        extraTaskSamples: row.extraTaskSamples.slice(0, 6),
         mirrorVsPhaseCycleTotalDeltaHours: round(row.mirrorTotalHours - row.phaseCycleTotalHours, 2),
         mirrorVsPhaseCycleCompletedDeltaHours: round(row.mirrorCompletedHours - row.phaseCycleCompletedHours, 2)
       };

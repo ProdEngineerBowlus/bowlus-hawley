@@ -708,6 +708,7 @@
                 <th>Tasks</th>
                 <th>Mirror Hours</th>
                 <th>Pace Bucket</th>
+                <th>Off-Schedule Load</th>
                 <th>Delta</th>
               </tr>
             </thead>
@@ -717,6 +718,11 @@
                 const doneDelta = Number(row.mirrorVsPhaseCycleCompletedDeltaHours || 0);
                 const deltaClass = Math.abs(totalDelta) > 0.05 || Math.abs(doneDelta) > 0.05 ? "warn" : "ok";
                 const positions = positionsByPhase.get(row.phaseName) || row.vins?.map(vin => `VIN ${vin}`) || [];
+                const extraSamples = (row.extraTaskSamples || [])
+                  .slice(0, 3)
+                  .map(task => task?.name || task?.gid || "")
+                  .filter(Boolean)
+                  .join("; ");
                 return `
                   <tr>
                     <td><strong>${escapeHtml(phaseShortName(row.phaseName))}</strong></td>
@@ -724,10 +730,11 @@
                     <td>${escapeHtml(formatNumber(row.rev1TaskCount))}/${escapeHtml(formatNumber(row.linkedTaskCount))} linked<br><small>${escapeHtml(formatNumber(row.asanaMirrorCount))} mirrored</small></td>
                     <td>${escapeHtml(formatHours(row.mirrorCompletedHours))} done<br><small>${escapeHtml(formatHours(row.mirrorTotalHours))} total</small></td>
                     <td>${escapeHtml(formatHours(row.phaseCycleCompletedHours))} done<br><small>${escapeHtml(formatHours(row.phaseCycleTotalHours))} total</small></td>
+                    <td>${escapeHtml(formatHours(row.extraCompletedHours))} done<br><small>${escapeHtml(formatNumber(row.extraTaskCount))} tasks${extraSamples ? ` - ${escapeHtml(extraSamples)}` : ""}</small></td>
                     <td class="${escapeAttr(deltaClass)}">${escapeHtml(formatSignedHours(totalDelta))} total<br><small>${escapeHtml(formatSignedHours(doneDelta))} done</small></td>
                   </tr>
                 `;
-              }).join("") || `<tr><td colspan="6">No current-cycle production alignment rows found.</td></tr>`}
+              }).join("") || `<tr><td colspan="7">No current-cycle production alignment rows found.</td></tr>`}
             </tbody>
           </table>
         </div>
