@@ -18,7 +18,7 @@ const staticDir = path.join(appDir, "public");
 
 const HOST = process.env.HAWLEY_WORKER_HOST || (process.env.PORT ? "0.0.0.0" : "127.0.0.1");
 const PORT = Number(process.env.PORT || process.env.HAWLEY_WORKER_PORT || 5273);
-const APP_BUILD_LABEL = "hawley-native-plh-v2";
+const APP_BUILD_LABEL = "hawley-native-plh-v3";
 const APP_BUILD_COMMIT = process.env.SOURCE_COMMIT ||
   process.env.COMMIT_SHA ||
   process.env.GIT_SHA ||
@@ -6590,7 +6590,7 @@ async function adminPlhMetricsPayload() {
   }
   const tierOrder = ["current", ...(carryoverTierKeys.length ? carryoverTierKeys.slice().reverse() : ["carryover"]), "original"];
   const matrix = new Map();
-  const currentRows = [];
+  let currentRows = [];
   const rawPhaseCycleLoad = adminRawPhaseCycleLoadSnapshot(rawPhaseCycleLoadResult.rows);
   const debtRows = rawPhaseCycleLoad.rows.length ? rawPhaseCycleLoad.rows : debtResult.rows;
   const phaseCycleLoadSource = rawPhaseCycleLoad.rows.length
@@ -6727,6 +6727,29 @@ async function adminPlhMetricsPayload() {
     existing.total = existing.totalPressureHours;
     matrix.set(phaseName, existing);
   }
+
+  const scheduleCurrentRows = (scheduleAlignment.phaseTotals || [])
+    .filter(row => Number(row.mirrorTotalHours || row.mirrorCompletedHours || row.mirrorRemainingHours || 0) > 0)
+    .map(row => {
+      const phaseName = row.phaseName || "Unassigned";
+      const totalLoadHours = round(row.mirrorTotalHours, 2);
+      const completedHours = round(row.mirrorCompletedHours, 2);
+      const remainingHours = round(row.mirrorRemainingHours, 2);
+      const completion = totalLoadHours ? completedHours / totalLoadHours : 0;
+      const cyclePct = Number(cycleStatus.progressPct || 0) / 100;
+      return {
+        phaseName,
+        phaseKey: adminPhaseFamilyName(phaseName),
+        cycleNumber: currentCycleNumber,
+        cycleLabel: cycleStatus.label,
+        remainingHours,
+        totalLoadHours,
+        completedHours,
+        status: completion < cyclePct ? "At Risk" : "On Track",
+        source: "production_schedule_linked_mirror"
+      };
+    });
+  if (scheduleCurrentRows.length) currentRows = scheduleCurrentRows;
 
   const currentPresentationRows = adminMergeCurrentRowsForPresentation(currentRows);
   const currentTotalLoadHours = round(currentPresentationRows.reduce((sum, row) => sum + Number(row.totalLoadHours || 0), 0), 2);
@@ -6867,6 +6890,7 @@ async function adminPlhMetricsPayload() {
       latestLineOverviewDate: "",
       latestLineOverviewPhaseCount: 0,
       phaseCycleLoadSource,
+      currentCyclePacingSource: scheduleCurrentRows.length ? "production_schedule_linked_mirror" : phaseCycleLoadSource,
       phaseCycleLoadGroupCount: debtRows.length,
       hbPhaseCycleLoadGroupCount: debtResult.rows.length,
       rawPhaseCycleLoadRowCount: rawPhaseCycleLoad.stats.rawRowCount,

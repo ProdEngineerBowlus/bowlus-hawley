@@ -744,7 +744,7 @@
 
   function renderPhasePaceProjection(plh) {
     const diagnostics = plh?.diagnostics || {};
-    const sourceLabel = diagnostics.phaseCycleLoadSource || plh?.debtTiers?.source || plh?.source || "missing PLH payload";
+    const sourceLabel = diagnostics.currentCyclePacingSource || diagnostics.phaseCycleLoadSource || plh?.debtTiers?.source || plh?.source || "missing PLH payload";
     const rows = plh?.phasePacing || [];
     const cycle = plh?.cycleStatus || {};
     const debt = plh?.debtTiers || {};
