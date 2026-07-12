@@ -18,7 +18,7 @@ const staticDir = path.join(appDir, "public");
 
 const HOST = process.env.HAWLEY_WORKER_HOST || (process.env.PORT ? "0.0.0.0" : "127.0.0.1");
 const PORT = Number(process.env.PORT || process.env.HAWLEY_WORKER_PORT || 5273);
-const APP_BUILD_LABEL = "admin-plh-raw-pcl-v2";
+const APP_BUILD_LABEL = "admin-plh-raw-pcl-v3";
 const APP_BUILD_COMMIT = process.env.SOURCE_COMMIT ||
   process.env.COMMIT_SHA ||
   process.env.GIT_SHA ||
@@ -6694,7 +6694,8 @@ async function adminDashboardPayload() {
       group by coalesce(primary_phase_name, 'Unassigned')
       order by task_count desc, phase_name
       limit 10
-    `)
+    `),
+    adminPlhMetricsPayload()
   ]);
 
   return {
