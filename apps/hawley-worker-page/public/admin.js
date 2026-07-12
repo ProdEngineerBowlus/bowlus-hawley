@@ -956,21 +956,11 @@
 
   function renderDashboard() {
     const latestRuns = state.dashboard?.latestRuns || [];
-    const cycles = state.dashboard?.cycles || [];
-    const phases = state.dashboard?.taskTemplatePhases || [];
     const plh = state.dashboard?.plh || {};
     const build = state.dashboard?.build || {};
     const buildLabel = build.label
       ? ` - ${build.label}${build.commit ? ` (${String(build.commit).slice(0, 7)})` : ""}`
       : "";
-    const phasePacing = plh.phasePacing || [];
-    const debt = plh.debtTiers || {};
-    const debtMatrix = debt.matrix || plh.debtMatrix || [];
-    const debtTiers = debt.tiers || {};
-    const debtTierOrder = debt.tierOrder || ["current", "carryover", "original"];
-    const visibleDebtTiers = debtTierOrder
-      .map(key => ({ key, ...(debtTiers[key] || {}) }))
-      .filter(tier => tier.key && debtTiers[tier.key]);
     return `
       <div class="content-stack">
         <section>
@@ -979,95 +969,7 @@
         </section>
         ${state.dashboard?.plh ? "" : `<div class="notice risk">The admin API response did not include the PLH payload. Server build: ${escapeHtml(build.label || "unknown")}.</div>`}
         ${renderPlhVisuals(plh)}
-        ${renderPlhSnapshot(plh)}
         ${renderConfigurationDrawer(plh, latestRuns)}
-        <section class="split-grid">
-          <article class="panel">
-            <div class="panel-header">
-              <h3 class="panel-title">Phase Pacing</h3>
-            </div>
-            <div class="panel-body table-wrap">
-              <table class="table">
-                <thead><tr><th>Phase</th><th>Status</th><th>Complete</th><th>Cycle</th><th>Delta</th><th>Remaining</th></tr></thead>
-                <tbody>
-                  ${phasePacing.map(row => `
-                    <tr>
-                      <td>${escapeHtml(row.phaseName)}</td>
-                      <td>${pill(row.status || "No signal", toneForPacingStatus(row.status))}</td>
-                      <td>${escapeHtml(formatPercent(row.completionPct))}</td>
-                      <td>${escapeHtml(formatPercent(row.cycleProgressPct))}</td>
-                      <td>${escapeHtml(formatSignedHours(row.paceDeltaHours))}</td>
-                      <td>${escapeHtml(formatHours(row.remainingHours))}</td>
-                    </tr>
-                  `).join("") || `<tr><td colspan="6">No current cycle phase pacing rows.</td></tr>`}
-                </tbody>
-              </table>
-            </div>
-          </article>
-          <article class="panel">
-            <div class="panel-header">
-              <h3 class="panel-title">Cycle Debt By Phase</h3>
-            </div>
-            <div class="panel-body table-wrap">
-              <table class="table">
-                <thead><tr><th>Phase</th>${visibleDebtTiers.map(tier => `<th>${escapeHtml(tier.shortLabel || tier.label || tier.key)}</th>`).join("")}<th>Total</th></tr></thead>
-                <tbody>
-                  ${debtMatrix.map(row => `
-                    <tr>
-                      <td>${escapeHtml(row.phaseName || row.phase)}</td>
-                      ${visibleDebtTiers.map(tier => `<td>${escapeHtml(formatHours(row.tiers?.[tier.key] ?? row[tier.key]))}</td>`).join("")}
-                      <td>${escapeHtml(formatHours(row.total ?? row.totalPressureHours))}</td>
-                    </tr>
-                  `).join("") || `<tr><td colspan="${visibleDebtTiers.length + 2}">No cycle debt rows.</td></tr>`}
-                </tbody>
-              </table>
-            </div>
-          </article>
-        </section>
-        <section class="split-grid">
-          <article class="panel">
-            <div class="panel-header">
-              <h3 class="panel-title">Production Cycles</h3>
-            </div>
-            <div class="panel-body table-wrap">
-              <table class="table">
-                <thead><tr><th>Cycle</th><th>Dates</th><th>Rows</th><th>VINs</th><th>Phases</th><th>Links</th></tr></thead>
-                <tbody>
-                  ${cycles.map(row => `
-                    <tr>
-                      <td>${escapeHtml(row.cycle_label || `C${row.cycle_number}`)}</td>
-                      <td>${escapeHtml(formatDate(row.start_date))} - ${escapeHtml(formatDate(row.end_date))}</td>
-                      <td>${formatNumber(row.schedule_rows)}</td>
-                      <td>${formatNumber(row.vin_count)}</td>
-                      <td>${formatNumber(row.phase_count)}</td>
-                      <td>${formatNumber(row.rev1_links)}</td>
-                    </tr>
-                  `).join("") || `<tr><td colspan="6">No cycle rows.</td></tr>`}
-                </tbody>
-              </table>
-            </div>
-          </article>
-          <article class="panel">
-            <div class="panel-header">
-              <h3 class="panel-title">Task Template Phases</h3>
-            </div>
-            <div class="panel-body table-wrap">
-              <table class="table">
-                <thead><tr><th>Phase</th><th>Tasks</th><th>Hours</th><th>Missing</th></tr></thead>
-                <tbody>
-                  ${phases.map(row => `
-                    <tr>
-                      <td>${escapeHtml(row.phase_name)}</td>
-                      <td>${formatNumber(row.task_count)}</td>
-                      <td>${formatHours(row.estimatedHours)}</td>
-                      <td>${formatNumber(row.missing_estimates)}</td>
-                    </tr>
-                  `).join("") || `<tr><td colspan="4">No task templates.</td></tr>`}
-                </tbody>
-              </table>
-            </div>
-          </article>
-        </section>
       </div>
     `;
   }
