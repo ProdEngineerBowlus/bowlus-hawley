@@ -558,13 +558,48 @@ a {
   gap: 12px;
 }
 
+.pace-context {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.pace-context-item {
+  min-height: 60px;
+  display: grid;
+  align-content: center;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid rgba(85, 105, 79, 0.42);
+  border-radius: 8px;
+  background: rgba(16, 20, 15, 0.54);
+}
+
+.pace-context-item span,
+.pace-detail-grid em,
+.pace-spark-meta {
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.pace-context-item strong {
+  min-width: 0;
+  color: var(--ink);
+  font-size: 0.98rem;
+  font-weight: 900;
+  overflow-wrap: anywhere;
+}
+
 .pace-row {
   display: grid;
-  grid-template-columns: 46px minmax(260px, 1fr) minmax(116px, 0.28fr) 132px;
+  grid-template-columns: 56px minmax(360px, 1fr) minmax(150px, 0.24fr) minmax(248px, 0.34fr);
   align-items: center;
-  gap: 12px;
-  min-height: 84px;
-  padding: 12px;
+  gap: 16px;
+  min-height: 132px;
+  padding: 14px;
   border: 1px solid rgba(85, 105, 79, 0.44);
   border-radius: 8px;
   background: linear-gradient(135deg, rgba(32, 39, 29, 0.86), rgba(16, 20, 15, 0.82));
@@ -586,8 +621,8 @@ a {
 }
 
 .pace-phase {
-  width: 44px;
-  min-height: 44px;
+  width: 54px;
+  min-height: 54px;
   display: grid;
   place-items: center;
   border: 1px solid rgba(240, 245, 233, 0.12);
@@ -595,7 +630,7 @@ a {
   color: #07110c;
   background: linear-gradient(145deg, var(--primary-strong), var(--blue));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.32);
-  font-size: 0.92rem;
+  font-size: 0.98rem;
   font-weight: 950;
   text-align: center;
   line-height: 1.12;
@@ -617,18 +652,43 @@ a {
 .pace-copy {
   min-width: 0;
   display: grid;
-  gap: 3px;
+  gap: 7px;
 }
 
 .pace-copy strong {
   color: var(--ink);
-  font-size: 1.02rem;
+  font-size: 1.08rem;
   font-weight: 900;
+}
+
+.pace-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(72px, 1fr));
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.pace-detail-grid span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+  border: 1px solid rgba(85, 105, 79, 0.34);
+  border-radius: 7px;
+  background: rgba(16, 20, 15, 0.46);
+  color: var(--ink);
+  font-size: 0.84rem;
+  font-weight: 850;
+}
+
+.pace-detail-grid em {
+  font-style: normal;
+  letter-spacing: 0.1em;
 }
 
 .pace-meter {
   display: grid;
-  gap: 6px;
+  gap: 7px;
 }
 
 .pace-meter-track {
@@ -654,15 +714,42 @@ a {
 }
 
 .pace-spark {
-  width: 132px;
-  height: 44px;
+  width: 100%;
+  min-width: 248px;
+  height: 108px;
+  display: grid;
+  gap: 6px;
+  align-content: center;
+  padding: 8px 8px 6px;
+  border: 1px solid rgba(85, 105, 79, 0.34);
+  border-radius: 8px;
+  background: rgba(16, 20, 15, 0.38);
 }
 
 .pace-spark svg {
   width: 100%;
-  height: 100%;
+  height: 86px;
   display: block;
   overflow: visible;
+}
+
+.pace-spark-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  letter-spacing: 0.08em;
+}
+
+.pace-spark-meta span:nth-child(1) {
+  color: var(--primary-strong);
+}
+
+.pace-spark-meta span:nth-child(2) {
+  color: var(--warn);
+}
+
+.pace-spark-meta span:nth-child(3) {
+  text-align: right;
 }
 
 .surface-grid {
@@ -902,9 +989,18 @@ a {
     grid-template-columns: 62px minmax(0, 1fr) 112px;
   }
 
+  .pace-context {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .pace-detail-grid {
+    grid-template-columns: repeat(3, minmax(72px, 1fr));
+  }
+
   .pace-spark {
     grid-column: 2 / -1;
     width: 100%;
+    min-width: 0;
   }
 
   .rail {
@@ -946,6 +1042,11 @@ a {
   .pace-row {
     grid-template-columns: 1fr;
     justify-items: stretch;
+  }
+
+  .pace-context,
+  .pace-detail-grid {
+    grid-template-columns: 1fr;
   }
 
   .pace-phase {

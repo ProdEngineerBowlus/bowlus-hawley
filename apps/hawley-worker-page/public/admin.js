@@ -100,8 +100,8 @@
   }
 
   function renderPaceSparkline({ totalLoad, completed, remaining, idealDailyCapacity, currentDailyPace, totalWorkdays, elapsedWorkdays }) {
-    const width = 122;
-    const height = 40;
+    const width = 248;
+    const height = 86;
     const days = Math.max(2, Math.round(Number(totalWorkdays) || 10));
     const safeTotal = Math.max(Number(totalLoad) || (Number(completed) || 0) + (Number(remaining) || 0), 1);
     const safeCompleted = Math.max(Number(completed) || 0, 0);
@@ -117,15 +117,24 @@
     const elapsedIndex = clamp(Math.round(elapsed) - 1, 0, days - 1);
     const markerX = days === 1 ? width / 2 : (elapsedIndex / (days - 1)) * width;
     const markerY = height - (Math.max(safeTotal - safeCompleted, 0) / maxValue) * height;
+    const projectedRemainingAtEnd = pacePoints[pacePoints.length - 1] || 0;
 
     return `
       <div class="pace-spark" title="Target burn-down, current pace projection, and current remaining work.">
         <svg viewBox="0 0 ${width} ${height}" aria-hidden="true">
+          <line x1="0" y1="0" x2="${width}" y2="0" stroke="rgba(240,245,233,0.08)" stroke-width="1"></line>
+          <line x1="0" y1="${(height / 2).toFixed(1)}" x2="${width}" y2="${(height / 2).toFixed(1)}" stroke="rgba(240,245,233,0.08)" stroke-width="1"></line>
           <line x1="0" y1="${height}" x2="${width}" y2="${height}" stroke="rgba(240,245,233,0.16)" stroke-width="1"></line>
-          <path d="${sparklinePath(idealPoints, width, height, maxValue)}" fill="none" stroke="var(--primary)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path>
-          <path d="${sparklinePath(pacePoints, width, height, maxValue)}" fill="none" stroke="var(--warn)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path>
-          <circle cx="${markerX.toFixed(1)}" cy="${markerY.toFixed(1)}" r="3.4" fill="var(--ink)"></circle>
+          <line x1="${markerX.toFixed(1)}" y1="0" x2="${markerX.toFixed(1)}" y2="${height}" stroke="rgba(240,245,233,0.16)" stroke-width="1" stroke-dasharray="3 4"></line>
+          <path d="${sparklinePath(idealPoints, width, height, maxValue)}" fill="none" stroke="var(--primary)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
+          <path d="${sparklinePath(pacePoints, width, height, maxValue)}" fill="none" stroke="var(--warn)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
+          <circle cx="${markerX.toFixed(1)}" cy="${markerY.toFixed(1)}" r="4.6" fill="var(--ink)" stroke="rgba(16,20,15,0.92)" stroke-width="2"></circle>
         </svg>
+        <div class="pace-spark-meta">
+          <span>target</span>
+          <span>pace</span>
+          <span>${escapeHtml(formatHours(projectedRemainingAtEnd))} end</span>
+        </div>
       </div>
     `;
   }
@@ -540,6 +549,16 @@
     const elapsedWorkdays = Number.isFinite(cycleProgress) && cycleProgress > 0 && Number.isFinite(totalWorkdays)
       ? totalWorkdays * (cycleProgress / 100)
       : Number(cycle.elapsedWorkday || 0);
+    const cycleLabel = debt.currentCycle || cycle.label || lineOverview.cycleLabel || "Current";
+    const cycleDates = [cycle.startDate, cycle.endDate].filter(Boolean).map(formatDate).join(" - ");
+    const elapsedDay = Number(cycle.elapsedWorkday || elapsedWorkdays || 0);
+    const cycleMeta = [
+      { label: "Cycle", value: cycleLabel },
+      { label: "Workdays", value: Number.isFinite(totalWorkdays) && totalWorkdays > 0 ? `${formatNumber(Math.round(elapsedDay))}/${formatNumber(totalWorkdays)}` : "n/a" },
+      { label: "Remaining", value: Number.isFinite(remainingWorkdays) ? `${formatNumber(remainingWorkdays)} days` : "n/a" },
+      { label: "Progress", value: formatPercent(cycleProgress) },
+      { label: "Dates", value: cycleDates || "n/a" }
+    ];
     return `
       <article class="panel visual-panel plh-reference-panel pace-panel">
         <div class="visual-head">
@@ -548,6 +567,14 @@
             <p class="muted">Daily Assignment Tracker pace by phase, projected forward if the current completion rate continues.</p>
           </div>
           <span class="section-tag">A-F Pace</span>
+        </div>
+        <div class="pace-context" aria-label="Cycle pace context">
+          ${cycleMeta.map(item => `
+            <div class="pace-context-item">
+              <span>${escapeHtml(item.label)}</span>
+              <strong>${escapeHtml(item.value)}</strong>
+            </div>
+          `).join("")}
         </div>
         <div class="phase-pace-list">
           ${rows.map(row => {
@@ -566,6 +593,19 @@
             const dailyPace = elapsedWorkdays && completed > 0 ? completed / elapsedWorkdays : null;
             const projectedWorkdays = dailyPace && dailyPace > 0 ? remaining / dailyPace : null;
             const progress = clamp(row.completionPct, 0, 100).toFixed(1);
+            const expectedDone = Number(row.expectedCompletedHours);
+            const paceDelta = Number(row.paceDeltaHours);
+            const capacityDelta = Number(row.capacityDeltaSignedHours ?? row.capacityDeltaHours);
+            const capacityLabel = row.capacityLabel || (Number.isFinite(capacityDelta) ? (capacityDelta >= 0 ? "Cushion" : "Gap") : "Capacity");
+            const capacityDeltaText = Number.isFinite(capacityDelta) ? formatHours(Math.abs(capacityDelta)) : "n/a";
+            const detailItems = [
+              ["Load", formatHours(totalLoad)],
+              ["Done", formatHours(completed)],
+              ["Open", formatHours(remaining)],
+              ["Capacity", formatHours(capacityHours)],
+              ["Expected", Number.isFinite(expectedDone) ? formatHours(expectedDone) : "n/a"],
+              ["Delta", Number.isFinite(paceDelta) ? formatSignedHours(paceDelta) : "n/a"]
+            ];
             return `
               <div class="pace-row ${tone}">
                 <div class="pace-phase">${escapeHtml(phaseShortName(row.phaseName || row.phase))}</div>
@@ -573,12 +613,18 @@
                   <strong>${escapeHtml(status)}</strong>
                   <small>${escapeHtml(formatHours(remaining))} remaining / ${escapeHtml(formatNumber(workerCount))} worker${workerCount === 1 ? "" : "s"} = ${escapeHtml(hoursPerWorker === null ? "--" : formatHours(hoursPerWorker))} per worker</small>
                   <small>ideal ${escapeHtml(formatWorkdays(idealWorkdays))} | current pace ${escapeHtml(formatWorkdays(projectedWorkdays))}</small>
+                  <div class="pace-detail-grid">
+                    ${detailItems.map(([label, value]) => `
+                      <span><em>${escapeHtml(label)}</em>${escapeHtml(value)}</span>
+                    `).join("")}
+                  </div>
                 </div>
                 <div class="pace-meter">
                   <div class="pace-meter-track">
                     <span class="pace-meter-fill ${escapeAttr(tone)}" style="width: ${progress}%"></span>
                   </div>
                   <small>${escapeHtml(formatPercent(row.completionPct))} / ${escapeHtml(formatPercent(row.cyclePct ?? row.cycleProgressPct ?? cycleProgress))}</small>
+                  <small>${escapeHtml(capacityLabel)}: ${escapeHtml(capacityDeltaText)}</small>
                 </div>
                 ${renderPaceSparkline({
                   totalLoad,
