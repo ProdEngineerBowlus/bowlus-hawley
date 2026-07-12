@@ -235,6 +235,18 @@ a {
   grid-template-columns: repeat(4, minmax(150px, 1fr));
 }
 
+.metric-grid.small-metrics {
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+}
+
+.metric-grid.small-metrics .metric {
+  min-height: auto;
+}
+
+.metric-grid.small-metrics .metric strong {
+  font-size: 1.26rem;
+}
+
 .feature-grid {
   grid-template-columns: repeat(4, minmax(150px, 1fr));
 }
@@ -1200,6 +1212,13 @@ a {
 
 .task-row strong {
   overflow-wrap: anywhere;
+}
+
+.risk-text {
+  display: block;
+  margin-top: 4px;
+  color: #ffb19c;
+  font-size: 0.78rem;
 }
 
 .notice {

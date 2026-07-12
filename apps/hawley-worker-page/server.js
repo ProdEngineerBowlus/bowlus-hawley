@@ -18,7 +18,7 @@ const staticDir = path.join(appDir, "public");
 
 const HOST = process.env.HAWLEY_WORKER_HOST || (process.env.PORT ? "0.0.0.0" : "127.0.0.1");
 const PORT = Number(process.env.PORT || process.env.HAWLEY_WORKER_PORT || 5273);
-const APP_BUILD_LABEL = "hawley-native-plh-v4";
+const APP_BUILD_LABEL = "hawley-admin-project-create-v1";
 const APP_BUILD_COMMIT = process.env.SOURCE_COMMIT ||
   process.env.COMMIT_SHA ||
   process.env.GIT_SHA ||
@@ -53,6 +53,11 @@ const WORKER_WRITE_IDS = new Set(
 );
 const TRANSITION_REVIEWS_ENABLED = booleanEnv("HAWLEY_TRANSITION_REVIEWS_ENABLED", true);
 const ADMIN_PROJECT_CREATE_ENABLED = booleanEnv("HAWLEY_ADMIN_PROJECT_CREATE_ENABLED", false);
+const ADMIN_PROJECT_TEMPLATE_GID = process.env.HAWLEY_ASANA_PROJECT_TEMPLATE_GID || "1211664083967075";
+const ADMIN_PROJECT_PORTFOLIOS = Object.freeze({
+  Cycle: process.env.HAWLEY_ASANA_FABRICATION_PORTFOLIO_GID || "1212620750946278",
+  VIN: process.env.HAWLEY_ASANA_VIN_PORTFOLIO_GID || "1212620750946276"
+});
 const ADMIN_PLH_BASELINE_CYCLE = process.env.HAWLEY_ADMIN_PLH_BASELINE_CYCLE || "C5";
 const ADMIN_PLH_PHASES = new Set(
   envList(process.env.HAWLEY_ADMIN_PLH_PHASES || "")
@@ -220,7 +225,7 @@ function sendError(res, status, message, details = {}) {
 
 function publicErrorMessage(error) {
   const message = error.message || "";
-  if (/hawley_worker_page_assignments|hawley_cycle_calendar|hawley_reporting_day_summary|worker_daily_utilization|phase_cycle_load_rev1|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|task_templates|production_schedule|airtable_tasks|airtable_production|jsonb_display_text|task_transition_events|time_sessions|transition_category_catalog|app_users|app_sessions|app_auth_events/.test(message)) {
+  if (/hawley_worker_page_assignments|hawley_cycle_calendar|hawley_reporting_day_summary|worker_daily_utilization|phase_cycle_load_rev1|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|task_templates|production_schedule|airtable_tasks|airtable_production|airtable_vins|airtable_models|hb\.vins|hb\.models|project_creation_runs|jsonb_display_text|task_transition_events|time_sessions|transition_category_catalog|app_users|app_sessions|app_auth_events/.test(message)) {
     return {
       status: 503,
       message: "Hawley worker read model is not migrated yet. Run npm run pg:migrate."
@@ -5607,6 +5612,325 @@ function secondsToHours(value) {
   return round(Number(value || 0) / 3600, 2);
 }
 
+function projectCreatorNormalizeKey(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/[^\w\s/.]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function projectCreatorVinNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const match = String(value).match(/\b\d{3,5}\b/);
+  if (!match) return null;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function projectCreatorPhaseName(row) {
+  return String(row?.phase_name || row?.section_column || row?.asana_section || "").trim();
+}
+
+function projectCreatorArray(value) {
+  return Array.isArray(value) ? value.filter(Boolean) : [];
+}
+
+function projectCreatorTaskMatchesSchedule(task, schedule) {
+  const schedulePhaseId = String(schedule.phase_record_id || "");
+  const schedulePhaseName = projectCreatorNormalizeKey(projectCreatorPhaseName(schedule));
+  const taskPhaseIds = new Set(projectCreatorArray(task.phase_record_ids).map(String));
+  const taskPhaseNames = new Set(
+    projectCreatorArray(task.phase_names)
+      .concat(task.primary_phase_name ? [task.primary_phase_name] : [])
+      .map(projectCreatorNormalizeKey)
+      .filter(Boolean)
+  );
+  return Boolean(
+    (schedulePhaseId && taskPhaseIds.has(schedulePhaseId)) ||
+    (schedulePhaseName && taskPhaseNames.has(schedulePhaseName))
+  );
+}
+
+function projectCreatorTaskAppliesToVin(task, vin) {
+  if (!vin) return false;
+  const taskModels = projectCreatorArray(task.model_type_names);
+  const taskFrames = projectCreatorArray(task.frame_class_names);
+  const vinModels = new Set(projectCreatorArray(vin.model_type_names));
+  const vinFrames = new Set(projectCreatorArray(vin.frame_class_names));
+
+  if (taskFrames.length && !taskFrames.some(frame => vinFrames.has(frame))) return false;
+  if (taskModels.length) {
+    const isBase = taskModels.some(model => /^base model\b/i.test(String(model)) || String(model) === "Base Model");
+    if (!isBase && !taskModels.some(model => vinModels.has(model))) return false;
+  }
+  return true;
+}
+
+function projectCreatorInstanceKey(taskRecordId, productionRecordId, vin) {
+  return `${taskRecordId || ""}::${productionRecordId || ""}::${vin ?? ""}`;
+}
+
+function projectCreatorNativeKey(taskRecordId, productionRecordId, vin) {
+  return `hawley:${projectCreatorInstanceKey(taskRecordId, productionRecordId, vin)}`;
+}
+
+function projectCreatorPhaseCycleKey(schedule) {
+  return schedule.phase_record_id && schedule.cycle_record_id
+    ? `${schedule.phase_record_id}::${schedule.cycle_record_id}`
+    : null;
+}
+
+function projectCreatorProjectType(schedule) {
+  return projectCreatorVinNumber(schedule?.vin) ? "VIN" : "Cycle";
+}
+
+async function adminProjectCreatorScheduleRows(cycleNumber, selectedProductionRecordId) {
+  let resolvedCycle = cycleNumber;
+  if (!resolvedCycle && selectedProductionRecordId) {
+    const selectedResult = await pool.query(
+      `
+        select cycle_number
+        from hb.production_schedule
+        where production_record_id = $1
+        limit 1
+      `,
+      [selectedProductionRecordId]
+    );
+    resolvedCycle = selectedResult.rows[0]?.cycle_number || null;
+  }
+
+  const scheduleResult = await pool.query(
+    `
+      select
+        production_record_id,
+        schedule_key,
+        schedule_name,
+        cycle_number,
+        cycle_label,
+        short_cycle_label,
+        cycle_record_id,
+        phase_record_id,
+        phase_name,
+        section_column,
+        asana_section,
+        vin,
+        vin_values,
+        model_type,
+        start_date::text,
+        end_date::text,
+        days_in_cycle,
+        existing_rev1_task_instance_links
+      from hb.production_schedule
+      where ($1::int is null or cycle_number = $1::int)
+      order by start_date nulls last, nullif(vin, '') nulls last, phase_name nulls last, section_column nulls last
+      limit 300
+    `,
+    [resolvedCycle]
+  );
+
+  const scheduleRows = scheduleResult.rows;
+  const selectedSchedule =
+    scheduleRows.find(row => row.production_record_id === selectedProductionRecordId) ||
+    scheduleRows[0] ||
+    null;
+
+  return {
+    cycleNumber: resolvedCycle,
+    scheduleRows,
+    selectedSchedule
+  };
+}
+
+async function adminProjectCreatorPreview(selectedSchedule, scheduleRows) {
+  if (!selectedSchedule) return null;
+
+  const [taskResult, vinResult, modelResult, existingResult] = await Promise.all([
+    pool.query(`
+      select
+        task_record_id,
+        tasks_key,
+        task_name,
+        parent_task_name,
+        task_order,
+        quantity,
+        estimated_task_time_seconds,
+        estimated_batch_task_time_seconds,
+        primary_phase_record_id,
+        primary_phase_name,
+        phase_record_ids,
+        phase_names,
+        primary_worker_record_id,
+        primary_worker_name,
+        assignee_email,
+        parity_mode,
+        supported_phase_record_id,
+        supported_phase_name,
+        supported_offset,
+        model_type_names,
+        frame_class_names,
+        document_link,
+        attachment_summary,
+        task_description
+      from hb.task_templates
+      where coalesce(active, true)
+      order by task_order nulls last, parent_task_name nulls first, task_name
+      limit 2000
+    `),
+    pool.query(`
+      select vin_record_id, vin, vin_text, model_type_names, frame_class_names
+      from hb.vins
+      where vin is not null
+    `),
+    pool.query(`
+      select count(*)::int as count
+      from hb.models
+    `),
+    pool.query(
+      `
+        select
+          rev1_task_instance_id,
+          task_instance_rev1_key,
+          source_system,
+          tasks_record_id,
+          line_schedule_record_id,
+          vin,
+          asana_task_gid,
+          asana_project_gid
+        from hb.rev1_task_instances
+        where line_schedule_record_id = $1
+      `,
+      [selectedSchedule.production_record_id]
+    )
+  ]);
+
+  const anchorByCyclePhase = new Map();
+  for (const row of scheduleRows || []) {
+    const phaseName = projectCreatorPhaseName(row);
+    const vin = projectCreatorVinNumber(row.vin);
+    if (!phaseName || vin === null || row.cycle_number === null || row.cycle_number === undefined) continue;
+    if (!/^[A-H]$/.test(phaseName) && phaseName !== "A1" && phaseName !== "A2") continue;
+    anchorByCyclePhase.set(`${Number(row.cycle_number)}::${phaseName}`, vin);
+  }
+
+  const vinsByNumber = new Map(vinResult.rows.map(row => [Number(row.vin), row]));
+  const existingByKey = new Map();
+  for (const row of existingResult.rows) {
+    const key = projectCreatorInstanceKey(
+      row.tasks_record_id,
+      row.line_schedule_record_id,
+      projectCreatorVinNumber(row.vin)
+    );
+    if (key && !existingByKey.has(key)) existingByKey.set(key, row);
+  }
+
+  const skipped = {
+    phaseMismatch: 0,
+    missingVinAnchor: 0,
+    missingProductionVin: 0,
+    missingVinRecord: 0,
+    modelFrameMismatch: 0,
+    existingSynced: 0
+  };
+
+  const tasks = [];
+  for (const task of taskResult.rows) {
+    if (!projectCreatorTaskMatchesSchedule(task, selectedSchedule)) {
+      skipped.phaseMismatch += 1;
+      continue;
+    }
+
+    const supportedPhase = String(task.supported_phase_name || "").trim();
+    const offset = Number(task.supported_offset || 0);
+    let vin = null;
+    let vinSource = "production";
+    if (supportedPhase) {
+      const anchor = anchorByCyclePhase.get(`${Number(selectedSchedule.cycle_number)}::${supportedPhase}`);
+      if (anchor === null || anchor === undefined) {
+        skipped.missingVinAnchor += 1;
+        continue;
+      }
+      vin = anchor + offset;
+      vinSource = `${supportedPhase}${offset ? ` ${offset > 0 ? "+" : ""}${offset}` : ""}`;
+    } else {
+      vin = projectCreatorVinNumber(selectedSchedule.vin);
+      if (vin === null) {
+        skipped.missingProductionVin += 1;
+        continue;
+      }
+    }
+
+    const vinRecord = vinsByNumber.get(Number(vin));
+    if (!vinRecord) {
+      skipped.missingVinRecord += 1;
+      continue;
+    }
+    if (!projectCreatorTaskAppliesToVin(task, vinRecord)) {
+      skipped.modelFrameMismatch += 1;
+      continue;
+    }
+
+    const instanceKey = projectCreatorInstanceKey(task.task_record_id, selectedSchedule.production_record_id, vin);
+    const nativeKey = projectCreatorNativeKey(task.task_record_id, selectedSchedule.production_record_id, vin);
+    const existing = existingByKey.get(instanceKey) || null;
+    if (existing?.asana_task_gid || existing?.asana_project_gid) skipped.existingSynced += 1;
+    const estimatedSeconds = Number(task.estimated_batch_task_time_seconds || task.estimated_task_time_seconds || 0);
+
+    tasks.push({
+      ...task,
+      vin,
+      vinSource,
+      vinModelTypes: vinRecord.model_type_names || [],
+      vinFrameClasses: vinRecord.frame_class_names || [],
+      nativeKey,
+      instanceKey,
+      estimatedSeconds,
+      estimatedHours: secondsToHours(estimatedSeconds),
+      phaseLabel: projectCreatorPhaseName(selectedSchedule),
+      asanaSection: selectedSchedule.asana_section || projectCreatorPhaseName(selectedSchedule) || "Unassigned",
+      existingTaskInstanceId: existing?.rev1_task_instance_id || null,
+      existingSourceSystem: existing?.source_system || "",
+      existingAsanaTaskGid: existing?.asana_task_gid || "",
+      existingAsanaProjectGid: existing?.asana_project_gid || ""
+    });
+  }
+
+  const totalSeconds = tasks.reduce((sum, row) => sum + Number(row.estimatedSeconds || 0), 0);
+  const missingEstimates = tasks.filter(row => !row.estimated_batch_task_time_seconds && !row.estimated_task_time_seconds).length;
+  const existingSyncedTasks = tasks.filter(row => row.existingAsanaTaskGid || row.existingAsanaProjectGid).length;
+  const existingLegacyTasks = tasks.filter(row => row.existingTaskInstanceId && row.existingSourceSystem !== "hawley_project_creator").length;
+  const existingNativePendingTasks = tasks.filter(row => row.existingTaskInstanceId && row.existingSourceSystem === "hawley_project_creator" && !row.existingAsanaTaskGid && !row.existingAsanaProjectGid).length;
+
+  return {
+    mode: ADMIN_PROJECT_CREATE_ENABLED ? "write-ready" : "preview-only",
+    writeEnabled: ADMIN_PROJECT_CREATE_ENABLED,
+    projectName: adminProjectNameForSchedule(selectedSchedule),
+    projectType: projectCreatorProjectType(selectedSchedule),
+    templateProjectGid: ADMIN_PROJECT_TEMPLATE_GID,
+    portfolioGid: ADMIN_PROJECT_PORTFOLIOS[projectCreatorProjectType(selectedSchedule)] || "",
+    schedule: selectedSchedule,
+    taskCount: tasks.length,
+    creatableTaskCount: Math.max(0, tasks.length - existingSyncedTasks - existingLegacyTasks),
+    estimatedHours: secondsToHours(totalSeconds),
+    estimatedSeconds: totalSeconds,
+    missingEstimates,
+    existingSyncedTasks,
+    existingLegacyTasks,
+    existingNativePendingTasks,
+    skipped,
+    sourceCounts: {
+      taskTemplates: taskResult.rows.length,
+      vins: vinResult.rows.length,
+      models: modelResult.rows[0]?.count || 0,
+      scheduleRows: (scheduleRows || []).length,
+      existingForSchedule: existingResult.rows.length,
+      vinAnchors: anchorByCyclePhase.size
+    },
+    tasks
+  };
+}
+
 function adminPercentValue(value) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
@@ -6922,6 +7246,8 @@ async function adminDashboardPayload() {
         (select count(*)::int from hb.task_templates where coalesce(active, true)) as active_task_template_count,
         (select count(*)::int from hb.task_templates where estimated_batch_task_time_seconds is null and estimated_task_time_seconds is null) as task_templates_missing_estimates,
         (select count(*)::int from hb.production_schedule) as production_schedule_count,
+        (select count(*)::int from hb.vins) as vin_count,
+        (select count(*)::int from hb.models) as model_count,
         (select count(distinct cycle_number)::int from hb.production_schedule where cycle_number is not null) as production_cycle_count,
         (select count(*)::int from hb.production_schedule where existing_rev1_task_instance_links > 0) as schedule_rows_with_rev1_links,
         (select count(*)::int from hb.rev1_task_instances) as rev1_task_instance_count,
@@ -7039,7 +7365,7 @@ async function adminProjectCreatorPayload(url) {
   const selectedProductionRecordId = url.searchParams.get("productionRecordId") || "";
   const cycleNumber = await selectedAdminCycleNumber(requestedCycle);
 
-  const [cyclesResult, scheduleResult, phaseResult] = await Promise.all([
+  const [cyclesResult, phaseResult, schedulePayload] = await Promise.all([
     pool.query(`
       select
         cycle_number,
@@ -7054,33 +7380,6 @@ async function adminProjectCreatorPayload(url) {
       order by cycle_number desc
       limit 40
     `),
-    pool.query(
-      `
-        select
-          production_record_id,
-          schedule_key,
-          schedule_name,
-          cycle_number,
-          cycle_label,
-          short_cycle_label,
-          phase_record_id,
-          phase_name,
-          section_column,
-          asana_section,
-          vin,
-          vin_values,
-          model_type,
-          start_date::text,
-          end_date::text,
-          days_in_cycle,
-          existing_rev1_task_instance_links
-        from hb.production_schedule
-        where ($1::int is null or cycle_number = $1::int)
-        order by start_date nulls last, nullif(vin, '') nulls last, phase_name nulls last, section_column nulls last
-        limit 300
-      `,
-      [cycleNumber]
-    ),
     pool.query(`
       select
         primary_phase_record_id,
@@ -7092,74 +7391,19 @@ async function adminProjectCreatorPayload(url) {
       where coalesce(active, true)
       group by primary_phase_record_id, coalesce(primary_phase_name, 'Unassigned')
       order by phase_name
-    `)
+    `),
+    adminProjectCreatorScheduleRows(cycleNumber, selectedProductionRecordId)
   ]);
 
-  const scheduleRows = scheduleResult.rows;
-  const selectedSchedule =
-    scheduleRows.find(row => row.production_record_id === selectedProductionRecordId) ||
-    scheduleRows[0] ||
-    null;
-
-  let preview = null;
-  if (selectedSchedule) {
-    const taskResult = await pool.query(
-      `
-        select
-          task_record_id,
-          tasks_key,
-          task_name,
-          parent_task_name,
-          task_order,
-          quantity,
-          estimated_task_time_seconds,
-          estimated_batch_task_time_seconds,
-          primary_phase_record_id,
-          primary_phase_name,
-          assigned_worker_names,
-          assignee_email,
-          document_link,
-          attachment_summary
-        from hb.task_templates
-        where coalesce(active, true)
-          and (
-            $1::text is null
-            or primary_phase_record_id = $1::text
-            or $1::text = any(phase_record_ids)
-          )
-        order by task_order nulls last, parent_task_name nulls first, task_name
-        limit 500
-      `,
-      [selectedSchedule.phase_record_id || null]
-    );
-    const tasks = taskResult.rows.map(row => ({
-      ...row,
-      estimatedHours: secondsToHours(row.estimated_batch_task_time_seconds || row.estimated_task_time_seconds)
-    }));
-    const totalSeconds = tasks.reduce(
-      (sum, row) => sum + Number(row.estimated_batch_task_time_seconds || row.estimated_task_time_seconds || 0),
-      0
-    );
-    const missingEstimates = tasks.filter(row => !row.estimated_batch_task_time_seconds && !row.estimated_task_time_seconds).length;
-    preview = {
-      mode: ADMIN_PROJECT_CREATE_ENABLED ? "write-ready" : "preview-only",
-      writeEnabled: ADMIN_PROJECT_CREATE_ENABLED,
-      projectName: adminProjectNameForSchedule(selectedSchedule),
-      schedule: selectedSchedule,
-      taskCount: tasks.length,
-      estimatedHours: secondsToHours(totalSeconds),
-      missingEstimates,
-      tasks
-    };
-  }
+  const preview = await adminProjectCreatorPreview(schedulePayload.selectedSchedule, schedulePayload.scheduleRows);
 
   return {
     ok: true,
     checkedAt: new Date().toISOString(),
     projectCreateEnabled: ADMIN_PROJECT_CREATE_ENABLED,
-    selectedCycleNumber: cycleNumber,
+    selectedCycleNumber: schedulePayload.cycleNumber,
     cycles: cyclesResult.rows,
-    scheduleRows,
+    scheduleRows: schedulePayload.scheduleRows,
     taskTemplatePhases: phaseResult.rows.map(row => ({
       ...row,
       estimatedHours: secondsToHours(row.estimated_seconds)
@@ -7168,10 +7412,450 @@ async function adminProjectCreatorPayload(url) {
   };
 }
 
+async function adminAsanaRequest(token, pathOrUrl, method = "GET", body = null, retry = 0) {
+  const url = pathOrUrl.startsWith("http") ? pathOrUrl : `https://app.asana.com/api/1.0${pathOrUrl}`;
+  const response = await fetch(url, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: body ? JSON.stringify({ data: body }) : null
+  });
+
+  const text = await response.text();
+  if (response.status === 429 && retry < 5) {
+    const retryAfter = Number(response.headers.get("retry-after") || 0);
+    const waitMs = retryAfter ? retryAfter * 1000 : 1000 * Math.pow(2, retry);
+    await new Promise(resolve => setTimeout(resolve, waitMs));
+    return adminAsanaRequest(token, pathOrUrl, method, body, retry + 1);
+  }
+  if (!response.ok) throw actionError(`Asana ${method} failed: ${text}`, response.status);
+  return text ? JSON.parse(text).data : null;
+}
+
+async function instantiateAdminAsanaProject(token, projectName) {
+  const job = await adminAsanaRequest(
+    token,
+    `/project_templates/${ADMIN_PROJECT_TEMPLATE_GID}/instantiateProject`,
+    "POST",
+    { name: projectName }
+  );
+
+  for (let index = 0; index < 45; index += 1) {
+    const status = await adminAsanaRequest(token, `/jobs/${job.gid}`);
+    if (status.status === "succeeded") return status.new_project?.gid;
+    if (status.status === "failed") throw actionError("Asana project creation failed.", 502);
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+
+  throw actionError("Timed out waiting for Asana project creation.", 504);
+}
+
+async function adminAddProjectToPortfolio(token, projectGid, projectType) {
+  const portfolioGid = ADMIN_PROJECT_PORTFOLIOS[projectType];
+  if (!portfolioGid) return;
+  await adminAsanaRequest(token, `/portfolios/${portfolioGid}/addItem`, "POST", { item: projectGid });
+}
+
+async function adminCreateAsanaSection(token, projectGid, name) {
+  return adminAsanaRequest(token, `/projects/${projectGid}/sections`, "POST", { name });
+}
+
+async function adminCustomFieldRegistry(token, projectGid) {
+  const project = await adminAsanaRequest(
+    token,
+    `/projects/${projectGid}?opt_fields=custom_field_settings.custom_field.gid,custom_field_settings.custom_field.name,custom_field_settings.custom_field.resource_subtype`
+  );
+  const registry = {};
+  for (const setting of project.custom_field_settings || []) {
+    const field = setting.custom_field;
+    if (!field?.gid || !field?.name) continue;
+    const meta = {
+      gid: field.gid,
+      name: field.name,
+      type: field.resource_subtype,
+      options: {}
+    };
+    if (meta.type === "enum" || meta.type === "multi_enum") {
+      const detail = await adminAsanaRequest(token, `/custom_fields/${meta.gid}?opt_fields=enum_options.gid,enum_options.name`);
+      for (const option of detail.enum_options || []) {
+        meta.options[projectCreatorNormalizeKey(option.name)] = option.gid;
+      }
+    }
+    registry[projectCreatorNormalizeKey(meta.name)] = meta;
+  }
+  return registry;
+}
+
+function adminPutNumberCustomField(payload, registry, name, value) {
+  const meta = registry[projectCreatorNormalizeKey(name)];
+  if (!meta || value === null || value === undefined || value === "") return;
+  const parsed = Number(value);
+  if (Number.isFinite(parsed)) payload[meta.gid] = parsed;
+}
+
+function adminPutTextCustomField(payload, registry, name, value) {
+  const meta = registry[projectCreatorNormalizeKey(name)];
+  if (!meta || value === null || value === undefined || value === "") return;
+  payload[meta.gid] = String(value);
+}
+
+function adminPutEnumCustomField(payload, registry, name, value) {
+  const meta = registry[projectCreatorNormalizeKey(name)];
+  if (!meta || value === null || value === undefined || value === "") return;
+  const optionGid = meta.options[projectCreatorNormalizeKey(value)];
+  if (optionGid) payload[meta.gid] = optionGid;
+}
+
+function adminAsanaCustomFields(task, preview, registry) {
+  const payload = {};
+  adminPutNumberCustomField(payload, registry, "Estimated time", Math.round(Number(task.estimated_task_time_seconds || 0) / 60));
+  adminPutNumberCustomField(payload, registry, "Estimated Time (w/ Qty)", Math.round(Number(task.estimated_batch_task_time_seconds || task.estimated_task_time_seconds || 0) / 60));
+  adminPutNumberCustomField(payload, registry, "Quantity", task.quantity);
+  adminPutNumberCustomField(payload, registry, "Task Order", task.task_order);
+  adminPutNumberCustomField(payload, registry, "VIN", task.vin);
+  adminPutNumberCustomField(payload, registry, "Days in Cycle", preview.schedule?.days_in_cycle);
+  adminPutTextCustomField(payload, registry, "TasksKey", task.tasks_key);
+  adminPutTextCustomField(payload, registry, "AirTableKey", task.nativeKey);
+  adminPutTextCustomField(payload, registry, "SOP Link", task.document_link);
+  adminPutEnumCustomField(payload, registry, "Cycle", preview.schedule?.short_cycle_label || preview.schedule?.cycle_label);
+  adminPutEnumCustomField(payload, registry, "Phase / Section", task.asanaSection || task.phaseLabel);
+  return payload;
+}
+
+async function adminCreateAsanaTask(token, projectGid, sectionGid, parentGid, task, preview, registry) {
+  const notes = [
+    task.task_description || "",
+    task.document_link ? `SOP:\n${task.document_link}` : ""
+  ].filter(Boolean).join("\n\n");
+  const body = {
+    name: task.task_name || `Untitled Hawley task ${task.nativeKey}`,
+    notes
+  };
+  if (preview.schedule?.start_date) body.start_on = String(preview.schedule.start_date).slice(0, 10);
+  if (preview.schedule?.end_date) body.due_on = String(preview.schedule.end_date).slice(0, 10);
+  const customFields = adminAsanaCustomFields(task, preview, registry);
+  if (Object.keys(customFields).length) body.custom_fields = customFields;
+
+  if (parentGid) {
+    body.parent = parentGid;
+  } else {
+    body.projects = [projectGid];
+    body.memberships = [{ project: projectGid, section: sectionGid }];
+  }
+
+  return adminAsanaRequest(token, "/tasks", "POST", body);
+}
+
+async function insertAdminProjectCreationRows(preview, runId, projectName, actor, requestJson) {
+  const client = await writePool.connect();
+  try {
+    await client.query("begin");
+    await client.query(
+      `
+        insert into hb.project_creation_runs (
+          project_creation_run_id,
+          project_name,
+          project_type,
+          status,
+          actor_email,
+          production_record_id,
+          cycle_record_id,
+          cycle_label,
+          phase_record_id,
+          phase_name,
+          vin,
+          task_count,
+          estimated_seconds,
+          request_json
+        )
+        values ($1, $2, $3, 'started', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
+      `,
+      [
+        runId,
+        projectName,
+        preview.projectType,
+        actor?.email || "",
+        preview.schedule.production_record_id,
+        preview.schedule.cycle_record_id,
+        preview.schedule.short_cycle_label || preview.schedule.cycle_label,
+        preview.schedule.phase_record_id,
+        projectCreatorPhaseName(preview.schedule),
+        preview.schedule.vin || "",
+        preview.tasks.length,
+        Number(preview.estimatedSeconds || 0),
+        JSON.stringify(requestJson || {})
+      ]
+    );
+
+    for (const task of preview.tasks) {
+      const estimatedSeconds = Number(task.estimated_batch_task_time_seconds || task.estimated_task_time_seconds || 0);
+      const fieldsJson = {
+        nativeKey: task.nativeKey,
+        projectCreationRunId: runId,
+        sourceTaskTemplate: task.task_record_id,
+        sourceProductionSchedule: preview.schedule.production_record_id,
+        vinSource: task.vinSource
+      };
+      await client.query(
+        `
+          insert into hb.rev1_task_instances (
+            task_instance_rev1_key,
+            airtable_key,
+            asana_section,
+            parent_task_name,
+            task_name,
+            task_description,
+            task_order,
+            status,
+            task_status,
+            task_completed,
+            worker_record_id,
+            worker_name,
+            worker_email,
+            assignee_email,
+            phase_record_id,
+            phase_label,
+            section_column,
+            phase_cycle_bucket_key,
+            phase_cycle_key,
+            cycle_record_id,
+            cycle_label,
+            vin,
+            vin_text,
+            line_schedule_record_id,
+            tasks_record_id,
+            tasks_key,
+            model_type,
+            start_date,
+            end_date,
+            quantity,
+            estimated_task_time_seconds,
+            estimated_batch_task_time_seconds,
+            allocated_hours,
+            completed_est_hours,
+            open_est_hours,
+            days_in_cycle,
+            document_link,
+            attachment_summary,
+            active_in_production,
+            production_match_status,
+            sync_status,
+            rev1_import_notes,
+            fields_json,
+            source_system,
+            source_synced_at
+          )
+          values (
+            $1, $1, $2, $3, $4, $5, $6, 'Not Started', 'Open', false,
+            $7, $8, $9, $9, $10, $11, $12, $13, $13, $14, $15, $16, $17,
+            $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, 0, $27, $28,
+            $29, $30, true, 'hawley_project_creator_pending', false, $31, $32::jsonb,
+            'hawley_project_creator', now()
+          )
+          on conflict (task_instance_rev1_key) where source_system = 'hawley_project_creator'
+          do update set
+            asana_section = excluded.asana_section,
+            parent_task_name = excluded.parent_task_name,
+            task_name = excluded.task_name,
+            task_description = excluded.task_description,
+            task_order = excluded.task_order,
+            worker_record_id = excluded.worker_record_id,
+            worker_name = excluded.worker_name,
+            worker_email = excluded.worker_email,
+            assignee_email = excluded.assignee_email,
+            phase_record_id = excluded.phase_record_id,
+            phase_label = excluded.phase_label,
+            section_column = excluded.section_column,
+            phase_cycle_bucket_key = excluded.phase_cycle_bucket_key,
+            phase_cycle_key = excluded.phase_cycle_key,
+            cycle_record_id = excluded.cycle_record_id,
+            cycle_label = excluded.cycle_label,
+            vin = excluded.vin,
+            vin_text = excluded.vin_text,
+            line_schedule_record_id = excluded.line_schedule_record_id,
+            tasks_record_id = excluded.tasks_record_id,
+            tasks_key = excluded.tasks_key,
+            model_type = excluded.model_type,
+            start_date = excluded.start_date,
+            end_date = excluded.end_date,
+            quantity = excluded.quantity,
+            estimated_task_time_seconds = excluded.estimated_task_time_seconds,
+            estimated_batch_task_time_seconds = excluded.estimated_batch_task_time_seconds,
+            allocated_hours = excluded.allocated_hours,
+            open_est_hours = excluded.open_est_hours,
+            days_in_cycle = excluded.days_in_cycle,
+            document_link = excluded.document_link,
+            attachment_summary = excluded.attachment_summary,
+            active_in_production = excluded.active_in_production,
+            production_match_status = excluded.production_match_status,
+            rev1_import_notes = excluded.rev1_import_notes,
+            fields_json = excluded.fields_json,
+            source_synced_at = excluded.source_synced_at
+          where hb.rev1_task_instances.asana_task_gid is null
+        `,
+        [
+          task.nativeKey,
+          task.asanaSection,
+          task.parent_task_name || null,
+          task.task_name,
+          task.task_description || null,
+          task.task_order,
+          task.primary_worker_record_id || null,
+          task.primary_worker_name || null,
+          task.assignee_email || null,
+          preview.schedule.phase_record_id || null,
+          projectCreatorPhaseName(preview.schedule) || null,
+          preview.schedule.section_column || null,
+          projectCreatorPhaseCycleKey(preview.schedule),
+          preview.schedule.cycle_record_id || null,
+          preview.schedule.short_cycle_label || preview.schedule.cycle_label || null,
+          task.vin,
+          String(task.vin),
+          preview.schedule.production_record_id,
+          task.task_record_id,
+          task.tasks_key || null,
+          projectCreatorArray(task.vinModelTypes).join(", ") || null,
+          preview.schedule.start_date || null,
+          preview.schedule.end_date || null,
+          task.quantity,
+          task.estimated_task_time_seconds || null,
+          task.estimated_batch_task_time_seconds || null,
+          secondsToHours(estimatedSeconds),
+          preview.schedule.days_in_cycle || null,
+          task.document_link || null,
+          task.attachment_summary || null,
+          `Created by Hawley admin project creator run ${runId}.`,
+          JSON.stringify(fieldsJson)
+        ]
+      );
+    }
+
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function updateAdminProjectCreationResult(runId, status, result) {
+  await writePool.query(
+    `
+      update hb.project_creation_runs
+      set status = $2,
+          asana_project_gid = $3,
+          root_task_count = $4,
+          subtask_count = $5,
+          error_message = $6,
+          result_json = $7::jsonb,
+          completed_at = now()
+      where project_creation_run_id = $1
+    `,
+    [
+      runId,
+      status,
+      result?.asanaProjectGid || null,
+      Number(result?.rootTaskCount || 0),
+      Number(result?.subtaskCount || 0),
+      result?.errorMessage || null,
+      JSON.stringify(result || {})
+    ]
+  );
+}
+
+async function updateAdminProjectTaskAsanaLinks(createdTasks, projectGid, projectName) {
+  for (const row of createdTasks) {
+    await writePool.query(
+      `
+        update hb.rev1_task_instances
+        set asana_task_gid = $2,
+            asana_project_gid = $3,
+            asana_project_name = $4,
+            parent_asana_task_gid = $5,
+            sync_status = true,
+            production_match_status = 'hawley_project_creator_asana_created',
+            last_synced_at = now()::text,
+            source_synced_at = now()
+        where task_instance_rev1_key = $1
+          and source_system = 'hawley_project_creator'
+      `,
+      [row.nativeKey, row.asanaTaskGid, projectGid, projectName, row.parentAsanaTaskGid || null]
+    );
+  }
+}
+
+async function createAdminAsanaProjectFromPreview(token, preview, projectName) {
+  const projectGid = await instantiateAdminAsanaProject(token, projectName);
+  await adminAddProjectToPortfolio(token, projectGid, preview.projectType);
+  const registry = await adminCustomFieldRegistry(token, projectGid);
+  const sectionByLabel = {};
+  for (const task of preview.tasks) {
+    const label = task.asanaSection || task.phaseLabel || "Unassigned";
+    if (!sectionByLabel[label]) {
+      const section = await adminCreateAsanaSection(token, projectGid, label);
+      sectionByLabel[label] = section.gid;
+    }
+  }
+
+  const recordsByName = new Map();
+  for (const task of preview.tasks) {
+    const key = projectCreatorNormalizeKey(task.task_name);
+    if (key && !recordsByName.has(key)) recordsByName.set(key, task);
+  }
+
+  const childrenByParentKey = new Map();
+  const rootTasks = [];
+  for (const task of preview.tasks) {
+    const parentKey = projectCreatorNormalizeKey(task.parent_task_name);
+    const parent = parentKey ? recordsByName.get(parentKey) : null;
+    if (!parent || parent.nativeKey === task.nativeKey) {
+      rootTasks.push(task);
+      continue;
+    }
+    if (!childrenByParentKey.has(parent.nativeKey)) childrenByParentKey.set(parent.nativeKey, []);
+    childrenByParentKey.get(parent.nativeKey).push(task);
+  }
+
+  const createdTasks = [];
+  let rootTaskCount = 0;
+  let subtaskCount = 0;
+
+  async function createTree(task, parentGid = null) {
+    const sectionGid = sectionByLabel[task.asanaSection || task.phaseLabel || "Unassigned"];
+    const asanaTask = await adminCreateAsanaTask(token, projectGid, sectionGid, parentGid, task, preview, registry);
+    createdTasks.push({
+      nativeKey: task.nativeKey,
+      asanaTaskGid: asanaTask.gid,
+      parentAsanaTaskGid: parentGid
+    });
+    if (parentGid) subtaskCount += 1;
+    else rootTaskCount += 1;
+    for (const child of childrenByParentKey.get(task.nativeKey) || []) {
+      await createTree(child, asanaTask.gid);
+    }
+  }
+
+  for (const task of rootTasks) {
+    await createTree(task);
+  }
+
+  return {
+    asanaProjectGid: projectGid,
+    projectType: preview.projectType,
+    projectName,
+    rootTaskCount,
+    subtaskCount,
+    createdTasks
+  };
+}
+
 async function handleAdminProjectCreate(req) {
   const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
   requireAdminActor(actor);
-  await parseJsonBody(req);
+  const body = await readJsonBody(req);
 
   if (!ADMIN_PROJECT_CREATE_ENABLED) {
     throw actionError("Project creation is in preview mode. Enable HAWLEY_ADMIN_PROJECT_CREATE_ENABLED after the Asana write path is reviewed.", 409, {
@@ -7179,9 +7863,63 @@ async function handleAdminProjectCreate(req) {
     });
   }
 
-  throw actionError("Asana project creation is not implemented in this Hawley admin build yet.", 501, {
-    code: "PROJECT_CREATE_NOT_IMPLEMENTED"
-  });
+  const token = process.env.ASANA_PAT;
+  if (!token) {
+    throw actionError("ASANA_PAT is not configured for admin project creation.", 503, {
+      code: "ASANA_PAT_MISSING"
+    });
+  }
+
+  const productionRecordId = String(body.productionRecordId || "").trim();
+  if (!productionRecordId) {
+    throw actionError("Select a Production schedule row before creating a project.", 400, {
+      code: "PRODUCTION_ROW_REQUIRED"
+    });
+  }
+
+  const schedulePayload = await adminProjectCreatorScheduleRows(null, productionRecordId);
+  const preview = await adminProjectCreatorPreview(schedulePayload.selectedSchedule, schedulePayload.scheduleRows);
+  if (!preview?.tasks?.length) {
+    throw actionError("No creatable task instances were generated for this Production row.", 409, {
+      code: "NO_PROJECT_TASKS",
+      skipped: preview?.skipped || {}
+    });
+  }
+  if (preview.existingSyncedTasks) {
+    throw actionError("This Production row already has Asana-linked task instances. Pick an unsynced future row for the test create.", 409, {
+      code: "PROJECT_TASKS_ALREADY_SYNCED",
+      existingSyncedTasks: preview.existingSyncedTasks
+    });
+  }
+  if (preview.existingLegacyTasks) {
+    throw actionError("This Production row already has legacy task instances. Pick a clean future row or migrate those rows before using the Postgres-first test create.", 409, {
+      code: "PROJECT_TASKS_ALREADY_EXIST",
+      existingLegacyTasks: preview.existingLegacyTasks
+    });
+  }
+
+  const projectName = String(body.projectName || preview.projectName || "").trim() || adminProjectNameForSchedule(preview.schedule);
+  const runId = crypto.randomUUID();
+  await insertAdminProjectCreationRows(preview, runId, projectName, actor, body);
+
+  try {
+    const result = await createAdminAsanaProjectFromPreview(token, preview, projectName);
+    await updateAdminProjectTaskAsanaLinks(result.createdTasks, result.asanaProjectGid, projectName);
+    await updateAdminProjectCreationResult(runId, "success", result);
+    return {
+      ok: true,
+      message: `Created Asana test project ${projectName}.`,
+      runId,
+      ...result
+    };
+  } catch (error) {
+    const failure = {
+      errorMessage: error.message || "Project creation failed.",
+      statusCode: error.statusCode || 500
+    };
+    await updateAdminProjectCreationResult(runId, "failed", failure);
+    throw error;
+  }
 }
 
 async function serveStatic(req, res, url) {

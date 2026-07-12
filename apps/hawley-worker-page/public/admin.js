@@ -1116,7 +1116,8 @@
             <div class="panel-header">
               <h3 class="panel-title">Preview</h3>
               <div class="panel-actions">
-                ${preview ? pill(`${formatNumber(preview.taskCount)} tasks`, "good") : ""}
+                ${preview ? pill(`${formatNumber(preview.taskCount)} generated`, preview.taskCount ? "good" : "warn") : ""}
+                ${preview ? pill(`${formatNumber(preview.creatableTaskCount)} creatable`, preview.creatableTaskCount ? "good" : "warn") : ""}
                 ${preview ? pill(formatHours(preview.estimatedHours), "good") : ""}
               </div>
             </div>
@@ -1131,24 +1132,45 @@
 
   function renderPreview(preview) {
     const tasks = preview.tasks || [];
+    const skipped = preview.skipped || {};
+    const sourceCounts = preview.sourceCounts || {};
+    const createBlocked = !preview.writeEnabled || !preview.creatableTaskCount || preview.existingSyncedTasks || preview.existingLegacyTasks;
     return `
       <div class="content-stack">
         <div>
           <h3 class="section-title" style="font-size: 1.22rem;">${escapeHtml(preview.projectName)}</h3>
           <div class="chip-row" style="margin-top: 10px;">
             ${pill(preview.mode, preview.writeEnabled ? "good" : "warn")}
+            ${pill(preview.projectType || "Project", "good")}
             ${preview.missingEstimates ? pill(`${formatNumber(preview.missingEstimates)} missing estimates`, "risk") : pill("Estimates ready", "good")}
+            ${preview.existingSyncedTasks ? pill(`${formatNumber(preview.existingSyncedTasks)} already in Asana`, "risk") : ""}
+            ${preview.existingLegacyTasks ? pill(`${formatNumber(preview.existingLegacyTasks)} legacy rows exist`, "risk") : ""}
+            ${preview.existingNativePendingTasks ? pill(`${formatNumber(preview.existingNativePendingTasks)} Hawley pending`, "warn") : ""}
             ${preview.schedule?.model_type ? pill(preview.schedule.model_type) : ""}
           </div>
         </div>
         <div class="metric-grid">
           ${metric("Tasks", formatNumber(preview.taskCount), preview.schedule?.phase_name || "")}
+          ${metric("Creatable", formatNumber(preview.creatableTaskCount), "not Asana-linked")}
           ${metric("Estimated", formatHours(preview.estimatedHours), "batch time")}
           ${metric("VIN", preview.schedule?.vin || "No VIN", preview.schedule?.cycle_label || "")}
           ${metric("Dates", `${formatDate(preview.schedule?.start_date)} - ${formatDate(preview.schedule?.end_date)}`, `${formatNumber(preview.schedule?.days_in_cycle)} days`)}
         </div>
+        <div class="metric-grid small-metrics">
+          ${metric("Source tasks", formatNumber(sourceCounts.taskTemplates), "active templates")}
+          ${metric("VIN records", formatNumber(sourceCounts.vins), "model/frame rules")}
+          ${metric("Models", formatNumber(sourceCounts.models), "lookup names")}
+          ${metric("VIN anchors", formatNumber(sourceCounts.vinAnchors), "A-H schedule anchors")}
+          ${metric("Existing", formatNumber(sourceCounts.existingForSchedule), "for this row")}
+        </div>
+        <div class="chip-row">
+          ${skipped.missingVinAnchor ? pill(`${formatNumber(skipped.missingVinAnchor)} no VIN anchor`, "warn") : ""}
+          ${skipped.missingProductionVin ? pill(`${formatNumber(skipped.missingProductionVin)} no production VIN`, "warn") : ""}
+          ${skipped.missingVinRecord ? pill(`${formatNumber(skipped.missingVinRecord)} VINs missing`, "risk") : ""}
+          ${skipped.modelFrameMismatch ? pill(`${formatNumber(skipped.modelFrameMismatch)} model/frame filtered`, "warn") : ""}
+        </div>
         <div class="inline-actions">
-          <button class="btn primary" type="button" data-action="create-project" ${preview.writeEnabled ? "" : "disabled"}>Create project</button>
+          <button class="btn primary" type="button" data-action="create-project" ${createBlocked ? "disabled" : ""}>Create test project</button>
           ${state.createMessage ? `<span class="muted">${escapeHtml(state.createMessage)}</span>` : ""}
         </div>
         <div class="task-list">
@@ -1157,9 +1179,13 @@
               <span class="pill">${escapeHtml(row.task_order ?? "")}</span>
               <span>
                 <strong>${escapeHtml(row.task_name)}</strong>
-                <small>${escapeHtml(row.parent_task_name || row.tasks_key || "")}</small>
+                <small>${escapeHtml([row.parent_task_name || row.tasks_key || "", row.vin ? `VIN ${row.vin}` : "", row.vinSource ? `source ${row.vinSource}` : ""].filter(Boolean).join(" - "))}</small>
               </span>
-              <span>${formatHours(row.estimatedHours)}</span>
+              <span>
+                ${formatHours(row.estimatedHours)}
+                ${row.existingAsanaTaskGid ? `<small class="risk-text">Asana-linked</small>` : ""}
+                ${row.existingTaskInstanceId && !row.existingAsanaTaskGid && row.existingSourceSystem !== "hawley_project_creator" ? `<small class="risk-text">legacy row exists</small>` : ""}
+              </span>
             </div>
           `).join("") || `<div class="notice">No matching task templates for this schedule row.</div>`}
         </div>

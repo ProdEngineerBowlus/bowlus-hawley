@@ -738,6 +738,10 @@ function phaseNamesForIds(ids, lookups) {
   return unique(ids.map(id => lookups.phases.get(id)?.phase_name || lookups.phases.get(id)?.section_column));
 }
 
+function modelNamesForIds(ids, lookups) {
+  return unique(ids.map(id => lookups.models?.get(id)?.model_name));
+}
+
 function workerNamesForIds(ids, lookups) {
   return unique(ids.map(id => lookups.workers.get(id)?.worker_name));
 }
@@ -784,6 +788,13 @@ function taskTemplateRow(raw, lookups) {
   const active = optionalBoolean(firstPresentField(fields, ["Active?", "Active", "Task Active?"]));
   const primaryWorker = workerIds.length ? lookups.workers.get(workerIds[0]) : null;
   const attachmentValue = fields["Diagrams & Utilities"];
+  const supportedPhaseIds = recordLinkedIds(fields["Supported Phase"]);
+  const supportedPhaseNames = unique([
+    ...phaseNamesForIds(supportedPhaseIds, lookups),
+    ...nonRecordTextList(fields["Supported Phase"])
+  ]);
+  const modelTypeRecordIds = recordLinkedIds(fields["Model Type"]);
+  const frameClassRecordIds = recordLinkedIds(fields["Frame Class"]);
 
   return {
     task_record_id: raw.record_id,
@@ -810,6 +821,19 @@ function taskTemplateRow(raw, lookups) {
     assigned_worker_record_ids: workerIds,
     assigned_worker_names: workerNames,
     assignee_email: text(fields.Assignee) || primaryWorker?.worker_email || null,
+    parity_mode: text(fields["Parity Mode"]),
+    supported_phase_record_id: supportedPhaseIds[0] || null,
+    supported_phase_name: supportedPhaseNames[0] || null,
+    supported_offset: numberValue(fields["Supported Offset"], 0) ?? 0,
+    model_type_record_ids: modelTypeRecordIds,
+    model_type_names: unique([
+      ...modelNamesForIds(modelTypeRecordIds, lookups),
+      ...nonRecordTextList(fields["Model Type"])
+    ]),
+    frame_class_record_ids: frameClassRecordIds,
+    frame_class_names: unique([
+      ...nonRecordTextList(fields["Frame Class"])
+    ]),
     document_link: text(fields["Document Link"]) || text(fields["SOP Link"]),
     attachment_summary: attachmentSummary(attachmentValue),
     attachment_files_json: JSON.stringify(attachmentFiles(attachmentValue)),
@@ -831,6 +855,39 @@ function taskTemplateRows(rawRows, lookups) {
     }
   }
   return rows;
+}
+
+function modelRow(raw) {
+  const fields = raw.fields_json || {};
+  return {
+    model_record_id: raw.record_id,
+    model_name: textFromAny(fields, ["Name", "Models", "Model", "Model Type"]),
+    frame_class: text(fields["Frame Class"]),
+    fields_json: fields,
+    source_system: "airtable_models",
+    source_synced_at: raw.synced_at
+  };
+}
+
+function vinRow(raw, lookups) {
+  const fields = raw.fields_json || {};
+  const vinNumber = integerValue(fields.VIN);
+  const modelTypeRecordIds = recordLinkedIds(fields["Model Type"]);
+  return {
+    vin_record_id: raw.record_id,
+    vin: vinNumber,
+    vin_text: vinNumber === null ? text(fields.VIN) : String(vinNumber),
+    model_type_record_ids: modelTypeRecordIds,
+    model_type_names: unique([
+      ...modelNamesForIds(modelTypeRecordIds, lookups),
+      ...nonRecordTextList(fields["Model Type"])
+    ]),
+    frame_class_record_ids: recordLinkedIds(fields["Frame Class"]),
+    frame_class_names: unique(nonRecordTextList(fields["Frame Class"])),
+    fields_json: fields,
+    source_system: "airtable_vins",
+    source_synced_at: raw.synced_at
+  };
 }
 
 function productionScheduleRow(raw, lookups) {
@@ -1399,20 +1456,33 @@ async function normalizeBaseTables(client) {
   const workerRaw = await rawRows(client, "raw.airtable_work_force");
   const cycleRaw = await rawRows(client, "raw.airtable_cycles");
   const phaseRaw = await rawRows(client, "raw.airtable_phases");
+  const modelRaw = await rawRows(client, "raw.airtable_models");
 
   const workers = workerRaw.map(workerRow);
   const cycles = cycleRaw.map(cycleRow);
   const phases = phaseRaw.map(phaseRow);
+  const models = modelRaw.map(modelRow);
 
   await upsertRows(client, "hb.work_force", "workforce_record_id", workers);
   await upsertRows(client, "hb.cycles", "cycle_record_id", cycles);
   await upsertRows(client, "hb.phases", "phase_record_id", phases);
+  await upsertRows(client, "hb.models", "model_record_id", models);
 
   await deleteBootstrapRowsNotSeen(client, "hb.work_force", "workforce_record_id", workers.map(row => row.workforce_record_id));
   await deleteBootstrapRowsNotSeen(client, "hb.cycles", "cycle_record_id", cycles.map(row => row.cycle_record_id));
   await deleteBootstrapRowsNotSeen(client, "hb.phases", "phase_record_id", phases.map(row => row.phase_record_id));
+  await deleteSourceRowsNotSeen(
+    client,
+    "hb.models",
+    "model_record_id",
+    "airtable_models",
+    models.map(row => row.model_record_id)
+  );
 
-  const lookups = buildLookups(workers, cycles, phases);
+  const lookups = {
+    ...buildLookups(workers, cycles, phases),
+    models: new Map(models.map(row => [row.model_record_id, row]))
+  };
 
   const taskTemplateRaw = await rawRows(client, "raw.airtable_tasks");
   const taskTemplates = taskTemplateRows(taskTemplateRaw, lookups);
@@ -1434,6 +1504,17 @@ async function normalizeBaseTables(client) {
     "production_record_id",
     "airtable_production",
     productionSchedule.map(row => row.production_record_id)
+  );
+
+  const vinRaw = await rawRows(client, "raw.airtable_vins");
+  const vins = vinRaw.map(raw => vinRow(raw, lookups));
+  await upsertRows(client, "hb.vins", "vin_record_id", vins);
+  await deleteSourceRowsNotSeen(
+    client,
+    "hb.vins",
+    "vin_record_id",
+    "airtable_vins",
+    vins.map(row => row.vin_record_id)
   );
 
   const taskRaw = await rawRows(client, "raw.airtable_task_instances");
@@ -1480,8 +1561,10 @@ async function normalizeBaseTables(client) {
     workers: workers.length,
     cycles: cycles.length,
     phases: phases.length,
+    models: models.length,
     taskTemplates: taskTemplates.length,
     productionSchedule: productionSchedule.length,
+    vins: vins.length,
     taskInstances: allTaskRows.length,
     airtableTaskInstances: taskRows.length,
     asanaOnlyTaskInstances: asanaOnlyRows.length,
