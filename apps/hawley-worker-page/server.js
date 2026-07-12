@@ -46,7 +46,7 @@ const TRANSITION_REVIEWS_ENABLED = booleanEnv("HAWLEY_TRANSITION_REVIEWS_ENABLED
 const ADMIN_PROJECT_CREATE_ENABLED = booleanEnv("HAWLEY_ADMIN_PROJECT_CREATE_ENABLED", false);
 const ADMIN_PLH_BASELINE_CYCLE = process.env.HAWLEY_ADMIN_PLH_BASELINE_CYCLE || "C5";
 const ADMIN_PLH_PHASES = new Set(
-  envList(process.env.HAWLEY_ADMIN_PLH_PHASES || "Phase B,Phase C,Phase D,Phase E,Phase F,Phase G")
+  envList(process.env.HAWLEY_ADMIN_PLH_PHASES || "")
     .map(formatPhaseName)
     .filter(Boolean)
 );
@@ -5651,6 +5651,16 @@ function adminPresentationPhaseName(phaseName) {
   return phase || "Unassigned";
 }
 
+function adminPlhPhaseAllowed(phaseName) {
+  if (!ADMIN_PLH_PHASES.size) return true;
+  const formatted = formatPhaseName(phaseName);
+  const family = adminPhaseFamilyName(formatted);
+  const presentation = adminPresentationPhaseName(formatted);
+  return ADMIN_PLH_PHASES.has(formatted) ||
+    ADMIN_PLH_PHASES.has(family) ||
+    ADMIN_PLH_PHASES.has(presentation);
+}
+
 function adminMergePresentationPhases(phases) {
   const byPhase = new Map();
   for (const phase of phases || []) {
@@ -5870,6 +5880,36 @@ function adminPhaseCapacityStatus(row) {
   return "On track";
 }
 
+function adminMergeCurrentRowsForPresentation(rows) {
+  const byPhase = new Map();
+
+  for (const row of rows || []) {
+    const presentationName = adminPresentationPhaseName(row.phaseName || row.phase);
+    const phaseKey = adminPhaseFamilyName(row.phaseName || row.phase);
+    const existing = byPhase.get(presentationName) || {
+      phaseName: presentationName,
+      phase: presentationName,
+      phaseKey,
+      cycleNumber: row.cycleNumber ?? null,
+      cycleLabel: row.cycleLabel || "",
+      remainingHours: 0,
+      totalLoadHours: 0,
+      completedHours: 0,
+      status: ""
+    };
+
+    existing.remainingHours = round(existing.remainingHours + Number(row.remainingHours || 0), 2);
+    existing.totalLoadHours = round(existing.totalLoadHours + Number(row.totalLoadHours || 0), 2);
+    existing.completedHours = round(existing.completedHours + Number(row.completedHours || 0), 2);
+    existing.status = adminPhaseStatusRank(row.status) > adminPhaseStatusRank(existing.status)
+      ? row.status
+      : existing.status;
+    byPhase.set(presentationName, existing);
+  }
+
+  return Array.from(byPhase.values());
+}
+
 async function adminPlhMetricsPayload() {
   const baselineCycleNumber = cycleNumberFromName(ADMIN_PLH_BASELINE_CYCLE) || 5;
   const today = todayIso();
@@ -6058,12 +6098,31 @@ async function adminPlhMetricsPayload() {
     existing.assignedHoursTotal = round(existing.assignedHoursTotal + Number(row.assigned_hours_total || 0), 2);
     capacityByPhase.set(phaseKey, existing);
   }
+  const capacityByPresentation = new Map();
+  for (const capacity of capacityByPhase.values()) {
+    const presentationName = adminPresentationPhaseName(capacity.phaseName);
+    const existing = capacityByPresentation.get(presentationName) || {
+      phaseName: presentationName,
+      phaseKey: presentationName,
+      workerCount: 0,
+      capacityHours: 0,
+      fullCycleCapacityHours: 0,
+      bankRemainingHours: 0,
+      assignedHoursTotal: 0
+    };
+    existing.workerCount += Number(capacity.workerCount || 0);
+    existing.capacityHours = round(existing.capacityHours + Number(capacity.capacityHours || 0), 2);
+    existing.fullCycleCapacityHours = round(existing.fullCycleCapacityHours + Number(capacity.fullCycleCapacityHours || 0), 2);
+    existing.bankRemainingHours = round(existing.bankRemainingHours + Number(capacity.bankRemainingHours || 0), 2);
+    existing.assignedHoursTotal = round(existing.assignedHoursTotal + Number(capacity.assignedHoursTotal || 0), 2);
+    capacityByPresentation.set(presentationName, existing);
+  }
 
   for (const row of debtResult.rows) {
     const cycleNumber = row.cycle_number === null || row.cycle_number === undefined ? null : Number(row.cycle_number);
     if (currentCycleNumber && cycleNumber && cycleNumber > currentCycleNumber) continue;
     const phaseName = formatPhaseName(row.phase_name) || "Unassigned";
-    if (ADMIN_PLH_PHASES.size && !ADMIN_PLH_PHASES.has(phaseName)) continue;
+    if (!adminPlhPhaseAllowed(phaseName)) continue;
     const remainingHours = round(row.remaining_hours, 2);
     const totalLoadHours = round(row.total_load_hours, 2);
     const completedHours = round(row.completed_hours, 2);
@@ -6116,6 +6175,7 @@ async function adminPlhMetricsPayload() {
     matrix.set(phaseName, existing);
   }
 
+  const currentPresentationRows = adminMergeCurrentRowsForPresentation(currentRows);
   const lineOverview = adminLineOverviewFromSnapshot(latestLineOverviewSnapshot);
   const lineOverviewPhases = Array.isArray(lineOverview?.phases) ? lineOverview.phases : [];
   const hasLineOverviewPhases = lineOverviewPhases.length > 0;
@@ -6133,13 +6193,13 @@ async function adminPlhMetricsPayload() {
   );
   const currentTotalLoadHours = hasLineOverviewPhases
     ? lineOverviewTotalLoadHours
-    : round(currentRows.reduce((sum, row) => sum + Number(row.totalLoadHours || 0), 0), 2);
+    : round(currentPresentationRows.reduce((sum, row) => sum + Number(row.totalLoadHours || 0), 0), 2);
   const currentCompletedHours = hasLineOverviewPhases
     ? lineOverviewCompletedHours
-    : round(currentRows.reduce((sum, row) => sum + Number(row.completedHours || 0), 0), 2);
+    : round(currentPresentationRows.reduce((sum, row) => sum + Number(row.completedHours || 0), 0), 2);
   const currentRemainingHours = hasLineOverviewPhases
     ? lineOverviewRemainingHours
-    : round(currentRows.reduce((sum, row) => sum + Number(row.remainingHours || 0), 0), 2);
+    : round(currentPresentationRows.reduce((sum, row) => sum + Number(row.remainingHours || 0), 0), 2);
   const completionPct = adminNumberOrNull(lineOverview?.completionPct) ??
     (currentTotalLoadHours ? round((currentCompletedHours / currentTotalLoadHours) * 100, 1) : null);
   const cycleProgressPct = adminNumberOrNull(lineOverview?.cycleProgressPct) ?? cycleStatus.progressPct;
@@ -6192,9 +6252,9 @@ async function adminPlhMetricsPayload() {
         lineOverviewSource: true
       };
     })
-    : currentRows
+    : currentPresentationRows
       .map(row => {
-        const capacity = capacityByPhase.get(row.phaseKey) || {};
+        const capacity = capacityByPresentation.get(row.phaseName) || capacityByPhase.get(row.phaseKey) || {};
         const rowCompletionPct = row.totalLoadHours ? round((row.completedHours / row.totalLoadHours) * 100, 1) : null;
         const rowExpectedHours = cycleProgressPct === null || cycleProgressPct === undefined
           ? null
@@ -6303,6 +6363,20 @@ async function adminPlhMetricsPayload() {
       assignedTaskCount: Number(daily.assigned_task_count || 0),
       completedTaskCount: Number(daily.completed_task_count || 0),
       reviewRequiredCount: Number(daily.review_required_count || 0)
+    },
+    diagnostics: {
+      today,
+      latestLineOverviewGid: latestLineOverviewSnapshot?.gid || "",
+      latestLineOverviewName: latestLineOverviewSnapshot?.name || "",
+      latestLineOverviewDate: latestLineOverviewSnapshot?.trackerDate || "",
+      latestLineOverviewPhaseCount: lineOverviewPhases.length,
+      phaseCycleLoadGroupCount: debtResult.rows.length,
+      currentCycleLoadRowCount: currentRows.length,
+      currentPresentationPhaseCount: currentPresentationRows.length,
+      capacityPhaseCount: capacityByPhase.size,
+      capacityPresentationPhaseCount: capacityByPresentation.size,
+      phaseFilterActive: ADMIN_PLH_PHASES.size > 0,
+      phaseFilterValues: Array.from(ADMIN_PLH_PHASES)
     },
     source: hasLineOverviewPhases
       ? "raw.asana_tasks line overview + hb.cycles + hb.phase_cycle_load_rev1"

@@ -481,6 +481,7 @@
   function renderPhaseCycleBurnDown(plh) {
     const debt = plh?.debtTiers || {};
     const recovery = plh?.recovery || {};
+    const diagnostics = plh?.diagnostics || {};
     const rows = debt.matrix || plh?.debtMatrix || [];
     const tiers = debt.tiers || recovery.tiers || {};
     const tierOrder = debt.tierOrder || ["current", "carryover", "original"];
@@ -516,7 +517,7 @@
                   ${visibleTiers.map(tier => matrixCell(row.tiers?.[tier.key] ?? row[tier.key])).join("")}
                   ${matrixCell(row.total ?? row.totalPressureHours)}
                 </tr>
-              `).join("") || `<tr><td colspan="${visibleTiers.length + 2}">No phase-cycle burn-down rows found in Postgres yet.</td></tr>`}
+              `).join("") || `<tr><td colspan="${visibleTiers.length + 2}">No phase-cycle burn-down rows found in Postgres yet. PCL groups: ${escapeHtml(formatNumber(diagnostics.phaseCycleLoadGroupCount || 0))}.</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -527,6 +528,7 @@
 
   function renderPhasePaceProjection(plh) {
     const lineOverview = plh?.tracker?.lineOverview || {};
+    const diagnostics = plh?.diagnostics || {};
     const rows = lineOverview.phases?.length ? lineOverview.phases : (plh?.phasePacing || []);
     const cycle = plh?.cycleStatus || {};
     const debt = plh?.debtTiers || {};
@@ -587,7 +589,7 @@
                 })}
               </div>
             `;
-          }).join("") || `<div class="notice visual-empty">No Daily Assignment Tracker line overview phases found in Postgres yet.</div>`}
+          }).join("") || `<div class="notice visual-empty">No Daily Assignment Tracker line overview phases found in Postgres yet. DAT phases: ${escapeHtml(formatNumber(diagnostics.latestLineOverviewPhaseCount || 0))}; current-cycle load rows: ${escapeHtml(formatNumber(diagnostics.currentCycleLoadRowCount || 0))}.</div>`}
         </div>
       </article>
     `;
@@ -595,6 +597,7 @@
 
   function renderLiveCapacitySurface(plh) {
     const lineOverview = plh?.tracker?.lineOverview || {};
+    const diagnostics = plh?.diagnostics || {};
     const rows = lineOverview.phases?.length ? lineOverview.phases : (plh?.phasePacing || []);
     const cycleProgress = plh?.debtTiers?.cycleProgressPct ?? lineOverview.cycleProgressPct;
     const headers = ["Phase", "Status", "Remaining", "Capacity", "Gap / Cushion", "Complete", "Cycle"];
@@ -621,7 +624,7 @@
               `<div class="surface-cell ${tone}"><span class="surface-value">${escapeHtml(formatPercent(row.completionPct))}</span></div>`,
               `<div class="surface-cell ${tone}"><span class="surface-value">${escapeHtml(formatPercent(row.cyclePct ?? row.cycleProgressPct ?? cycleProgress))}</span><span class="surface-note">${escapeHtml(formatNumber(row.workerCount || 0))} worker${Number(row.workerCount || 0) === 1 ? "" : "s"}</span></div>`
             ];
-          }).join("") || `<div class="notice surface-empty visual-empty">No live capacity rows found from the latest line overview yet.</div>`}
+          }).join("") || `<div class="notice surface-empty visual-empty">No live capacity rows found from the latest line overview yet. Capacity phase groups: ${escapeHtml(formatNumber(diagnostics.capacityPresentationPhaseCount || 0))}.</div>`}
         </div>
       </article>
     `;
