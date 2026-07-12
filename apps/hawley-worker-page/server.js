@@ -79,8 +79,9 @@ const SHOP_DAILY_AVAILABLE_HOURS = SHOP_DAILY_AVAILABLE_MINUTES / 60;
 const SHOP_SCHEDULE_CORRECTION_SOURCE = "7:00-15:30 America/Los_Angeles minus 09:00-09:10, 11:00-11:30, 13:30-13:40";
 const OVER_CAPACITY_FLAG = "over_daily_capacity";
 
-const pool = new Pool(getDatabaseConfig());
-const writePool = new Pool(getDatabaseConfig({ useSyncUrl: true }));
+const runtimeDatabaseConfig = getDatabaseConfig({ useSyncUrl: true });
+const pool = new Pool(runtimeDatabaseConfig);
+const writePool = new Pool(runtimeDatabaseConfig);
 const migrationsDir = path.join(repoRoot, "db", "migrations");
 const viewsDir = path.join(repoRoot, "db", "views");
 
@@ -5528,6 +5529,10 @@ async function healthPayload() {
         (select count(*)::int from reporting.hawley_worker_page_assignments) as assignment_rows,
         (select count(distinct worker_email)::int from reporting.hawley_worker_page_assignments where worker_email is not null) as assigned_worker_count,
         (select count(*)::int from raw.asana_tasks where project_gid = $1) as daily_tracker_rows,
+        (select count(*)::int from hb.rev1_task_instances) as rev1_task_instance_rows,
+        (select count(*)::int from hb.phase_cycle_load_rev1) as phase_cycle_load_rows,
+        (select count(*)::int from hb.worker_phase_allocation_rev1) as worker_phase_allocation_rows,
+        (select count(*)::int from hb.worker_cycle_bank_rev1) as worker_cycle_bank_rows,
         (select count(*)::int from hb.worker_daily_task_actuals) as worker_daily_actual_rows,
         (
           select count(*)::int
@@ -5543,6 +5548,11 @@ async function healthPayload() {
     ok: true,
     app: "hawley-worker-page",
     database: db.rows[0],
+    databaseMode: {
+      runtimePrefersSyncUrl: true,
+      syncUrlConfigured: syncDatabaseConfigured(),
+      databaseUrlConfigured: Boolean(process.env.DATABASE_URL)
+    },
     counts: counts.rows[0],
     scheduleCorrection: scheduleCorrectionStatus(),
     latestRuns,
