@@ -18,7 +18,7 @@ const staticDir = path.join(appDir, "public");
 
 const HOST = process.env.HAWLEY_WORKER_HOST || (process.env.PORT ? "0.0.0.0" : "127.0.0.1");
 const PORT = Number(process.env.PORT || process.env.HAWLEY_WORKER_PORT || 5273);
-const APP_BUILD_LABEL = "admin-plh-four-shop-gauges-v1";
+const APP_BUILD_LABEL = "hawley-native-plh-v1";
 const APP_BUILD_COMMIT = process.env.SOURCE_COMMIT ||
   process.env.COMMIT_SHA ||
   process.env.GIT_SHA ||
@@ -2938,12 +2938,12 @@ async function dailyAssignmentsPayload(url, authActor = null) {
     configuredWorkers(),
     latestImportRuns(),
     latestAssignmentDate(),
-    dailyTrackerSnapshots(),
+    USE_DAT_SNAPSHOTS ? dailyTrackerSnapshots() : Promise.resolve([]),
     workerDailyActualRows(date)
   ]);
   const selectedTrackerSnapshots = trackerSnapshots.filter(snapshot => snapshot.trackerDate === date);
   const hasTrackerSnapshot = selectedTrackerSnapshots.some(snapshot => snapshot.trackerType === "Worker" || snapshot.trackerType === "Line Overview");
-  const useTrackerSnapshot = hasTrackerSnapshot && (USE_DAT_SNAPSHOTS || rows.length === 0);
+  const useTrackerSnapshot = USE_DAT_SNAPSHOTS && hasTrackerSnapshot;
   const latestTrackerSnapshotDate = latestActiveTrackerDate(trackerSnapshots);
 
   let allWorkers;
@@ -2998,8 +2998,8 @@ async function dailyAssignmentsPayload(url, authActor = null) {
     includeNoWork,
     project: {
       id: DAILY_TRACKER_PROJECT_ID,
-      name: "Daily Assignment Tracker",
-      url: `https://app.asana.com/1/829365006370166/project/${DAILY_TRACKER_PROJECT_ID}`
+      name: "Hawley Worker App",
+      url: ""
     },
     lineOverview: managerLineOverview,
     managerSignals: employee ? null : buildManagerSignals(workers),
@@ -6147,7 +6147,7 @@ function adminMergeCurrentRowsForPresentation(rows) {
 async function adminPlhMetricsPayload() {
   const baselineCycleNumber = cycleNumberFromName(ADMIN_PLH_BASELINE_CYCLE) || 5;
   const today = todayIso();
-  const [cycleResult, debtResult, rawPhaseCycleLoadResult, dailyResult, latestLineOverviewSnapshot] = await Promise.all([
+  const [cycleResult, debtResult, rawPhaseCycleLoadResult, dailyResult] = await Promise.all([
     pool.query(`
       with cycle_rows as (
         select
@@ -6239,8 +6239,7 @@ async function adminPlhMetricsPayload() {
         coalesce(sum(review_required_count), 0)::integer as review_required_count
       from reporting.worker_daily_utilization
       where work_date = $1::date
-    `, [today]),
-    adminLatestLineOverview()
+    `, [today])
   ]);
 
   const cycleStatus = adminCycleStatus(cycleResult.rows[0] || null);
@@ -6422,33 +6421,11 @@ async function adminPlhMetricsPayload() {
   }
 
   const currentPresentationRows = adminMergeCurrentRowsForPresentation(currentRows);
-  const lineOverview = adminLineOverviewFromSnapshot(latestLineOverviewSnapshot);
-  const lineOverviewPhases = Array.isArray(lineOverview?.phases) ? lineOverview.phases : [];
-  const hasLineOverviewPhases = lineOverviewPhases.length > 0;
-  const lineOverviewTotalLoadHours = round(
-    lineOverviewPhases.reduce((sum, phase) => sum + Number(phase.totalLoadHours || 0), 0),
-    2
-  );
-  const lineOverviewCompletedHours = round(
-    lineOverviewPhases.reduce((sum, phase) => sum + Number(phase.completedHours || 0), 0),
-    2
-  );
-  const lineOverviewRemainingHours = round(
-    lineOverviewPhases.reduce((sum, phase) => sum + Number(phase.remainingHours || 0), 0),
-    2
-  );
-  const currentTotalLoadHours = hasLineOverviewPhases
-    ? lineOverviewTotalLoadHours
-    : round(currentPresentationRows.reduce((sum, row) => sum + Number(row.totalLoadHours || 0), 0), 2);
-  const currentCompletedHours = hasLineOverviewPhases
-    ? lineOverviewCompletedHours
-    : round(currentPresentationRows.reduce((sum, row) => sum + Number(row.completedHours || 0), 0), 2);
-  const currentRemainingHours = hasLineOverviewPhases
-    ? lineOverviewRemainingHours
-    : round(currentPresentationRows.reduce((sum, row) => sum + Number(row.remainingHours || 0), 0), 2);
-  const completionPct = adminNumberOrNull(lineOverview?.completionPct) ??
-    (currentTotalLoadHours ? round((currentCompletedHours / currentTotalLoadHours) * 100, 1) : null);
-  const cycleProgressPct = adminNumberOrNull(lineOverview?.cycleProgressPct) ?? cycleStatus.progressPct;
+  const currentTotalLoadHours = round(currentPresentationRows.reduce((sum, row) => sum + Number(row.totalLoadHours || 0), 0), 2);
+  const currentCompletedHours = round(currentPresentationRows.reduce((sum, row) => sum + Number(row.completedHours || 0), 0), 2);
+  const currentRemainingHours = round(currentPresentationRows.reduce((sum, row) => sum + Number(row.remainingHours || 0), 0), 2);
+  const completionPct = currentTotalLoadHours ? round((currentCompletedHours / currentTotalLoadHours) * 100, 1) : null;
+  const cycleProgressPct = cycleStatus.progressPct;
   const expectedCompletedHours = cycleProgressPct === null || cycleProgressPct === undefined
     ? null
     : round(currentTotalLoadHours * (cycleProgressPct / 100), 2);
@@ -6462,44 +6439,8 @@ async function adminPlhMetricsPayload() {
     paceDeltaPct <= -10 ? "Behind pace" :
     "Watch pace";
 
-  const phasePacing = hasLineOverviewPhases
-    ? lineOverviewPhases.map(phase => {
-      const phaseCyclePct = adminNumberOrNull(phase.cyclePct) ?? cycleProgressPct;
-      const phaseCompletionPct = adminNumberOrNull(phase.completionPct);
-      const totalLoadHours = adminNumberOrNull(phase.totalLoadHours) ??
-        round(Number(phase.completedHours || 0) + Number(phase.remainingHours || 0), 2);
-      const expectedHours = phaseCyclePct === null || phaseCyclePct === undefined
-        ? null
-        : round(totalLoadHours * (phaseCyclePct / 100), 2);
-      const completedHours = round(Number(phase.completedHours || 0), 2);
-      const paceDeltaHours = expectedHours === null ? null : round(completedHours - expectedHours, 2);
-      const paceDeltaPct = phaseCompletionPct === null || phaseCyclePct === null || phaseCyclePct === undefined
-        ? null
-        : round(phaseCompletionPct - phaseCyclePct, 1);
-      const status = adminComputedPhaseStatus(phase, cycleProgressPct);
-      return {
-        ...phase,
-        phaseName: phase.phaseName || phase.phase,
-        cycleProgressPct: phaseCyclePct,
-        expectedCompletedHours: expectedHours,
-        paceDeltaHours,
-        paceDeltaPct,
-        status,
-        sourceStatus: phase.status || "",
-        capacityStatus: status,
-        totalLoadHours,
-        completedHours,
-        remainingHours: round(Number(phase.remainingHours || 0), 2),
-        capacityHours: round(Number(phase.capacityHours || 0), 2),
-        fullCycleCapacityHours: round(Number(phase.capacityHours || 0), 2),
-        capacityDeltaHours: round(Number(phase.capacityDeltaHours || 0), 2),
-        capacityLabel: phase.capacityLabel || (Number(phase.capacityHours || 0) >= Number(phase.remainingHours || 0) ? "Cushion" : "Gap"),
-        workerCount: Number(phase.workerCount || 0),
-        lineOverviewSource: true
-      };
-    })
-    : currentPresentationRows
-      .map(row => {
+  const phasePacing = currentPresentationRows
+    .map(row => {
         const capacity = capacityByPresentation.get(row.phaseName) || capacityByPhase.get(row.phaseKey) || {};
         const rowCompletionPct = row.totalLoadHours ? round((row.completedHours / row.totalLoadHours) * 100, 1) : null;
         const rowExpectedHours = cycleProgressPct === null || cycleProgressPct === undefined
@@ -6532,7 +6473,7 @@ async function adminPlhMetricsPayload() {
           capacityStatus: adminPhaseCapacityStatus({ ...payload, capacityDeltaHours: capacityDeltaSignedHours })
         };
       })
-      .sort((left, right) => Number(left.paceDeltaHours || -9999) - Number(right.paceDeltaHours || -9999));
+    .sort((left, right) => Number(left.paceDeltaHours || -9999) - Number(right.paceDeltaHours || -9999));
 
   const debtMatrix = Array.from(matrix.values())
     .map(row => {
@@ -6595,9 +6536,9 @@ async function adminPlhMetricsPayload() {
       source: phaseCycleLoadSource
     },
     tracker: {
-      latestLineOverviewDate: lineOverview?.trackerDate || "",
-      lineOverview,
-      source: lineOverview ? "raw.asana_tasks" : ""
+      latestLineOverviewDate: "",
+      lineOverview: null,
+      source: "disabled"
     },
     phasePacing,
     debtMatrix,
@@ -6612,10 +6553,10 @@ async function adminPlhMetricsPayload() {
     },
     diagnostics: {
       today,
-      latestLineOverviewGid: latestLineOverviewSnapshot?.gid || "",
-      latestLineOverviewName: latestLineOverviewSnapshot?.name || "",
-      latestLineOverviewDate: latestLineOverviewSnapshot?.trackerDate || "",
-      latestLineOverviewPhaseCount: lineOverviewPhases.length,
+      latestLineOverviewGid: "",
+      latestLineOverviewName: "",
+      latestLineOverviewDate: "",
+      latestLineOverviewPhaseCount: 0,
       phaseCycleLoadSource,
       phaseCycleLoadGroupCount: debtRows.length,
       hbPhaseCycleLoadGroupCount: debtResult.rows.length,
@@ -6634,9 +6575,7 @@ async function adminPlhMetricsPayload() {
       phaseFilterActive: ADMIN_PLH_PHASES.size > 0,
       phaseFilterValues: Array.from(ADMIN_PLH_PHASES)
     },
-    source: hasLineOverviewPhases
-      ? `raw.asana_tasks line overview + hb.cycles + ${phaseCycleLoadSource}`
-      : `hb.cycles + ${phaseCycleLoadSource} + hb.worker_cycle_bank_rev1`
+    source: `hb.cycles + ${phaseCycleLoadSource} + hb.worker_phase_allocation_rev1 + hb.worker_cycle_bank_rev1`
   };
 }
 

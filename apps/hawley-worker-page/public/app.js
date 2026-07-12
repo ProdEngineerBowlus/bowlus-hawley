@@ -69,8 +69,8 @@
     date: selectedDate,
     project: {
       id: PROJECT_ID,
-      name: "Daily Assignment Tracker",
-      url: "https://app.asana.com/1/829365006370166/project/1214157321063250",
+      name: "Hawley Worker App",
+      url: "",
     },
     latestTrackerDate: "",
     latestRuns: {},
@@ -95,8 +95,8 @@
     date: selectedDate,
     project: {
       id: PROJECT_ID,
-      name: "Daily Assignment Tracker",
-      url: "https://app.asana.com/1/829365006370166/project/1214157321063250",
+      name: "Hawley Worker App",
+      url: "",
     },
     lineOverview: {
       cycle: "C10",
@@ -588,14 +588,8 @@
           ${
             locked
               ? ""
-              : `<a class="btn ghost" href="${escapeAttr(state.project.url)}" target="_blank" rel="noreferrer">${icons.open}<span>Asana project</span></a>
-                 ${adminLink}
-                 <button class="btn ghost" type="button" data-action="refresh">${icons.refresh}<span>Reload</span></button>
-                 ${
-                   worker
-                     ? `<button class="btn primary" type="button" data-action="refresh-tracker" ${state.trackerRefresh.running ? "disabled" : ""}>${icons.refresh}<span>${state.trackerRefresh.running ? "Refreshing..." : "Refresh worker"}</span></button>`
-                     : ""
-                 }`
+              : `${adminLink}
+                 <button class="btn ghost" type="button" data-action="refresh">${icons.refresh}<span>Reload</span></button>`
           }
           ${accountBadge}
         </div>
@@ -818,7 +812,7 @@
     return `
       <div class="notice refresh-notice">
         <div>
-          <strong>Daily Assignment Tracker</strong>
+          <strong>Hawley sync</strong>
           <div class="muted">${escapeHtml(state.trackerRefresh.message)}</div>
           ${details ? `<div class="field-hint">${escapeHtml(details)}</div>` : ""}
         </div>
@@ -830,7 +824,7 @@
     const freshnessPanel = renderFreshnessPanel();
     if (!state.workers.length) {
       const latest = state.latestTrackerDate && state.latestTrackerDate !== state.date
-        ? `<div class="field-hint">Latest available tracker date: ${escapeHtml(formatLongDate(state.latestTrackerDate))}. Refresh tracker before using today's worker pages.</div>`
+        ? `<div class="field-hint">Latest available assignment date: ${escapeHtml(formatLongDate(state.latestTrackerDate))}. Wait for the Hawley sync before using today's worker pages.</div>`
         : "";
       return `
         ${freshnessPanel}
@@ -887,7 +881,6 @@
           ${renderFreshnessMetric("Airtable export job", backfillRunning ? "Running" : nightlyBackfill.enabled ? "Scheduled" : "Off", backfillDetail, backfillTone)}
           ${renderRunFreshness("Asana events", latestRuns.pull_asana_events, 5)}
           ${renderRunFreshness("Full Asana", latestRuns.pull_asana, 180)}
-          ${renderRunFreshness("DAT mirror", latestRuns.pull_daily_tracker, 60)}
           ${renderRunFreshness("Airtable backfill", latestRuns.backfill_airtable_worker_actuals, 1440)}
         </div>
       </section>
@@ -959,10 +952,6 @@
             <div>
               <h2 class="panel-title">Alert layer</h2>
               <p class="summary-line">${issueCount ? `${issueCount} current signal${issueCount === 1 ? "" : "s"}` : "No paused, not logged in, or over-estimate tasks right now."}</p>
-            </div>
-            <div class="button-row">
-              <button class="btn ghost" type="button" data-action="adopt-tasks" ${state.trackerRefresh.running ? "disabled" : ""}>${icons.refresh}<span>${state.trackerRefresh.running ? "Working..." : "Adopt new tasks"}</span></button>
-              <button class="btn primary" type="button" data-action="refresh-tracker" ${state.trackerRefresh.running ? "disabled" : ""}>${icons.refresh}<span>${state.trackerRefresh.running ? "Refreshing..." : "Refresh tracker"}</span></button>
             </div>
           </div>
           <div class="panel-body alert-lane-grid">
@@ -1648,11 +1637,11 @@
       message:
         mode === "adopt"
           ? workerFilter
-            ? `Adopting new tracked Asana tasks, then rebuilding ${worker.name}'s Daily Assignment Tracker snapshot.`
-            : "Adopting new tracked Asana tasks into Airtable, then rebuilding Daily Assignment Tracker."
+            ? `Adopting new tracked Asana tasks, then rebuilding ${worker.name}'s Hawley worker snapshot.`
+            : "Adopting new tracked Asana tasks, then rebuilding Hawley worker snapshots."
           : workerFilter
             ? `Refreshing assignments from Asana, then rebuilding ${worker.name}'s worker snapshot.`
-            : "Refreshing assignments from Asana, then rebuilding Daily Assignment Tracker.",
+            : "Refreshing assignments from Asana, then rebuilding Hawley worker snapshots.",
       startedAt: new Date().toISOString(),
       step: "Starting",
       outputTail: "",
@@ -1669,14 +1658,14 @@
 
       applyRefreshStatus(payload);
       if (!payload.running && !state.trackerRefresh.message) {
-        state.trackerRefresh.message = "Daily Assignment Tracker refresh started.";
+        state.trackerRefresh.message = "Hawley sync started.";
       }
       render();
       pollTrackerRefresh();
     } catch (error) {
       state.trackerRefresh = {
         running: false,
-        message: error.message || "Could not start Daily Assignment Tracker refresh.",
+        message: error.message || "Could not start Hawley sync.",
         startedAt: "",
         step: "",
         outputTail: "",
@@ -1715,18 +1704,18 @@
 
       state.trackerRefresh = {
         running: false,
-        message: "Daily Assignment Tracker refreshed. Reloaded worker pages from Asana.",
+        message: "Hawley sync completed. Reloaded worker pages from Asana.",
         startedAt: payload.startedAt || "",
         step: "",
         outputTail: payload.outputTail || "",
       };
       await loadAssignments();
-      state.trackerRefresh.message = "Daily Assignment Tracker refreshed. Worker pages are current.";
+      state.trackerRefresh.message = "Hawley sync completed. Worker pages are current.";
       render();
     } catch (error) {
       state.trackerRefresh = {
         running: false,
-        message: error.message || "Could not check Daily Assignment Tracker refresh.",
+        message: error.message || "Could not check Hawley sync.",
         startedAt: "",
         step: "",
         outputTail: "",
@@ -1757,9 +1746,9 @@
       return "Adopting new tracked Asana tasks into Airtable.";
     }
     if (payload.step === "Daily tracker rebuild") {
-      return `Rebuilding Daily Assignment Tracker${scoped}.${fullRunHint}`;
+      return `Rebuilding Hawley worker snapshots${scoped}.${fullRunHint}`;
     }
-    return `Daily Assignment Tracker refresh is running.${fullRunHint}`;
+    return `Hawley sync is running.${fullRunHint}`;
   }
 
   function refreshStepLabel(step) {

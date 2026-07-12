@@ -666,19 +666,18 @@
   }
 
   function renderPhasePaceProjection(plh) {
-    const lineOverview = plh?.tracker?.lineOverview || {};
     const diagnostics = plh?.diagnostics || {};
     const sourceLabel = diagnostics.phaseCycleLoadSource || plh?.debtTiers?.source || plh?.source || "missing PLH payload";
-    const rows = lineOverview.phases?.length ? lineOverview.phases : (plh?.phasePacing || []);
+    const rows = plh?.phasePacing || [];
     const cycle = plh?.cycleStatus || {};
     const debt = plh?.debtTiers || {};
-    const cycleProgress = Number(debt.cycleProgressPct ?? lineOverview.cycleProgressPct ?? cycle.progressPct);
+    const cycleProgress = Number(debt.cycleProgressPct ?? cycle.progressPct);
     const totalWorkdays = Number(debt.totalWorkdays ?? cycle.totalWorkdays);
-    const remainingWorkdays = Number(debt.remainingWorkdays ?? lineOverview.remainingWorkdays ?? cycle.remainingWorkdays);
+    const remainingWorkdays = Number(debt.remainingWorkdays ?? cycle.remainingWorkdays);
     const elapsedWorkdays = Number.isFinite(cycleProgress) && cycleProgress > 0 && Number.isFinite(totalWorkdays)
       ? totalWorkdays * (cycleProgress / 100)
       : Number(cycle.elapsedWorkday || 0);
-    const cycleLabel = debt.currentCycle || cycle.label || lineOverview.cycleLabel || "Current";
+    const cycleLabel = debt.currentCycle || cycle.label || "Current";
     const cycleDates = [cycle.startDate, cycle.endDate].filter(Boolean).map(formatDate).join(" - ");
     const elapsedDay = Number(cycle.elapsedWorkday || elapsedWorkdays || 0);
     const cycleDays = Number.isFinite(totalWorkdays) && totalWorkdays > 0 ? Math.round(totalWorkdays) : 10;
@@ -775,24 +774,23 @@
                 })}
               </div>
             `;
-          }).join("") || `<div class="notice visual-empty">No Daily Assignment Tracker line overview phases or current-cycle PCL rows found yet. DAT phases: ${escapeHtml(formatNumber(diagnostics.latestLineOverviewPhaseCount || 0))}; current-cycle load rows: ${escapeHtml(formatNumber(diagnostics.currentCycleLoadRowCount || 0))}; source: ${escapeHtml(sourceLabel)}.</div>`}
+          }).join("") || `<div class="notice visual-empty">No Hawley current-cycle phase load rows found yet. Current-cycle load rows: ${escapeHtml(formatNumber(diagnostics.currentCycleLoadRowCount || 0))}; source: ${escapeHtml(sourceLabel)}.</div>`}
         </div>
       </article>
     `;
   }
 
   function renderLiveCapacitySurface(plh) {
-    const lineOverview = plh?.tracker?.lineOverview || {};
     const diagnostics = plh?.diagnostics || {};
-    const rows = lineOverview.phases?.length ? lineOverview.phases : (plh?.phasePacing || []);
-    const cycleProgress = plh?.debtTiers?.cycleProgressPct ?? lineOverview.cycleProgressPct;
+    const rows = plh?.phasePacing || [];
+    const cycleProgress = plh?.debtTiers?.cycleProgressPct ?? plh?.cycleStatus?.progressPct;
     const headers = ["Phase", "Status", "Remaining", "Capacity", "Gap / Cushion", "Complete", "Cycle"];
     return `
       <article class="panel visual-panel plh-reference-panel capacity-panel">
         <div class="visual-head">
           <div>
             <h3 class="panel-title">Live Capacity Surface</h3>
-            <p class="muted">Current phase capacity and remaining-work signal parsed from the latest Daily Assignment Tracker line overview task.</p>
+            <p class="muted">Current phase capacity and remaining-work signal from Hawley's Postgres read model.</p>
           </div>
           <span class="section-tag">Tracker Surface</span>
         </div>
@@ -810,7 +808,7 @@
               `<div class="surface-cell ${tone}"><span class="surface-value">${escapeHtml(formatPercent(row.completionPct))}</span></div>`,
               `<div class="surface-cell ${tone}"><span class="surface-value">${escapeHtml(formatPercent(row.cyclePct ?? row.cycleProgressPct ?? cycleProgress))}</span><span class="surface-note">${escapeHtml(formatNumber(row.workerCount || 0))} worker${Number(row.workerCount || 0) === 1 ? "" : "s"}</span></div>`
             ];
-          }).join("") || `<div class="notice surface-empty visual-empty">No live capacity rows found from the latest line overview or current-cycle PCL rows yet. Capacity phase groups: ${escapeHtml(formatNumber(diagnostics.capacityPresentationPhaseCount || 0))}; current-cycle load rows: ${escapeHtml(formatNumber(diagnostics.currentCycleLoadRowCount || 0))}.</div>`}
+          }).join("") || `<div class="notice surface-empty visual-empty">No live capacity rows found from Hawley current-cycle phase load yet. Capacity phase groups: ${escapeHtml(formatNumber(diagnostics.capacityPresentationPhaseCount || 0))}; current-cycle load rows: ${escapeHtml(formatNumber(diagnostics.currentCycleLoadRowCount || 0))}.</div>`}
         </div>
       </article>
     `;
