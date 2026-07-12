@@ -99,9 +99,118 @@
     }).join(" ");
   }
 
-  function renderPaceSparkline({ totalLoad, completed, remaining, idealDailyCapacity, currentDailyPace, totalWorkdays, elapsedWorkdays }) {
-    const width = 248;
-    const height = 86;
+  function phaseGroupLetter(row) {
+    const label = String(row?.phaseName || row?.phase || "").toUpperCase();
+    const normalized = label.replace(/[^A-Z0-9]+/g, " ").trim();
+    if (!normalized) return "";
+    if (normalized.includes("FRAME")) return "A";
+    const fabMatch = normalized.match(/\bFAB\s*([A-G])\b/);
+    if (fabMatch) return fabMatch[1];
+    const phaseMatch = normalized.match(/\bPHASE\s*([A-G])\b/);
+    if (phaseMatch) return phaseMatch[1];
+    const bareMatch = normalized.match(/^([A-G])(?:\b|$)/);
+    return bareMatch ? bareMatch[1] : "";
+  }
+
+  function buildEfficiencyGauge(label, rows, cycleProgress, note) {
+    const safeRows = rows.filter(row => Number(row?.totalLoadHours || row?.completedHours || row?.remainingHours || 0) > 0);
+    const totalLoad = safeRows.reduce((sum, row) => {
+      const explicitTotal = Number(row.totalLoadHours);
+      return sum + (Number.isFinite(explicitTotal) && explicitTotal > 0
+        ? explicitTotal
+        : Number(row.completedHours || 0) + Number(row.remainingHours || 0));
+    }, 0);
+    const completed = safeRows.reduce((sum, row) => sum + Number(row.completedHours || 0), 0);
+    const remaining = safeRows.reduce((sum, row) => sum + Number(row.remainingHours || 0), 0);
+    const capacity = safeRows.reduce((sum, row) => sum + Number(row.capacityHours || 0), 0);
+    const completionPct = totalLoad > 0 ? (completed / totalLoad) * 100 : null;
+    const targetPct = Number(cycleProgress);
+    const efficiencyPct = completionPct !== null && Number.isFinite(targetPct) && targetPct > 0
+      ? (completionPct / targetPct) * 100
+      : null;
+    const capacityDelta = capacity - remaining;
+    const phaseNames = safeRows
+      .map(row => phaseShortName(row.phaseName || row.phase))
+      .filter(Boolean);
+    const tone = efficiencyPct === null
+      ? "neutral"
+      : efficiencyPct >= 98
+        ? "good"
+        : efficiencyPct >= 82
+          ? "warn"
+          : "risk";
+
+    return {
+      label,
+      note,
+      tone,
+      rows: safeRows.length,
+      phaseText: phaseNames.length ? phaseNames.join(", ") : "No matching phases",
+      totalLoad,
+      completed,
+      remaining,
+      capacity,
+      capacityDelta,
+      completionPct,
+      targetPct: Number.isFinite(targetPct) ? targetPct : null,
+      efficiencyPct
+    };
+  }
+
+  function renderEfficiencyGauge(gauge) {
+    const efficiency = Number(gauge.efficiencyPct);
+    const scaleMax = 140;
+    const fill = Number.isFinite(efficiency) ? clamp((efficiency / scaleMax) * 100, 0, 100) : 0;
+    const value = Number.isFinite(efficiency) ? `${efficiency.toFixed(0)}%` : "n/a";
+    const deltaTone = Number(gauge.capacityDelta || 0) >= 0 ? "Cushion" : "Gap";
+    const completionText = gauge.completionPct === null ? "n/a" : formatPercent(gauge.completionPct);
+    const targetText = gauge.targetPct === null ? "n/a" : formatPercent(gauge.targetPct);
+    return `
+      <article class="efficiency-card ${escapeAttr(gauge.tone)}">
+        <div class="efficiency-dial" style="--dial-fill: ${fill.toFixed(1)}%;">
+          <div class="efficiency-dial-core">
+            <strong>${escapeHtml(value)}</strong>
+            <span>efficiency</span>
+          </div>
+        </div>
+        <div class="efficiency-copy">
+          <span>${escapeHtml(gauge.note)}</span>
+          <h4>${escapeHtml(gauge.label)}</h4>
+          <p>${escapeHtml(completionText)} complete vs ${escapeHtml(targetText)} cycle pace</p>
+        </div>
+        <div class="efficiency-details">
+          <span><em>Remaining</em>${escapeHtml(formatHours(gauge.remaining))}</span>
+          <span><em>${escapeHtml(deltaTone)}</em>${escapeHtml(formatHours(Math.abs(gauge.capacityDelta || 0)))}</span>
+          <span><em>Phases</em>${escapeHtml(gauge.phaseText)}</span>
+        </div>
+      </article>
+    `;
+  }
+
+  function renderCycleEfficiencyGauges(rows, cycleProgress) {
+    const withLetters = rows.map(row => ({ row, letter: phaseGroupLetter(row) }));
+    const fabRows = withLetters
+      .filter(item => ["B", "C", "D", "E", "F", "G"].includes(item.letter))
+      .map(item => item.row);
+    const productionRows = withLetters
+      .filter(item => item.letter === "A" || ["B", "C", "D", "E", "F", "G"].includes(item.letter))
+      .map(item => item.row);
+    const gauges = [
+      buildEfficiencyGauge("Line", rows, cycleProgress, "All current phase load"),
+      buildEfficiencyGauge("FAB B-G", fabRows, cycleProgress, "Fabrication phases"),
+      buildEfficiencyGauge("A / Frames / FAB", productionRows.length ? productionRows : rows, cycleProgress, "Shop execution family")
+    ];
+
+    return `
+      <section class="efficiency-strip" aria-label="Cycle efficiency gauges">
+        ${gauges.map(renderEfficiencyGauge).join("")}
+      </section>
+    `;
+  }
+
+  function renderPaceSparkline({ totalLoad, completed, remaining, idealDailyCapacity, currentDailyPace, totalWorkdays, elapsedWorkdays, scaleMax }) {
+    const width = 222;
+    const height = 72;
     const days = Math.max(2, Math.round(Number(totalWorkdays) || 10));
     const safeTotal = Math.max(Number(totalLoad) || (Number(completed) || 0) + (Number(remaining) || 0), 1);
     const safeCompleted = Math.max(Number(completed) || 0, 0);
@@ -113,11 +222,12 @@
       if (!safeCurrentDaily) return safeTotal;
       return Math.max(safeTotal - safeCurrentDaily * (index + 1), 0);
     });
-    const maxValue = Math.max(safeTotal, ...idealPoints, ...pacePoints, 1);
+    const maxValue = Math.max(Number(scaleMax) || 0, safeTotal, ...idealPoints, ...pacePoints, 1);
     const elapsedIndex = clamp(Math.round(elapsed) - 1, 0, days - 1);
     const markerX = days === 1 ? width / 2 : (elapsedIndex / (days - 1)) * width;
     const markerY = height - (Math.max(safeTotal - safeCompleted, 0) / maxValue) * height;
     const projectedRemainingAtEnd = pacePoints[pacePoints.length - 1] || 0;
+    const currentDayLabel = `D${Math.max(1, Math.min(days, Math.round(elapsed) || 1))}/${days}`;
 
     return `
       <div class="pace-spark" title="Target burn-down, current pace projection, and current remaining work.">
@@ -133,6 +243,7 @@
         <div class="pace-spark-meta">
           <span>target</span>
           <span>pace</span>
+          <span>${escapeHtml(currentDayLabel)}</span>
           <span>${escapeHtml(formatHours(projectedRemainingAtEnd))} end</span>
         </div>
       </div>
@@ -552,19 +663,28 @@
     const cycleLabel = debt.currentCycle || cycle.label || lineOverview.cycleLabel || "Current";
     const cycleDates = [cycle.startDate, cycle.endDate].filter(Boolean).map(formatDate).join(" - ");
     const elapsedDay = Number(cycle.elapsedWorkday || elapsedWorkdays || 0);
+    const cycleDays = Number.isFinite(totalWorkdays) && totalWorkdays > 0 ? Math.round(totalWorkdays) : 10;
+    const normalizedScaleHours = rows.reduce((max, row) => {
+      const completed = Number(row.completedHours || 0);
+      const remaining = Number(row.remainingHours || 0);
+      const totalLoad = Number(row.totalLoadHours || completed + remaining || 0);
+      return Math.max(max, totalLoad, completed + remaining, remaining);
+    }, 1);
+    const scaleLabel = `${formatHours(normalizedScaleHours)} shared`;
     const cycleMeta = [
       { label: "Cycle", value: cycleLabel },
-      { label: "Workdays", value: Number.isFinite(totalWorkdays) && totalWorkdays > 0 ? `${formatNumber(Math.round(elapsedDay))}/${formatNumber(totalWorkdays)}` : "n/a" },
+      { label: "Day", value: Number.isFinite(totalWorkdays) && totalWorkdays > 0 ? `${formatNumber(Math.round(elapsedDay))}/${formatNumber(cycleDays)}` : "n/a" },
+      { label: "Cycle Days", value: Number.isFinite(totalWorkdays) && totalWorkdays > 0 ? `${formatNumber(cycleDays)} workdays` : "n/a" },
       { label: "Remaining", value: Number.isFinite(remainingWorkdays) ? `${formatNumber(remainingWorkdays)} days` : "n/a" },
       { label: "Progress", value: formatPercent(cycleProgress) },
-      { label: "Dates", value: cycleDates || "n/a" }
+      { label: "Scale", value: scaleLabel }
     ];
     return `
       <article class="panel visual-panel plh-reference-panel pace-panel">
         <div class="visual-head">
           <div>
             <h3 class="panel-title">Phase Pace Projection</h3>
-            <p class="muted">Daily Assignment Tracker pace by phase, projected forward if the current completion rate continues.</p>
+            <p class="muted">${escapeHtml(cycleLabel)}${cycleDates ? ` - ${escapeHtml(cycleDates)}` : ""}. All sparklines use the same hour scale and the current cycle's workday count.</p>
           </div>
           <span class="section-tag">A-F Pace</span>
         </div>
@@ -576,6 +696,7 @@
             </div>
           `).join("")}
         </div>
+        ${rows.length ? renderCycleEfficiencyGauges(rows, cycleProgress) : ""}
         <div class="phase-pace-list">
           ${rows.map(row => {
             const status = computedPhaseStatus(row, cycleProgress);
@@ -632,8 +753,9 @@
                   remaining,
                   idealDailyCapacity,
                   currentDailyPace: dailyPace,
-                  totalWorkdays,
-                  elapsedWorkdays
+                  totalWorkdays: cycleDays,
+                  elapsedWorkdays,
+                  scaleMax: normalizedScaleHours
                 })}
               </div>
             `;
@@ -682,7 +804,6 @@
     return `
       <section class="plh-visual-grid">
         ${renderPhasePaceProjection(plh)}
-        ${renderLiveCapacitySurface(plh)}
         ${renderPhaseCycleBurnDown(plh)}
       </section>
     `;

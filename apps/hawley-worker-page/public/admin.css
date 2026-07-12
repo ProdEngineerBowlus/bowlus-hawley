@@ -439,6 +439,7 @@ a {
 }
 
 .plh-reference-panel {
+  position: relative;
   color: var(--ink);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -449,6 +450,27 @@ a {
     var(--shadow),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
   overflow: hidden;
+}
+
+.plh-reference-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 3px;
+  background: linear-gradient(90deg, var(--primary), var(--blue), var(--warn));
+  opacity: 0.82;
+}
+
+.plh-reference-panel > * {
+  position: relative;
+}
+
+.pace-panel {
+  border-color: rgba(51, 196, 141, 0.34);
+}
+
+.burn-panel {
+  border-color: rgba(240, 189, 71, 0.28);
 }
 
 .visual-head {
@@ -560,7 +582,7 @@ a {
 
 .pace-context {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -593,12 +615,174 @@ a {
   overflow-wrap: anywhere;
 }
 
+.efficiency-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.efficiency-card {
+  --dial-color: var(--primary);
+  position: relative;
+  min-height: 172px;
+  display: grid;
+  grid-template-columns: 114px minmax(0, 1fr);
+  grid-template-rows: auto 1fr;
+  gap: 12px 14px;
+  padding: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(85, 105, 79, 0.46);
+  border-radius: 8px;
+  background:
+    linear-gradient(140deg, rgba(51, 196, 141, 0.12), transparent 42%),
+    rgba(16, 20, 15, 0.58);
+}
+
+.efficiency-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, rgba(255, 255, 255, 0.08), transparent 36%, rgba(115, 199, 242, 0.07));
+  opacity: 0.72;
+  pointer-events: none;
+}
+
+.efficiency-card > * {
+  position: relative;
+}
+
+.efficiency-card.warn {
+  --dial-color: var(--warn);
+  border-color: rgba(240, 189, 71, 0.42);
+  background:
+    linear-gradient(140deg, rgba(240, 189, 71, 0.14), transparent 42%),
+    rgba(16, 20, 15, 0.58);
+}
+
+.efficiency-card.risk {
+  --dial-color: var(--accent);
+  border-color: rgba(240, 106, 70, 0.46);
+  background:
+    linear-gradient(140deg, rgba(240, 106, 70, 0.16), transparent 42%),
+    rgba(16, 20, 15, 0.58);
+}
+
+.efficiency-card.neutral {
+  --dial-color: var(--blue);
+}
+
+.efficiency-dial {
+  grid-row: 1 / span 2;
+  position: relative;
+  width: 112px;
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background:
+    conic-gradient(var(--dial-color) var(--dial-fill), rgba(85, 105, 79, 0.24) 0),
+    rgba(16, 20, 15, 0.8);
+  box-shadow:
+    0 0 28px rgba(51, 196, 141, 0.12),
+    inset 0 0 0 1px rgba(240, 245, 233, 0.08);
+}
+
+.efficiency-dial::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: calc(50% - 1px);
+  width: 2px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--ink);
+  transform: rotate(257deg);
+  transform-origin: 1px 53px;
+  opacity: 0.72;
+}
+
+.efficiency-dial-core {
+  width: 76px;
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 2px;
+  border: 1px solid rgba(85, 105, 79, 0.58);
+  border-radius: 50%;
+  background: linear-gradient(180deg, rgba(31, 39, 28, 0.98), rgba(16, 20, 15, 0.98));
+  text-align: center;
+}
+
+.efficiency-dial-core strong {
+  color: var(--ink);
+  font-size: 1.38rem;
+  line-height: 1;
+  font-weight: 950;
+}
+
+.efficiency-dial-core span,
+.efficiency-copy span,
+.efficiency-details em {
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 850;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.efficiency-copy {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  align-content: start;
+}
+
+.efficiency-copy h4 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 1.08rem;
+}
+
+.efficiency-copy p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.35;
+  font-size: 0.86rem;
+}
+
+.efficiency-details {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  align-self: end;
+}
+
+.efficiency-details span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+  border: 1px solid rgba(85, 105, 79, 0.34);
+  border-radius: 7px;
+  background: rgba(16, 20, 15, 0.42);
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 850;
+  overflow-wrap: anywhere;
+}
+
+.efficiency-details span:nth-child(3) {
+  grid-column: 1 / -1;
+}
+
 .pace-row {
   display: grid;
-  grid-template-columns: 56px minmax(360px, 1fr) minmax(150px, 0.24fr) minmax(248px, 0.34fr);
+  grid-template-columns: 56px minmax(360px, 1fr) minmax(150px, 0.24fr) minmax(222px, 0.3fr);
   align-items: center;
   gap: 16px;
-  min-height: 132px;
+  min-height: 118px;
   padding: 14px;
   border: 1px solid rgba(85, 105, 79, 0.44);
   border-radius: 8px;
@@ -715,10 +899,10 @@ a {
 
 .pace-spark {
   width: 100%;
-  min-width: 248px;
-  height: 108px;
+  min-width: 222px;
+  height: 94px;
   display: grid;
-  gap: 6px;
+  gap: 5px;
   align-content: center;
   padding: 8px 8px 6px;
   border: 1px solid rgba(85, 105, 79, 0.34);
@@ -728,15 +912,15 @@ a {
 
 .pace-spark svg {
   width: 100%;
-  height: 86px;
+  height: 72px;
   display: block;
   overflow: visible;
 }
 
 .pace-spark-meta {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
   letter-spacing: 0.08em;
 }
 
@@ -748,7 +932,7 @@ a {
   color: var(--warn);
 }
 
-.pace-spark-meta span:nth-child(3) {
+.pace-spark-meta span:nth-child(4) {
   text-align: right;
 }
 
@@ -993,6 +1177,10 @@ a {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  .efficiency-strip {
+    grid-template-columns: 1fr;
+  }
+
   .pace-detail-grid {
     grid-template-columns: repeat(3, minmax(72px, 1fr));
   }
@@ -1045,8 +1233,22 @@ a {
   }
 
   .pace-context,
-  .pace-detail-grid {
+  .pace-detail-grid,
+  .efficiency-details {
     grid-template-columns: 1fr;
+  }
+
+  .efficiency-card {
+    grid-template-columns: 1fr;
+  }
+
+  .efficiency-dial {
+    grid-row: auto;
+    justify-self: center;
+  }
+
+  .efficiency-details span:nth-child(3) {
+    grid-column: auto;
   }
 
   .pace-phase {
