@@ -80,6 +80,12 @@ See `docs/runbooks/operational-capability-map.md`.
 The current Postgres schema map and data-layer rules are documented in
 `docs/hawley-database-schema.md`.
 
+The Hawley Admin Dashboard and Project Creator are documented in
+`docs/runbooks/hawley-admin-operations.md`. The admin page recreates the useful
+PLH pacing visuals from Postgres/HB data, supports non-destructive true phase
+pacing overlays, and has a preview-first project creator for VIN and
+Fabrication Asana projects.
+
 The Rev1 Airtable field and calculation migration audit is documented in
 `docs/runbooks/rev1-airtable-calculation-audit.md`.
 

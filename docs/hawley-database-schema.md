@@ -1,6 +1,6 @@
 # Hawley Database Schema Map
 
-Last updated: 2026-07-11
+Last updated: 2026-07-13
 
 This file describes the Postgres shape defined by `db/migrations` and `db/views`.
 It is the working map for expanding Hawley's shop-floor context.
@@ -53,6 +53,8 @@ Purpose: loss-preserving mirrors of external systems. These tables are not the p
 | `raw.airtable_task_instances` | Airtable `Task Instances Rev1` | `record_id` | Legacy Rev1 production ledger mirror. |
 | `raw.airtable_tasks` | Airtable `Tasks` | `record_id` | Task template source for project creation. |
 | `raw.airtable_production` | Airtable `Production` | `record_id` | Production schedule source for project creation. |
+| `raw.airtable_vins` | Airtable `VINs` | `record_id` | VIN model/frame context source for project creation. |
+| `raw.airtable_models` | Airtable `Models` | `record_id` | Model and frame-class context source for project creation. |
 | `raw.airtable_cycles` | Airtable `Cycles` | `record_id` | Cycle date and capacity source. |
 | `raw.airtable_work_force` | Airtable `Work Force` | `record_id` | Employee roster, skill, phase, and availability source. |
 | `raw.airtable_phases` | Airtable `Phases` | `record_id` | Phase, section, parity, and grouping source. |
@@ -82,6 +84,10 @@ Purpose: Hawley Brain. This is the preferred normalized shop model for schedulin
 | `hb.worker_cycle_bank_rev1` | one worker/cycle capacity bank | `pg:build:hb` | Worker cycle capacity, assigned hours, remaining hours, and effective bank. |
 | `hb.task_templates` | one task template | `pg:build:hb` | Postgres task-template model sourced from Airtable `Tasks`. |
 | `hb.production_schedule` | one production schedule row | `pg:build:hb` | Postgres production schedule sourced from Airtable `Production`. |
+| `hb.vins` | one VIN | `pg:build:hb` | Normalized VIN model and frame-class context for project creation. |
+| `hb.models` | one model/frame row | `pg:build:hb` | Normalized model/frame reference table for template filtering. |
+| `hb.project_creation_runs` | one admin create run | admin Project Creator | Audit/result table for Postgres-first Asana project creation. |
+| `hb.phase_cycle_pace_overrides` | one cycle/phase pace overlay | admin Dashboard | Non-destructive true start date overlay for phase pacing. |
 
 ### `core`
 
@@ -102,6 +108,21 @@ Purpose: Hawley-owned runtime data. These are the tables Hawley can own directly
 | `core.app_users` | one user account | Login identity, role, temporary password state, active flag. |
 | `core.app_sessions` | one login session | Web session tokens. |
 | `core.app_auth_events` | one auth event | Login/audit event trail. |
+
+### Admin-Owned Overlays
+
+Admin overlays are Hawley-owned view controls, not source-system rewrites.
+
+`hb.phase_cycle_pace_overrides` lets an admin define the true start date for a
+phase inside a cycle. The Admin Dashboard uses this to calculate phase-specific
+pace after management intentionally delays a phase start. It does not change the
+production schedule, task estimates, worker actuals, Asana tasks, or Airtable
+records.
+
+`hb.project_creation_runs` records admin Project Creator attempts and results.
+The creator writes native pending rows to `hb.rev1_task_instances` with
+`source_system = 'hawley_project_creator'` before Asana creation, then stores the
+resulting Asana project/task GIDs after success.
 
 ### `ops`
 
@@ -160,6 +181,18 @@ Purpose: migration, import, run-state, and future writeback bookkeeping.
 | `sync.record_map` | Cross-system record mapping. |
 | `sync.asana_project_event_cursors` | Asana project event sync tokens. |
 | `sync.asana_writeback_queue` | Queue for guarded future Asana writebacks. |
+
+## Admin App Rules
+
+- Admin Dashboard pacing must read from Postgres/HB/reporting surfaces.
+- Do not add a runtime dependency on the legacy Daily Assignment Tracker for
+  admin pacing.
+- `hb.production_schedule` is the schedule source for Project Creator.
+- `hb.task_templates`, `hb.vins`, and `hb.models` supply the task/template/model
+  context needed to preview and create VIN or Fabrication projects.
+- Airtable remains a human planning interface for editable planning tables
+  during migration; Hawley/Postgres should be refreshed after those edits before
+  project creation.
 
 ## Expansion Rules
 
