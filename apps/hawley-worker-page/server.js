@@ -70,7 +70,7 @@ const ADMIN_PROJECT_SHARED_CUSTOM_FIELDS = Object.freeze([
   { name: "Assigned On", gid: "1215603865689876" }
 ]);
 const ADMIN_PROJECT_LOCAL_CUSTOM_FIELDS = Object.freeze([
-  { name: "Days in Cycle", resource_subtype: "number" },
+  { name: "Days in Cycle", resource_subtype: "number", precision: 0 },
   { name: "Attachment summary", resource_subtype: "text" },
   { name: "AirTableKey", resource_subtype: "text" }
 ]);
