@@ -74,6 +74,12 @@ capacity projection begins at today's open work. When remaining capacity cannot
 cover that work, it ends above zero with a red endpoint and the unresolved hour
 gap is labeled explicitly.
 
+Phase rows intentionally separate capacity from schedule pace. `On Track` and
+`Off Track` are capacity decisions: a row is off track only when remaining work
+exceeds remaining capacity. A separate `On Pace` or `Behind Pace` chip compares
+completion with the phase's standard or true-phase target. This allows a phase
+to be capacity-covered while still showing that work needs to accelerate.
+
 ## True Phase Pacing
 
 True pacing lets an admin shift the start date for a phase within a cycle

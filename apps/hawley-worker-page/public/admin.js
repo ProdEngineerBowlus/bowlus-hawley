@@ -595,15 +595,19 @@
     if (phase?.truePace?.status === "queued") return "Queued";
     const remaining = numberOrNull(phase?.remainingHours);
     const capacity = numberOrNull(phase?.capacityHours);
-    const completion = numberOrNull(phase?.completionPct);
-    const cycle = numberOrNull(phase?.trueCycleProgressPct) ?? numberOrNull(phase?.cyclePct) ?? numberOrNull(phase?.cycleProgressPct) ?? numberOrNull(fallbackCycleProgress);
-    const status = String(phase?.status || "");
 
-    if (remaining !== null && remaining <= 0.05) return "On Track";
+    if (remaining !== null && remaining <= 0.05) return "Complete";
     if (capacity !== null && capacity <= 0.05) return "Off Track";
     if (remaining !== null && capacity !== null && remaining > capacity + 0.05) return "Off Track";
-    if (completion !== null && cycle !== null && completion + 0.01 < cycle) return "At Risk";
-    return status || "On Track";
+    return "On Track";
+  }
+
+  function phasePaceSignal(phase, fallbackCycleProgress = null) {
+    if (phase?.truePace?.status === "queued") return "Queued";
+    const completion = numberOrNull(phase?.completionPct);
+    const cycle = numberOrNull(phase?.trueCycleProgressPct) ?? numberOrNull(phase?.cyclePct) ?? numberOrNull(phase?.cycleProgressPct) ?? numberOrNull(fallbackCycleProgress);
+    if (completion === null || cycle === null) return "No pace signal";
+    return completion + 0.01 < cycle ? "Behind Pace" : "On Pace";
   }
 
   function truePaceChip(row) {
@@ -888,6 +892,8 @@
             const truePace = row.truePace || {};
             const targetProgress = Number(row.trueCycleProgressPct ?? row.cycleProgressPct ?? cycleProgress);
             const status = computedPhaseStatus(row, cycleProgress);
+            const paceSignal = phasePaceSignal(row, cycleProgress);
+            const paceSignalTone = paceSignal === "Behind Pace" ? "warn" : "good";
             const tone = toneForPacingStatus(status);
             const completed = Number(row.completedHours || 0);
             const remaining = Number(row.remainingHours || 0);
@@ -927,6 +933,7 @@
                 <div class="pace-copy">
                   <div class="pace-status-line">
                     <strong>${escapeHtml(status)}</strong>
+                    <span class="pace-signal-chip ${escapeAttr(paceSignalTone)}">${escapeHtml(paceSignal)}</span>
                     ${shiftChip ? `<span class="pace-shift-chip">${escapeHtml(shiftChip)}</span>` : ""}
                   </div>
                   <small>${escapeHtml(formatHours(remaining))} remaining / ${escapeHtml(formatNumber(workerCount))} worker${workerCount === 1 ? "" : "s"} = ${escapeHtml(hoursPerWorker === null ? "--" : formatHours(hoursPerWorker))} per worker</small>

@@ -943,7 +943,7 @@ a {
 
 .pace-row {
   display: grid;
-  grid-template-columns: 56px minmax(360px, 1fr) minmax(150px, 0.24fr) minmax(222px, 0.3fr);
+  grid-template-columns: 56px minmax(460px, 1fr) minmax(140px, 0.2fr) minmax(420px, 0.7fr);
   align-items: center;
   gap: 16px;
   min-height: 118px;
@@ -1029,9 +1029,34 @@ a {
   font-weight: 900;
 }
 
+.pace-signal-chip {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(51, 196, 141, 0.42);
+  border-radius: 999px;
+  padding: 0 9px;
+  color: var(--primary-strong);
+  background: rgba(51, 196, 141, 0.1);
+  font-size: 0.7rem;
+  font-weight: 900;
+}
+
+.pace-signal-chip.warn {
+  border-color: rgba(240, 189, 71, 0.48);
+  color: #ffd782;
+  background: rgba(240, 189, 71, 0.12);
+}
+
+.pace-signal-chip.risk {
+  border-color: rgba(240, 106, 70, 0.48);
+  color: #ffb19c;
+  background: rgba(240, 106, 70, 0.12);
+}
+
 .pace-detail-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(72px, 1fr));
+  grid-template-columns: repeat(4, minmax(72px, 1fr));
   gap: 6px;
   margin-top: 2px;
 }

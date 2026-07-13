@@ -6828,11 +6828,9 @@ function adminPhaseCapacityStatus(row) {
   const remainingHours = Number(row.remainingHours || 0);
   const capacityHours = Number(row.capacityHours || 0);
   const workerCount = Number(row.workerCount || 0);
-  const pacingStatus = String(row.status || "").toLowerCase();
   if (remainingHours <= 0.05) return "Complete";
   if (!workerCount || capacityHours <= 0.05) return "No capacity";
   if (remainingHours > capacityHours + 0.05) return "Off track";
-  if (pacingStatus.includes("behind") || pacingStatus.includes("watch")) return "At risk";
   return "On track";
 }
 
