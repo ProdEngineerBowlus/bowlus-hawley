@@ -5798,7 +5798,7 @@ async function adminProjectCreatorPreview(options) {
 
   const targetScheduleRows = projectType === "Fabrication"
     ? selectedCycleRows.filter(projectCreatorScheduleIsFabrication)
-    : allScheduleRows;
+    : allScheduleRows.filter(row => !projectCreatorScheduleIsFabrication(row));
   if (!targetScheduleRows.length) return null;
 
   const existingLineScheduleIds = Array.from(new Set(targetScheduleRows.map(row => row.production_record_id).filter(Boolean)));
@@ -7948,6 +7948,10 @@ async function adminCreateAsanaSection(token, projectGid, name) {
   return adminAsanaRequest(token, `/projects/${projectGid}/sections`, "POST", { name });
 }
 
+async function adminProjectSections(token, projectGid) {
+  return adminAsanaRequest(token, `/projects/${projectGid}/sections?limit=100`);
+}
+
 async function adminCustomFieldRegistry(token, projectGid) {
   const project = await adminAsanaRequest(
     token,
@@ -7976,14 +7980,14 @@ async function adminCustomFieldRegistry(token, projectGid) {
 
 function adminPutNumberCustomField(payload, registry, name, value) {
   const meta = registry[projectCreatorNormalizeKey(name)];
-  if (!meta || value === null || value === undefined || value === "") return;
+  if (!meta || meta.type !== "number" || value === null || value === undefined || value === "") return;
   const parsed = Number(value);
   if (Number.isFinite(parsed)) payload[meta.gid] = parsed;
 }
 
 function adminPutTextCustomField(payload, registry, name, value) {
   const meta = registry[projectCreatorNormalizeKey(name)];
-  if (!meta || value === null || value === undefined || value === "") return;
+  if (!meta || meta.type !== "text" || value === null || value === undefined || value === "") return;
   payload[meta.gid] = String(value);
 }
 
@@ -8241,7 +8245,7 @@ async function updateAdminProjectCreationResult(runId, status, result) {
     `
       update hb.project_creation_runs
       set status = $2,
-          asana_project_gid = $3,
+          asana_project_gid = coalesce($3, asana_project_gid),
           root_task_count = $4,
           subtask_count = $5,
           error_message = $6,
@@ -8282,16 +8286,27 @@ async function updateAdminProjectTaskAsanaLinks(createdTasks, projectGid, projec
   }
 }
 
-async function createAdminAsanaProjectFromPreview(token, preview, projectName) {
+async function createAdminAsanaProjectFromPreview(token, preview, projectName, runId = "") {
   const projectGid = await instantiateAdminAsanaProject(token, projectName);
+  if (runId) {
+    await updateAdminProjectCreationResult(runId, "project_created", {
+      asanaProjectGid: projectGid
+    });
+  }
   await adminAddProjectToPortfolio(token, projectGid, preview.projectType);
   const registry = await adminCustomFieldRegistry(token, projectGid);
   const sectionByLabel = {};
+  const existingSections = await adminProjectSections(token, projectGid);
+  for (const section of existingSections || []) {
+    const key = projectCreatorNormalizeKey(section.name);
+    if (key && !sectionByLabel[key]) sectionByLabel[key] = section.gid;
+  }
   for (const task of preview.tasks) {
     const label = task.asanaSection || task.phaseLabel || "Unassigned";
-    if (!sectionByLabel[label]) {
+    const key = projectCreatorNormalizeKey(label);
+    if (!sectionByLabel[key]) {
       const section = await adminCreateAsanaSection(token, projectGid, label);
-      sectionByLabel[label] = section.gid;
+      sectionByLabel[key] = section.gid;
     }
   }
 
@@ -8322,7 +8337,7 @@ async function createAdminAsanaProjectFromPreview(token, preview, projectName) {
   let subtaskCount = 0;
 
   async function createTree(task, parentGid = null) {
-    const sectionGid = sectionByLabel[task.asanaSection || task.phaseLabel || "Unassigned"];
+    const sectionGid = sectionByLabel[projectCreatorNormalizeKey(task.asanaSection || task.phaseLabel || "Unassigned")];
     const asanaTask = await adminCreateAsanaTask(token, projectGid, sectionGid, parentGid, task, preview, registry);
     createdTasks.push({
       nativeKey: task.nativeKey,
@@ -8425,7 +8440,7 @@ async function handleAdminProjectCreate(req) {
   await insertAdminProjectCreationRows(preview, runId, projectName, actor, body);
 
   try {
-    const result = await createAdminAsanaProjectFromPreview(token, preview, projectName);
+    const result = await createAdminAsanaProjectFromPreview(token, preview, projectName, runId);
     await updateAdminProjectTaskAsanaLinks(result.createdTasks, result.asanaProjectGid, projectName);
     await updateAdminProjectCreationResult(runId, "success", result);
     return {
@@ -8441,6 +8456,77 @@ async function handleAdminProjectCreate(req) {
     };
     await updateAdminProjectCreationResult(runId, "failed", failure);
     throw error;
+  }
+}
+
+async function handleAdminProjectCreationCleanup(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const runId = String(body.runId || "").trim();
+  if (!runId) throw actionError("runId is required.", 400, { code: "PROJECT_RUN_ID_REQUIRED" });
+
+  const client = await writePool.connect();
+  try {
+    await client.query("begin");
+    const runResult = await client.query(
+      `
+        select project_creation_run_id, project_name, status, vin, asana_project_gid
+        from hb.project_creation_runs
+        where project_creation_run_id = $1
+        for update
+      `,
+      [runId]
+    );
+    const run = runResult.rows[0];
+    if (!run) throw actionError("Project creation run was not found.", 404, { code: "PROJECT_RUN_NOT_FOUND" });
+    if (run.status !== "failed" || run.asana_project_gid) {
+      throw actionError("Only failed runs without a recorded Asana project can be cleaned up.", 409, {
+        code: "PROJECT_RUN_CLEANUP_BLOCKED",
+        status: run.status,
+        asanaProjectGid: run.asana_project_gid || ""
+      });
+    }
+
+    const linkedResult = await client.query(
+      `
+        select count(*)::int as count
+        from hb.rev1_task_instances
+        where source_system = 'hawley_project_creator'
+          and fields_json ->> 'projectCreationRunId' = $1
+          and (asana_task_gid is not null or asana_project_gid is not null)
+      `,
+      [runId]
+    );
+    if (Number(linkedResult.rows[0]?.count || 0) > 0) {
+      throw actionError("Cleanup blocked because this run has Asana-linked tasks.", 409, {
+        code: "PROJECT_RUN_HAS_ASANA_LINKS"
+      });
+    }
+
+    const taskDelete = await client.query(
+      `
+        delete from hb.rev1_task_instances
+        where source_system = 'hawley_project_creator'
+          and fields_json ->> 'projectCreationRunId' = $1
+      `,
+      [runId]
+    );
+    await client.query("delete from hb.project_creation_runs where project_creation_run_id = $1", [runId]);
+    await client.query("commit");
+    return {
+      ok: true,
+      runId,
+      projectName: run.project_name || "",
+      vin: run.vin || "",
+      deletedTaskInstances: taskDelete.rowCount || 0,
+      deletedRuns: 1
+    };
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
   }
 }
 
@@ -8521,6 +8607,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/project-creator/create" && req.method === "POST") {
       sendJson(res, 200, await handleAdminProjectCreate(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/project-creator/cleanup" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminProjectCreationCleanup(req));
       return;
     }
 

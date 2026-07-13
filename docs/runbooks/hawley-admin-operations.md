@@ -140,6 +140,17 @@ Dashboard behavior:
 The Project Creator is preview-first. It reads Hawley/Postgres data, builds the
 proposed Asana project shape, and only writes when explicitly enabled.
 
+VIN projects include only VIN production phases (A1/A2 and B-H) for the
+selected VIN. CNC, FAB, and Frame support rows belong to the separate
+Fabrication project for their selected cycle. Project creation instantiates the
+configured Asana template, reuses matching sections already supplied by that
+template, and creates only missing sections. Formula and other read-only Asana
+custom fields are never written directly.
+
+As soon as template instantiation returns an Asana project GID, Hawley records
+that GID on the creation run before adding tasks. This preserves partial-project
+evidence if a later Asana request fails and prevents an unsafe duplicate retry.
+
 Safety gate:
 
 ```text
