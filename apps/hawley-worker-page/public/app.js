@@ -1,6 +1,6 @@
 (function () {
   const PROJECT_ID = "1214157321063250";
-  const ASSIGNMENT_AUTO_REFRESH_MS = 90 * 1000;
+  const ASSIGNMENT_AUTO_REFRESH_MS = 60 * 1000;
   const SYNC_STATUS_REFRESH_MS = 60 * 1000;
   const STANDARD_DAILY_MINUTES = 460;
   let today = getTodayIso();

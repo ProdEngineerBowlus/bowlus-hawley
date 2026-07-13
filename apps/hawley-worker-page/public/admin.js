@@ -1,5 +1,7 @@
 (() => {
   const root = document.getElementById("admin-root");
+  const DASHBOARD_AUTO_REFRESH_MS = 60 * 1000;
+  let dashboardRefreshInFlight = false;
   const state = {
     authStatus: null,
     activeView: "dashboard",
@@ -354,6 +356,27 @@
 
   async function loadDashboard() {
     state.dashboard = await fetchJson(`/api/admin/dashboard?_=${Date.now()}`);
+  }
+
+  async function refreshDashboardSilently() {
+    if (dashboardRefreshInFlight || document.hidden || !adminAllowed()) return;
+    dashboardRefreshInFlight = true;
+    try {
+      await loadDashboard();
+      if (state.activeView === "dashboard") render();
+    } catch (error) {
+      state.dashboardMessage = error.message || "Could not automatically refresh the dashboard.";
+      if (state.activeView === "dashboard") render();
+    } finally {
+      dashboardRefreshInFlight = false;
+    }
+  }
+
+  function startDashboardAutoRefresh() {
+    window.setInterval(refreshDashboardSilently, DASHBOARD_AUTO_REFRESH_MS);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) refreshDashboardSilently();
+    });
   }
 
   async function loadProjectCreator(options = {}) {
@@ -1398,4 +1421,5 @@
   });
 
   loadAll();
+  startDashboardAutoRefresh();
 })();

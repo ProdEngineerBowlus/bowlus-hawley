@@ -62,6 +62,12 @@ The dashboard may still read raw Airtable mirrors as fallback/proof tables, but
 the admin app should not depend on the legacy Daily Assignment Tracker to know
 whether the shop is on pace.
 
+The Admin Dashboard automatically requests fresh dashboard data every 60
+seconds while the page is visible. Returning to a backgrounded tab triggers an
+immediate catch-up request. The refresh updates only dashboard state, so it does
+not reset unsaved Project Creator input. Worker and manager assignment views use
+the same 60-second refresh cadence.
+
 ## True Phase Pacing
 
 True pacing lets an admin shift the start date for a phase within a cycle
