@@ -1155,7 +1155,7 @@
             ${selectedVin ? pill(`VIN ${selectedVin}`, "blue") : ""}
             ${state.projectLoading ? pill("Loading", "warn") : ""}
           </div>
-          ${latestRun?.status === "failed" ? `<div class="notice risk-text" style="margin-top: 12px;"><strong>Latest create failed: ${escapeHtml(latestRun.project_name || "Unnamed project")}</strong><br>${escapeHtml(latestRun.error_message || "No failure detail was recorded.")}</div>` : ""}
+          ${latestRun?.status === "failed" ? `<div class="notice risk-text" style="margin-top: 12px;"><strong>Latest create failed: ${escapeHtml(latestRun.project_name || "Unnamed project")}</strong><br>${escapeHtml(latestRun.error_message || "No failure detail was recorded.")}${latestRun.asana_project_gid ? "" : `<div class="inline-actions" style="margin-top: 10px;"><button class="btn" type="button" data-action="cleanup-project-run" data-run-id="${escapeAttr(latestRun.project_creation_run_id)}">Remove failed Hawley run</button></div>`}</div>` : ""}
         </section>
         <section class="panel">
           <div class="panel-header">
@@ -1438,6 +1438,16 @@
         state.createMessage = error.message || "Project creation is not available.";
       }
       render();
+    } else if (action === "cleanup-project-run") {
+      const runId = event.target.closest("[data-run-id]")?.dataset.runId || "";
+      try {
+        const payload = await postJson("/api/admin/project-creator/cleanup", { runId });
+        state.createMessage = `Removed failed Hawley run for ${payload.projectName || runId}.`;
+        await loadProjectCreator();
+      } catch (error) {
+        state.createMessage = error.message || "Could not remove the failed Hawley run.";
+        render();
+      }
     }
   });
 
