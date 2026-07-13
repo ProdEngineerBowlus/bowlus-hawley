@@ -5770,8 +5770,20 @@ function projectCreatorDisplayPhase(value) {
 function projectCreatorSectionFields(projectType, schedule) {
   const phase = projectCreatorDisplayPhase(projectCreatorPhaseName(schedule)) || projectCreatorPhaseName(schedule);
   const section = projectCreatorDisplayPhase(schedule.section_column) || schedule.section_column || phase;
+  const phaseASource = projectCreatorNormalizeKey([
+    schedule.phase_name,
+    schedule.section_column,
+    schedule.asana_section
+  ].filter(Boolean).join(" "));
+  const phaseASubsection = phase === "Phase A"
+    ? (/(^|\s)(lower|a1)(\s|$)/.test(phaseASource)
+      ? "Phase A - Lower"
+      : /(^|\s)(upper|a2)(\s|$)/.test(phaseASource)
+        ? "Phase A - Upper"
+        : "")
+    : "";
   return projectType === "VIN"
-    ? { phaseLabel: section, sectionColumn: section, asanaSection: phase }
+    ? { phaseLabel: section, sectionColumn: section, asanaSection: phaseASubsection || phase }
     : { phaseLabel: section, sectionColumn: phase, asanaSection: phase };
 }
 
@@ -8119,7 +8131,10 @@ function adminAsanaCustomFields(task, preview, registry) {
   adminPutTextCustomField(payload, registry, "Attachment summary", task.attachment_summary);
   adminPutDateCustomField(payload, registry, "Assigned On", schedule.start_date);
   adminPutEnumCustomField(payload, registry, "Cycle", projectCreatorAsanaCycleLabel(schedule));
-  adminPutEnumCustomField(payload, registry, "Phase / Section", task.asanaSection || task.phaseLabel);
+  const phaseOption = /^Phase A - (Lower|Upper)$/i.test(task.asanaSection || "")
+    ? "Phase A"
+    : (task.asanaSection || task.phaseLabel);
+  adminPutEnumCustomField(payload, registry, "Phase / Section", phaseOption);
   adminPutEnumCustomField(payload, registry, "Model", projectCreatorArray(task.vinModelTypes)[0]);
   return payload;
 }
@@ -8887,6 +8902,88 @@ async function repairAuthorizedVin327CycleFields() {
   }));
 }
 
+async function repairAuthorizedVin327PhaseASections() {
+  const token = process.env.ASANA_PAT;
+  if (!token) return;
+  const runResult = await writePool.query(`
+    select project_creation_run_id, asana_project_gid
+    from hb.project_creation_runs
+    where status = 'success'
+      and vin = '327'
+      and asana_project_gid is not null
+      and coalesce(result_json ->> 'phaseASectionRepairAt', '') = ''
+    order by completed_at desc nulls last, created_at desc
+    limit 1
+  `);
+  const run = runResult.rows[0];
+  if (!run) return;
+
+  const taskResult = await writePool.query(`
+    select
+      ti.asana_task_gid,
+      ps.phase_name,
+      ps.section_column,
+      ps.asana_section
+    from hb.rev1_task_instances ti
+    join hb.production_schedule ps
+      on ps.production_record_id = ti.line_schedule_record_id
+    where ti.asana_project_gid = $1
+      and ti.asana_task_gid is not null
+      and coalesce(ti.is_subtask, false) = false
+    order by ti.task_order nulls last, ti.task_name
+  `, [run.asana_project_gid]);
+  const phaseARows = taskResult.rows.filter(row =>
+    projectCreatorDisplayPhase(projectCreatorPhaseName(row)) === "Phase A"
+  );
+  const splitRows = phaseARows.map(row => ({
+    ...row,
+    targetSection: projectCreatorSectionFields("VIN", row).asanaSection
+  })).filter(row => row.targetSection === "Phase A - Lower" || row.targetSection === "Phase A - Upper");
+  if (!splitRows.length) throw new Error("VIN 327 Phase A repair found no Lower or Upper task rows.");
+
+  const sections = await adminProjectSections(token, run.asana_project_gid);
+  const sectionByName = new Map((sections || []).map(section => [projectCreatorNormalizeKey(section.name), section]));
+  for (const name of ["Phase A - Lower", "Phase A - Upper"]) {
+    const key = projectCreatorNormalizeKey(name);
+    if (!sectionByName.has(key)) {
+      const section = await adminCreateAsanaSection(token, run.asana_project_gid, name);
+      sectionByName.set(key, section);
+    }
+  }
+
+  const actions = splitRows.map(row => ({
+    method: "post",
+    relative_path: `/sections/${sectionByName.get(projectCreatorNormalizeKey(row.targetSection)).gid}/addTask`,
+    data: { task: row.asana_task_gid }
+  }));
+  for (let index = 0; index < actions.length; index += 10) {
+    const results = await adminAsanaRequest(token, "/batch", "POST", { actions: actions.slice(index, index + 10) });
+    const failed = (results || []).find(result => Number(result.status_code || 500) >= 400);
+    if (failed) throw new Error(`VIN 327 Phase A section batch failed with ${failed.status_code}.`);
+  }
+
+  if (splitRows.length === phaseARows.length) {
+    const oldSection = sectionByName.get(projectCreatorNormalizeKey("Phase A"));
+    if (oldSection?.gid) await adminAsanaRequest(token, `/sections/${oldSection.gid}`, "DELETE");
+  }
+  await writePool.query(`
+    update hb.project_creation_runs
+    set result_json = coalesce(result_json, '{}'::jsonb) || jsonb_build_object(
+      'phaseASectionRepairAt', now()::text,
+      'phaseASectionRepairTasks', $2::int
+    )
+    where project_creation_run_id = $1
+  `, [run.project_creation_run_id, actions.length]);
+  console.log("[hawley-project-creator]", JSON.stringify({
+    action: "phase_a_section_repair",
+    vin: 327,
+    projectGid: run.asana_project_gid,
+    movedRootTasks: actions.length,
+    lower: splitRows.filter(row => row.targetSection === "Phase A - Lower").length,
+    upper: splitRows.filter(row => row.targetSection === "Phase A - Upper").length
+  }));
+}
+
 async function serveStatic(req, res, url) {
   const requested =
     url.pathname === "/" ? "index.html" :
@@ -9093,9 +9190,12 @@ async function startServer() {
     console.log(`Hawley worker pilot listening on http://${HOST}:${PORT}`);
     // One-time, idempotent repair explicitly authorized for the first direct VIN 327 project.
     setTimeout(() => {
-      repairAuthorizedVin327CycleFields().catch(error => {
+      Promise.all([
+        repairAuthorizedVin327CycleFields(),
+        repairAuthorizedVin327PhaseASections()
+      ]).catch(error => {
         console.error("[hawley-project-creator]", JSON.stringify({
-          action: "cycle_field_repair",
+          action: "authorized_vin_327_repair",
           vin: 327,
           error: error.message || String(error)
         }));
