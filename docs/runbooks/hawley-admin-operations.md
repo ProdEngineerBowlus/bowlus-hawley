@@ -83,6 +83,12 @@ exceeds remaining capacity. A separate `On Pace` or `Behind Pace` chip compares
 completion with the phase's standard or true-phase target. This allows a phase
 to be capacity-covered while still showing that work needs to accelerate.
 
+`Phase A & Frames` combines A1/A2 and Frame-A/Frame-B into one presentation
+row. Its load, completed hours, and remaining hours come from the full current
+phase-cycle rollup. That rollup includes schedule-linked mirror tasks plus phase
+work that is not yet linked to a VIN schedule row; the linked-task mirror alone
+must not be used as the card total.
+
 The True Pace Starts table includes a persistent `Just in time` mode. Enabling
 it sets the effective true start to the phase's current last safe start. Hawley
 recalculates that date whenever remaining load or active staffing changes. A
