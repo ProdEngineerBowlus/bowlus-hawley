@@ -71,18 +71,22 @@ the same 60-second refresh cadence.
 Phase pace sparklines use the green line for ideal productive burn-down at 7
 hours 40 minutes per assigned worker per workday. This comes from the 7:00 a.m.
 to 3:30 p.m. shift less two 10-minute breaks and one 30-minute lunch. The yellow
-line is the projection at the current completion rate. A dashed capacity
-projection begins at today's open work. When remaining capacity cannot cover
-that work, it ends above zero with a red endpoint and the unresolved hour gap
-is labeled explicitly. Each phase uses its own vertical hour scale, and the area
-between ideal burn-down and capacity projection is shaded red for a gap or blue
-for a cushion so smaller differences remain visible.
+line is the projection at the current completion rate. A vertical marker shows
+the last safe workday the remaining load can start and still finish by cycle
+end. The calculation is `ceil(remaining hours / ideal daily phase hours)` and
+counts backward from the final cycle workday. The timeline no longer draws a
+dashed capacity projection.
 
 Phase rows intentionally separate capacity from schedule pace. `On Track` and
 `Off Track` are capacity decisions: a row is off track only when remaining work
 exceeds remaining capacity. A separate `On Pace` or `Behind Pace` chip compares
 completion with the phase's standard or true-phase target. This allows a phase
 to be capacity-covered while still showing that work needs to accelerate.
+
+The True Pace Starts table includes a persistent `Just in time` mode. Enabling
+it sets the effective true start to the phase's current last safe start. Hawley
+recalculates that date whenever remaining load or active staffing changes. A
+manual date save returns the phase to manual mode; Reset removes the override.
 
 Capacity uses active concurrent station staffing, not the total number of
 workers qualified for or assigned some tasks in a phase during the cycle. Phase

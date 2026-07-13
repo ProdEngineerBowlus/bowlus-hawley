@@ -114,32 +114,6 @@
     }).join(" ");
   }
 
-  function sparklineRangePath(points, startX, endX, height, maxValue) {
-    const safePoints = points.length ? points : [0];
-    const safeMax = Math.max(Number(maxValue) || 0, 1);
-    return safePoints.map((point, index) => {
-      const ratio = safePoints.length === 1 ? 0 : index / (safePoints.length - 1);
-      const x = startX + ((endX - startX) * ratio);
-      const y = height - (clamp(point, 0, safeMax) / safeMax) * height;
-      return `${index === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`;
-    }).join(" ");
-  }
-
-  function sparklineBandPath(firstPoints, secondPoints, startX, endX, height, maxValue) {
-    const count = Math.min(firstPoints.length, secondPoints.length);
-    if (!count) return "";
-    const safeMax = Math.max(Number(maxValue) || 0, 1);
-    const pointText = (point, index, total) => {
-      const ratio = total === 1 ? 0 : index / (total - 1);
-      const x = startX + ((endX - startX) * ratio);
-      const y = height - (clamp(point, 0, safeMax) / safeMax) * height;
-      return `${x.toFixed(1)} ${y.toFixed(1)}`;
-    };
-    const first = firstPoints.slice(0, count).map((point, index) => pointText(point, index, count));
-    const second = secondPoints.slice(0, count).map((point, index) => pointText(point, index, count)).reverse();
-    return `M${first.join(" L")} L${second.join(" L")} Z`;
-  }
-
   function phaseGroupLetter(row) {
     const label = String(row?.phaseName || row?.phase || "").toUpperCase();
     const normalized = label.replace(/[^A-Z0-9]+/g, " ").trim();
@@ -276,7 +250,7 @@
     `;
   }
 
-  function renderPaceSparkline({ totalLoad, completed, remaining, capacityHours, workerCount, currentDailyPace, totalWorkdays, elapsedWorkdays, truePace }) {
+  function renderPaceSparkline({ totalLoad, completed, remaining, workerCount, currentDailyPace, totalWorkdays, elapsedWorkdays, truePace, dropDeadStart }) {
     const width = 222;
     const height = 96;
     const days = Math.max(2, Math.round(Number(totalWorkdays) || 10));
@@ -298,39 +272,27 @@
       return Math.max(safeTotal - safeCurrentDaily * (boundary - startIndex), 0);
     });
     const currentRemaining = Math.max(Number(remaining) || safeTotal - safeCompleted, 0);
-    const remainingDays = Math.max(1, Math.round(Number(truePace?.remainingWorkdays) || (days - Math.max(0, Math.round(elapsed) - 1))));
     const currentBoundary = clamp(Math.round(elapsed) - 1, 0, days);
     const markerX = (currentBoundary / days) * width;
-    const safeCapacity = Math.max(Number(capacityHours) || 0, 0);
-    const capacityDaily = safeCapacity / remainingDays;
-    const capacityPoints = Array.from({ length: remainingDays + 1 }, (_, index) =>
-      Math.max(currentRemaining - (capacityDaily * index), 0)
-    );
-    const targetComparisonPoints = capacityPoints.map((_point, index) => {
-      const boundary = currentBoundary + (((days - currentBoundary) * index) / remainingDays);
-      const lowerIndex = Math.floor(boundary);
-      const upperIndex = Math.min(days, Math.ceil(boundary));
-      const blend = boundary - lowerIndex;
-      return Number(targetPoints[lowerIndex] || 0) + ((Number(targetPoints[upperIndex] || 0) - Number(targetPoints[lowerIndex] || 0)) * blend);
-    });
-    const capacityEndRemaining = capacityPoints[capacityPoints.length - 1] || 0;
-    const capacityDelta = safeCapacity - currentRemaining;
-    const hasGap = capacityDelta < -0.05;
-    const maxValue = Math.max(safeTotal, ...targetPoints, ...pacePoints, ...capacityPoints, 1);
+    const maxValue = Math.max(safeTotal, ...targetPoints, ...pacePoints, 1);
     const markerY = height - (currentRemaining / maxValue) * height;
-    const capacityEndY = height - (capacityEndRemaining / maxValue) * height;
     const projectedRemainingAtEnd = pacePoints[pacePoints.length - 1] || 0;
     const currentDayLabel = `D${Math.max(1, Math.min(days, Math.round(elapsed) || 1))}/${days}`;
     const trueStartX = (startIndex / days) * width;
     const trueStartLabel = truePace?.hasOverride ? `start ${formatDate(truePace.trueStartDate)}` : "cycle start";
     const preStartWidth = truePace?.hasOverride ? Math.max(0, trueStartX) : 0;
-    const capacityLabel = hasGap
-      ? `${formatHours(Math.abs(capacityDelta))} gap`
-      : `${formatHours(Math.max(capacityDelta, 0))} cushion`;
-    const capacityTone = hasGap ? "var(--accent)" : "var(--blue)";
+    const dropDead = dropDeadStart || truePace?.dropDeadStart || {};
+    const dropDeadIndex = Number(dropDead.workdayIndex);
+    const hasDropDeadIndex = Number.isFinite(dropDeadIndex);
+    const dropDeadX = hasDropDeadIndex ? (clamp(dropDeadIndex, 0, days) / days) * width : 0;
+    const dropDeadOverdue = !dropDead.feasible || (hasDropDeadIndex && currentBoundary > dropDeadIndex);
+    const dropDeadTone = dropDeadOverdue ? "var(--accent)" : "var(--blue)";
+    const dropDeadLabel = dropDead.feasible && dropDead.date
+      ? `last start ${formatDate(dropDead.date)}`
+      : "start before cycle";
 
     return `
-      <div class="pace-spark" title="Green is ideal productive capacity at 7h 40m per worker per workday. Yellow is current pace. The dashed capacity line starts at today's open work and ends at the remaining capacity gap or cushion.">
+      <div class="pace-spark" title="Green is ideal productive capacity at 7h 40m per worker per workday. Yellow is current pace. The vertical marker is the last workday this load can start and still finish within the cycle.">
         <svg viewBox="0 0 ${width} ${height}" aria-hidden="true">
           ${preStartWidth ? `<rect x="0" y="0" width="${preStartWidth.toFixed(1)}" height="${height}" fill="rgba(115,199,242,0.08)" rx="3"></rect>` : ""}
           <line x1="0" y1="0" x2="${width}" y2="0" stroke="rgba(240,245,233,0.08)" stroke-width="1"></line>
@@ -338,12 +300,11 @@
           <line x1="0" y1="${height}" x2="${width}" y2="${height}" stroke="rgba(240,245,233,0.16)" stroke-width="1"></line>
           ${truePace?.hasOverride ? `<line x1="${trueStartX.toFixed(1)}" y1="0" x2="${trueStartX.toFixed(1)}" y2="${height}" stroke="var(--blue)" stroke-width="2" stroke-dasharray="4 3"></line>` : ""}
           <line x1="${markerX.toFixed(1)}" y1="0" x2="${markerX.toFixed(1)}" y2="${height}" stroke="rgba(240,245,233,0.16)" stroke-width="1" stroke-dasharray="3 4"></line>
-          <path d="${sparklineBandPath(capacityPoints, targetComparisonPoints, markerX, width, height, maxValue)}" fill="${capacityTone}" opacity="${hasGap ? "0.24" : "0.16"}"></path>
+          <rect x="${dropDeadX.toFixed(1)}" y="0" width="${Math.max(0, width - dropDeadX).toFixed(1)}" height="${height}" fill="${dropDeadTone}" opacity="0.08"></rect>
+          <line x1="${dropDeadX.toFixed(1)}" y1="0" x2="${dropDeadX.toFixed(1)}" y2="${height}" stroke="${dropDeadTone}" stroke-width="3"></line>
+          <path d="M${(dropDeadX - 5).toFixed(1)} 0 L${(dropDeadX + 5).toFixed(1)} 0 L${dropDeadX.toFixed(1)} 8 Z" fill="${dropDeadTone}"></path>
           <path d="${sparklinePath(targetPoints, width, height, maxValue)}" fill="none" stroke="var(--primary)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
           <path d="${sparklinePath(pacePoints, width, height, maxValue)}" fill="none" stroke="var(--warn)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
-          <path d="${sparklineRangePath(capacityPoints, markerX, width, height, maxValue)}" fill="none" stroke="${capacityTone}" stroke-width="3" stroke-dasharray="5 4" stroke-linecap="round" stroke-linejoin="round"></path>
-          ${hasGap ? `<line x1="${width}" y1="${capacityEndY.toFixed(1)}" x2="${width}" y2="${height}" stroke="var(--accent)" stroke-width="7" opacity="0.42"></line>` : ""}
-          <circle cx="${width}" cy="${capacityEndY.toFixed(1)}" r="4" fill="${capacityTone}" stroke="rgba(16,20,15,0.92)" stroke-width="2"></circle>
           ${truePace?.hasOverride ? `<circle cx="${trueStartX.toFixed(1)}" cy="7" r="4" fill="var(--blue)" stroke="rgba(16,20,15,0.92)" stroke-width="2"></circle>` : ""}
           <circle cx="${markerX.toFixed(1)}" cy="${markerY.toFixed(1)}" r="4.6" fill="var(--ink)" stroke="rgba(16,20,15,0.92)" stroke-width="2"></circle>
         </svg>
@@ -351,7 +312,7 @@
           <span>ideal</span>
           <span>pace</span>
           <span>${escapeHtml(currentDayLabel)}</span>
-          <span style="color: ${capacityTone}">${escapeHtml(capacityLabel)}</span>
+          <span style="color: ${dropDeadTone}">${escapeHtml(dropDeadLabel)}</span>
         </div>
         <div class="pace-spark-note">${escapeHtml(trueStartLabel)} · current pace leaves ${escapeHtml(formatHours(projectedRemainingAtEnd))} open</div>
       </div>
@@ -974,12 +935,12 @@
                   totalLoad,
                   completed,
                   remaining,
-                  capacityHours,
                   workerCount,
                   currentDailyPace: dailyPace,
                   totalWorkdays: cycleDays,
                   elapsedWorkdays,
-                  truePace
+                  truePace,
+                  dropDeadStart: row.dropDeadStart || truePace.dropDeadStart
                 })}
               </div>
             `;
@@ -1075,7 +1036,9 @@
               <tr>
                 <th>Phase Label</th>
                 <th>Default</th>
+                <th>Last Safe Start</th>
                 <th>True Start</th>
+                <th>Mode</th>
                 <th>Shift</th>
                 <th>Note</th>
                 <th></th>
@@ -1084,18 +1047,27 @@
             <tbody>
               ${phases.map(row => {
                 const trueStart = row.trueStartDate || row.defaultStartDate || minDate;
+                const dropDead = row.dropDeadStart || {};
+                const isJustInTime = row.startMode === "just_in_time";
                 const shiftText = row.hasOverride
                   ? `${row.shiftWorkdays > 0 ? "+" : ""}${formatNumber(row.shiftWorkdays || 0)} workdays`
                   : "Default";
                 return `
-                  <tr data-true-pace-row data-cycle-number="${escapeAttr(cycleNumber)}" data-phase-label="${escapeAttr(row.phaseLabel)}">
+                  <tr data-true-pace-row data-cycle-number="${escapeAttr(cycleNumber)}" data-phase-label="${escapeAttr(row.phaseLabel)}" data-drop-dead-date="${escapeAttr(dropDead.date || "")}">
                     <td>
                       <strong>${escapeHtml(row.phaseLabel)}</strong>
                       ${row.hasOverride ? `<br><small>${escapeHtml(truePaceChip({ truePace: row }))}</small>` : ""}
                     </td>
                     <td>${escapeHtml(formatDate(row.defaultStartDate))}</td>
                     <td>
+                      <strong>${escapeHtml(dropDead.feasible ? formatDate(dropDead.date) : "Before cycle")}</strong>
+                      <br><small>${escapeHtml(dropDead.requiredWorkdays ? `${formatNumber(dropDead.requiredWorkdays)} workdays required` : dropDead.reason || "No signal")}</small>
+                    </td>
+                    <td>
                       <input class="table-input" type="date" data-true-pace-date min="${escapeAttr(minDate)}" max="${escapeAttr(maxDate)}" value="${escapeAttr(trueStart)}" />
+                    </td>
+                    <td>
+                      <button class="btn ${isJustInTime ? "primary" : "ghost"} compact" type="button" data-action="true-pace-jit" ${dropDead.feasible && dropDead.date ? "" : "disabled"}>${isJustInTime ? "JIT on" : "Use JIT"}</button>
                     </td>
                     <td>${escapeHtml(shiftText)}</td>
                     <td>
@@ -1107,7 +1079,7 @@
                     </td>
                   </tr>
                 `;
-              }).join("") || `<tr><td colspan="6">No current phase labels available for this cycle.</td></tr>`}
+              }).join("") || `<tr><td colspan="8">No current phase labels available for this cycle.</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -1422,7 +1394,7 @@
       await loadAll();
     } else if (action === "logout") {
       await logout();
-    } else if (action === "true-pace-save" || action === "true-pace-reset") {
+    } else if (action === "true-pace-save" || action === "true-pace-reset" || action === "true-pace-jit") {
       const row = event.target.closest("[data-true-pace-row]");
       if (!row) return;
       const phaseLabel = row.dataset.phaseLabel || "";
@@ -1431,16 +1403,21 @@
       const noteInput = row.querySelector("[data-true-pace-note]");
       try {
         const reset = action === "true-pace-reset";
+        const justInTime = action === "true-pace-jit";
+        const selectedStartDate = justInTime ? row.dataset.dropDeadDate || "" : dateInput?.value || "";
         await postJson("/api/admin/phase-cycle-pacing", {
           cycleNumber,
           phaseLabel,
-          trueStartDate: reset ? "" : dateInput?.value || "",
+          trueStartDate: reset ? "" : selectedStartDate,
+          startMode: justInTime ? "just_in_time" : "manual",
           note: reset ? "" : noteInput?.value || "",
           reset
         });
         state.dashboardMessage = reset
           ? `Reset true pace start for ${phaseLabel}.`
-          : `Saved true pace start for ${phaseLabel}.`;
+          : justInTime
+            ? `Enabled just-in-time pacing for ${phaseLabel}.`
+            : `Saved true pace start for ${phaseLabel}.`;
         await loadDashboard();
       } catch (error) {
         state.dashboardMessage = error.message || "Could not save true pace start.";

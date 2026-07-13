@@ -6841,6 +6841,26 @@ function adminPhaseLabelKey(value) {
   return projectCreatorNormalizeKey(value);
 }
 
+function adminDropDeadStart(remainingHours, workerCount, workdays) {
+  const hours = Math.max(Number(remainingHours || 0), 0);
+  const workers = Math.max(Number(workerCount || 0), 0);
+  const dates = Array.isArray(workdays) ? workdays : [];
+  const dailyHours = workers * SHOP_DAILY_AVAILABLE_HOURS;
+  if (!dates.length || dailyHours <= 0) {
+    return { date: "", workdayIndex: null, requiredWorkdays: null, feasible: false, reason: workers ? "no cycle workdays" : "no active workers" };
+  }
+  const requiredWorkdays = Math.max(1, Math.ceil(hours / dailyHours));
+  const workdayIndex = dates.length - requiredWorkdays;
+  return {
+    date: workdayIndex >= 0 ? dates[workdayIndex] : dates[0],
+    workdayIndex,
+    requiredWorkdays,
+    feasible: workdayIndex >= 0,
+    reason: workdayIndex >= 0 ? "" : `${requiredWorkdays - dates.length} workday(s) before cycle start required`,
+    dailyHours: round(dailyHours, 2)
+  };
+}
+
 function adminTruePaceForPhase(phaseName, cycleStatus, workdays, override, today = todayIso()) {
   const defaultStartDate = cycleStatus.startDate || "";
   const cycleEndDate = cycleStatus.endDate || "";
@@ -6898,6 +6918,7 @@ function adminTruePaceForPhase(phaseName, cycleStatus, workdays, override, today
     standardCycleProgressPct: cycleStatus.progressPct,
     capacityWorkdayRatio,
     note: override?.note || "",
+    startMode: override?.start_mode || override?.startMode || "manual",
     updatedBy: override?.updated_by || "",
     updatedAt: override?.updated_at || ""
   };
@@ -7046,6 +7067,7 @@ async function adminPlhMetricsPayload() {
           phase_label,
           phase_label_key,
           true_start_date::text,
+          start_mode,
           note,
           active,
           updated_by,
@@ -7304,7 +7326,17 @@ async function adminPlhMetricsPayload() {
   const phasePacing = currentPresentationRows
     .map(row => {
         const capacity = capacityByPresentation.get(row.phaseName) || capacityByPhase.get(row.phaseKey) || {};
-        const truePace = truePaceForPhase(row.phaseName);
+        const workerCount = Number(capacity.workerCount || 0);
+        const dropDeadStart = adminDropDeadStart(row.remainingHours, workerCount, cycleWorkdayList);
+        const phaseKey = adminPhaseLabelKey(adminPresentationPhaseName(row.phaseName));
+        const storedOverride = paceOverrideByPhase.get(phaseKey);
+        const effectiveOverride = storedOverride?.start_mode === "just_in_time" && dropDeadStart.date
+          ? { ...storedOverride, true_start_date: dropDeadStart.date }
+          : storedOverride;
+        const truePace = {
+          ...adminTruePaceForPhase(row.phaseName, cycleStatus, cycleWorkdayList, effectiveOverride, today),
+          dropDeadStart
+        };
         const rowCycleProgressPct = truePace.progressPct ?? cycleProgressPct;
         const rowCompletionPct = row.totalLoadHours ? round((row.completedHours / row.totalLoadHours) * 100, 1) : null;
         const rowExpectedHours = rowCycleProgressPct === null || rowCycleProgressPct === undefined
@@ -7327,7 +7359,7 @@ async function adminPlhMetricsPayload() {
           expectedCompletedHours: rowExpectedHours,
           paceDeltaHours: rowPaceDeltaHours,
           paceDeltaPct: rowPaceDeltaPct,
-          workerCount: Number(capacity.workerCount || 0),
+          workerCount,
           qualifiedWorkerCount: Number(capacity.qualifiedWorkerCount || capacity.workerCount || 0),
           capacityHours,
           fullCycleCapacityHours: round(capacity.fullCycleCapacityHours || 0, 2),
@@ -7724,6 +7756,7 @@ async function handleAdminPhaseCyclePaceOverride(req) {
   const phaseLabel = adminPresentationPhaseName(body.phaseLabel || body.phase || "");
   const phaseLabelKey = adminPhaseLabelKey(phaseLabel);
   const reset = Boolean(body.reset);
+  const startMode = body.startMode === "just_in_time" ? "just_in_time" : "manual";
 
   if (!cycleNumber) {
     throw actionError("Cycle number is required.", 400, { code: "CYCLE_REQUIRED" });
@@ -7785,6 +7818,7 @@ async function handleAdminPhaseCyclePaceOverride(req) {
         phase_label,
         phase_label_key,
         true_start_date,
+        start_mode,
         note,
         active,
         created_by,
@@ -7792,12 +7826,13 @@ async function handleAdminPhaseCyclePaceOverride(req) {
         created_at,
         updated_at
       )
-      values ($1, $2::int, $3, $4, $5, $6::date, $7, true, $8, $8, now(), now())
+      values ($1, $2::int, $3, $4, $5, $6::date, $7, $8, true, $9, $9, now(), now())
       on conflict (cycle_number, phase_label_key)
       do update set
         cycle_label = excluded.cycle_label,
         phase_label = excluded.phase_label,
         true_start_date = excluded.true_start_date,
+        start_mode = excluded.start_mode,
         note = excluded.note,
         active = true,
         updated_by = excluded.updated_by,
@@ -7809,6 +7844,7 @@ async function handleAdminPhaseCyclePaceOverride(req) {
         phase_label,
         phase_label_key,
         true_start_date::text,
+        start_mode,
         note,
         updated_by,
         updated_at::text
@@ -7820,6 +7856,7 @@ async function handleAdminPhaseCyclePaceOverride(req) {
       phaseLabel,
       phaseLabelKey,
       trueStartDate,
+      startMode,
       note || null,
       actorEmail
     ]
