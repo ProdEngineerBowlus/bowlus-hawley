@@ -65,6 +65,8 @@ const ADMIN_PROJECT_PORTFOLIO_NAMES = Object.freeze({
   Cycle: process.env.HAWLEY_ASANA_FABRICATION_PORTFOLIO_NAME || "Fabrication - 2026",
   VIN: process.env.HAWLEY_ASANA_VIN_PORTFOLIO_NAME || "VIN - 2026"
 });
+const ADMIN_AIRTABLE_API_BASE = "https://api.airtable.com/v0";
+const ADMIN_AIRTABLE_TASKS_TABLE = process.env.HAWLEY_AIRTABLE_TASKS_TABLE || "Tasks";
 const ADMIN_FABRICATION_PHASES = new Set(["FAB-A", "FAB-B", "FRAME-A", "FRAME-B", "CNC-A", "CNC-B"]);
 const ADMIN_PLH_BASELINE_CYCLE = process.env.HAWLEY_ADMIN_PLH_BASELINE_CYCLE || "C5";
 const ADMIN_PLH_PHASES = new Set(
@@ -8092,20 +8094,73 @@ async function adminCreateAsanaTask(token, projectGid, sectionGid, parentGid, ta
 }
 
 async function adminUploadTaskAttachments(token, taskGid, attachments) {
+  const warnings = [];
   for (const attachment of attachments || []) {
     if (!attachment?.url) continue;
-    const download = await fetch(attachment.url);
-    if (!download.ok) throw actionError(`Could not download attachment ${attachment.filename || "attachment"}.`, 502);
-    const form = new FormData();
-    form.append("file", await download.blob(), attachment.filename || "attachment");
-    const response = await fetch(`https://app.asana.com/api/1.0/tasks/${taskGid}/attachments`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
-      body: form
-    });
-    const text = await response.text();
-    if (!response.ok) throw actionError(`Asana attachment upload failed: ${text}`, response.status);
+    let lastError = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const download = await fetch(attachment.url);
+        if (!download.ok) throw actionError(`Could not download attachment ${attachment.filename || "attachment"}.`, 502);
+        const form = new FormData();
+        form.append("file", await download.blob(), attachment.filename || "attachment");
+        const response = await fetch(`https://app.asana.com/api/1.0/tasks/${taskGid}/attachments`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+          body: form
+        });
+        const text = await response.text();
+        if (!response.ok) throw actionError(`Asana attachment upload failed: ${text}`, response.status);
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+    if (lastError) {
+      warnings.push({ filename: attachment.filename || "attachment", error: lastError.message || String(lastError) });
+    }
   }
+  return warnings;
+}
+
+function adminAirtableAttachments(value) {
+  return (Array.isArray(value) ? value : []).map(attachment => ({
+    id: attachment?.id || "",
+    url: attachment?.url || "",
+    filename: attachment?.filename || "attachment",
+    size: Number(attachment?.size || 0),
+    type: attachment?.type || ""
+  })).filter(attachment => attachment.url);
+}
+
+async function adminFreshTaskAttachmentsByRecordId(tasks) {
+  const token = process.env.AIRTABLE_PAT;
+  const baseId = process.env.AIRTABLE_BASE || process.env.AIRTABLE_BASE_ID;
+  if (!token || !baseId) {
+    throw actionError("Fresh Airtable attachment URLs are required before creating this project, but Airtable credentials are not configured.", 503);
+  }
+
+  const wanted = new Set((tasks || []).map(task => String(task.task_record_id || "")).filter(Boolean));
+  const attachmentsByRecordId = new Map();
+  let offset = "";
+  do {
+    const url = new URL(`${ADMIN_AIRTABLE_API_BASE}/${encodeURIComponent(baseId)}/${encodeURIComponent(ADMIN_AIRTABLE_TASKS_TABLE)}`);
+    url.searchParams.set("pageSize", "100");
+    url.searchParams.append("fields[]", "Diagrams & Utilities");
+    if (offset) url.searchParams.set("offset", offset);
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    const text = await response.text();
+    if (!response.ok) throw actionError(`Could not refresh task attachments from Airtable (${response.status}).`, 502);
+    const payload = JSON.parse(text);
+    for (const record of payload.records || []) {
+      if (!wanted.has(record.id)) continue;
+      attachmentsByRecordId.set(record.id, adminAirtableAttachments(record.fields?.["Diagrams & Utilities"]));
+    }
+    offset = payload.offset || "";
+  } while (offset);
+  return attachmentsByRecordId;
 }
 
 async function insertAdminProjectCreationRows(preview, runId, projectName, actor, requestJson) {
@@ -8365,6 +8420,9 @@ async function updateAdminProjectTaskAsanaLinks(createdTasks, projectGid, projec
 }
 
 async function createAdminAsanaProjectFromPreview(token, preview, projectName, runId = "") {
+  // Airtable attachment URLs are temporary. Refresh them before the Asana
+  // project exists so a stale cached URL cannot leave another project shell.
+  const freshAttachmentsByRecordId = await adminFreshTaskAttachmentsByRecordId(preview.tasks);
   const projectGid = await instantiateAdminAsanaProject(token, projectName);
   if (runId) {
     await updateAdminProjectCreationResult(runId, "project_created", {
@@ -8412,18 +8470,26 @@ async function createAdminAsanaProjectFromPreview(token, preview, projectName, r
   }
 
   const createdTasks = [];
+  const attachmentWarnings = [];
   let rootTaskCount = 0;
   let subtaskCount = 0;
 
   async function createTree(task, parentGid = null) {
     const sectionGid = sectionByLabel[projectCreatorNormalizeKey(task.asanaSection || task.phaseLabel || "Unassigned")];
     const asanaTask = await adminCreateAsanaTask(token, projectGid, sectionGid, parentGid, task, preview, registry, userGidsByEmail);
-    await adminUploadTaskAttachments(token, asanaTask.gid, task.attachment_files_json || []);
-    createdTasks.push({
+    const createdTask = {
       nativeKey: task.nativeKey,
       asanaTaskGid: asanaTask.gid,
       parentAsanaTaskGid: parentGid
-    });
+    };
+    createdTasks.push(createdTask);
+    // Save each link immediately so any later failure remains visible and recoverable.
+    await updateAdminProjectTaskAsanaLink(createdTask, projectGid, projectName);
+    const attachments = freshAttachmentsByRecordId.has(task.task_record_id)
+      ? freshAttachmentsByRecordId.get(task.task_record_id)
+      : (task.attachment_files_json || []);
+    const warnings = await adminUploadTaskAttachments(token, asanaTask.gid, attachments);
+    attachmentWarnings.push(...warnings.map(warning => ({ taskName: task.task_name, ...warning })));
     if (parentGid) subtaskCount += 1;
     else rootTaskCount += 1;
     for (const child of childrenByParentKey.get(task.nativeKey) || []) {
@@ -8441,6 +8507,7 @@ async function createAdminAsanaProjectFromPreview(token, preview, projectName, r
     projectName,
     rootTaskCount,
     subtaskCount,
+    attachmentWarnings,
     createdTasks
   };
 }
@@ -8547,6 +8614,12 @@ async function handleAdminProjectCreate(req) {
       errorMessage: error.message || "Project creation failed.",
       statusCode: error.statusCode || 500
     };
+    console.error("[hawley-project-creator]", JSON.stringify({
+      runId,
+      projectName,
+      statusCode: failure.statusCode,
+      error: failure.errorMessage
+    }));
     await updateAdminProjectCreationResult(runId, "failed", failure);
     throw error;
   }
@@ -8621,6 +8694,10 @@ async function handleAdminProjectCreationCleanup(req) {
   } finally {
     client.release();
   }
+}
+
+async function updateAdminProjectTaskAsanaLink(createdTask, projectGid, projectName) {
+  await updateAdminProjectTaskAsanaLinks([createdTask], projectGid, projectName);
 }
 
 function runAdminProjectDownstreamRebuild() {
