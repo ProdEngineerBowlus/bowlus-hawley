@@ -346,7 +346,7 @@
       payload = { message: text };
     }
     if (!response.ok) {
-      const error = new Error(payload.message || `Request failed ${response.status}`);
+      const error = new Error(payload.message || payload.error || `Request failed ${response.status}`);
       error.status = response.status;
       error.payload = payload;
       throw error;
@@ -1143,6 +1143,7 @@
     const isVinProject = projectType === "VIN";
     const selectedVin = String(project.selectedVin || state.selectedVin || "");
     const projectName = state.projectName || preview?.projectName || "";
+    const latestRun = (project.creationRuns || [])[0] || null;
     return `
       <div class="content-stack" id="project-creator">
         <section>
@@ -1154,6 +1155,7 @@
             ${selectedVin ? pill(`VIN ${selectedVin}`, "blue") : ""}
             ${state.projectLoading ? pill("Loading", "warn") : ""}
           </div>
+          ${latestRun?.status === "failed" ? `<div class="notice risk-text" style="margin-top: 12px;"><strong>Latest create failed: ${escapeHtml(latestRun.project_name || "Unnamed project")}</strong><br>${escapeHtml(latestRun.error_message || "No failure detail was recorded.")}</div>` : ""}
         </section>
         <section class="panel">
           <div class="panel-header">
@@ -1239,7 +1241,7 @@
     const tasks = preview.tasks || [];
     const skipped = preview.skipped || {};
     const sourceCounts = preview.sourceCounts || {};
-    const createBlocked = !preview.writeEnabled || !preview.creatableTaskCount || preview.existingSyncedTasks || preview.existingLegacyTasks;
+    const createBlocked = !preview.writeEnabled || !preview.creatableTaskCount || preview.existingSyncedTasks || preview.existingLegacyTasks || preview.existingNativePendingTasks;
     const projectName = state.projectName || preview.projectName;
     const scopeRows = preview.scheduleRows?.length ? preview.scheduleRows : (preview.schedule ? [preview.schedule] : []);
     const startDates = scopeRows.map(row => row.start_date).filter(Boolean).sort();

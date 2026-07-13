@@ -7637,7 +7637,7 @@ async function adminProjectCreatorPayload(url) {
   const cycleNumber = await selectedAdminCycleNumber(requestedCycle);
   const requestedProjectName = String(url.searchParams.get("projectName") || "").trim();
 
-  const [cyclesResult, phaseResult, scheduleData] = await Promise.all([
+  const [cyclesResult, phaseResult, scheduleData, creationRunsResult] = await Promise.all([
     pool.query(`
       select
         cycle_number,
@@ -7664,7 +7664,29 @@ async function adminProjectCreatorPayload(url) {
       group by primary_phase_record_id, coalesce(primary_phase_name, 'Unassigned')
       order by phase_name
     `),
-    adminProjectCreatorScheduleData(projectType, cycleNumber)
+    adminProjectCreatorScheduleData(projectType, cycleNumber),
+    pool.query(`
+      select
+        project_creation_run_id,
+        project_name,
+        project_type,
+        status,
+        actor_email,
+        cycle_label,
+        phase_name,
+        vin,
+        task_count,
+        estimated_seconds,
+        asana_project_gid,
+        root_task_count,
+        subtask_count,
+        error_message,
+        created_at::text,
+        completed_at::text
+      from hb.project_creation_runs
+      order by created_at desc
+      limit 10
+    `)
   ]);
 
   let selectedVin = projectCreatorVinNumber(url.searchParams.get("vin"));
@@ -7695,6 +7717,10 @@ async function adminProjectCreatorPayload(url) {
     scheduleRows: scheduleData.scheduleRows,
     vinChoices: scheduleData.vinChoices,
     taskTemplatePhases: phaseResult.rows.map(row => ({
+      ...row,
+      estimatedHours: secondsToHours(row.estimated_seconds)
+    })),
+    creationRuns: creationRunsResult.rows.map(row => ({
       ...row,
       estimatedHours: secondsToHours(row.estimated_seconds)
     })),
@@ -8380,6 +8406,12 @@ async function handleAdminProjectCreate(req) {
     throw actionError("This project scope already has legacy task instances. Pick a clean future VIN/cycle scope or migrate those rows before using the Postgres-first test create.", 409, {
       code: "PROJECT_TASKS_ALREADY_EXIST",
       existingLegacyTasks: preview.existingLegacyTasks
+    });
+  }
+  if (preview.existingNativePendingTasks) {
+    throw actionError("This project scope has a pending or failed Hawley creation run. Inspect the latest run before retrying so an Asana project is not duplicated.", 409, {
+      code: "PROJECT_CREATE_PENDING_REVIEW",
+      existingNativePendingTasks: preview.existingNativePendingTasks
     });
   }
 
