@@ -943,7 +943,7 @@ a {
 
 .pace-row {
   display: grid;
-  grid-template-columns: 56px minmax(460px, 1fr) minmax(140px, 0.2fr) minmax(420px, 0.7fr);
+  grid-template-columns: 56px minmax(460px, 1fr) minmax(140px, 0.2fr) minmax(340px, 420px);
   align-items: center;
   gap: 16px;
   min-height: 118px;
@@ -1109,7 +1109,9 @@ a {
 .pace-spark {
   width: 100%;
   min-width: 222px;
+  max-width: 420px;
   min-height: 136px;
+  justify-self: end;
   display: grid;
   gap: 5px;
   align-content: center;
@@ -1451,6 +1453,8 @@ a {
     grid-column: 2 / -1;
     width: 100%;
     min-width: 0;
+    max-width: none;
+    justify-self: stretch;
   }
 
   .rail {
