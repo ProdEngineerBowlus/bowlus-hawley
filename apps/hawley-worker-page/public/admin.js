@@ -894,6 +894,7 @@
             const status = computedPhaseStatus(row, cycleProgress);
             const paceSignal = phasePaceSignal(row, cycleProgress);
             const paceSignalTone = paceSignal === "Behind Pace" ? "warn" : "good";
+            const showPaceSignal = status !== "Queued" && status !== "Complete";
             const tone = toneForPacingStatus(status);
             const completed = Number(row.completedHours || 0);
             const remaining = Number(row.remainingHours || 0);
@@ -933,7 +934,7 @@
                 <div class="pace-copy">
                   <div class="pace-status-line">
                     <strong>${escapeHtml(status)}</strong>
-                    <span class="pace-signal-chip ${escapeAttr(paceSignalTone)}">${escapeHtml(paceSignal)}</span>
+                    ${showPaceSignal ? `<span class="pace-signal-chip ${escapeAttr(paceSignalTone)}">${escapeHtml(paceSignal)}</span>` : ""}
                     ${shiftChip ? `<span class="pace-shift-chip">${escapeHtml(shiftChip)}</span>` : ""}
                   </div>
                   <small>${escapeHtml(formatHours(remaining))} remaining / ${escapeHtml(formatNumber(workerCount))} worker${workerCount === 1 ? "" : "s"} = ${escapeHtml(hoursPerWorker === null ? "--" : formatHours(hoursPerWorker))} per worker</small>
