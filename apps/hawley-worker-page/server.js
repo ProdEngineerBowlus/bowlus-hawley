@@ -18,7 +18,7 @@ const staticDir = path.join(appDir, "public");
 
 const HOST = process.env.HAWLEY_WORKER_HOST || (process.env.PORT ? "0.0.0.0" : "127.0.0.1");
 const PORT = Number(process.env.PORT || process.env.HAWLEY_WORKER_PORT || 5273);
-const APP_BUILD_LABEL = "hawley-admin-dashboard-trim-v1";
+const APP_BUILD_LABEL = "hawley-true-phase-pacing-v1";
 const APP_BUILD_COMMIT = process.env.SOURCE_COMMIT ||
   process.env.COMMIT_SHA ||
   process.env.GIT_SHA ||
@@ -227,7 +227,7 @@ function sendError(res, status, message, details = {}) {
 
 function publicErrorMessage(error) {
   const message = error.message || "";
-  if (/hawley_worker_page_assignments|hawley_cycle_calendar|hawley_reporting_day_summary|worker_daily_utilization|phase_cycle_load_rev1|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|task_templates|production_schedule|airtable_tasks|airtable_production|airtable_vins|airtable_models|hb\.vins|hb\.models|project_creation_runs|jsonb_display_text|task_transition_events|time_sessions|transition_category_catalog|app_users|app_sessions|app_auth_events/.test(message)) {
+  if (/hawley_worker_page_assignments|hawley_cycle_calendar|hawley_reporting_day_summary|worker_daily_utilization|phase_cycle_load_rev1|phase_cycle_pace_overrides|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|task_templates|production_schedule|airtable_tasks|airtable_production|airtable_vins|airtable_models|hb\.vins|hb\.models|project_creation_runs|jsonb_display_text|task_transition_events|time_sessions|transition_category_catalog|app_users|app_sessions|app_auth_events/.test(message)) {
     return {
       status: 503,
       message: "Hawley worker read model is not migrated yet. Run npm run pg:migrate."
@@ -6817,6 +6817,7 @@ function addAdminDebtHours(tier, phaseName, hours) {
 function adminPhasePacingStatus(row, cycleProgressPct) {
   const remainingHours = Number(row.remainingHours || 0);
   if (remainingHours <= 0.05) return "Complete";
+  if (row.truePace?.status === "queued") return "Queued";
   if (cycleProgressPct === null || cycleProgressPct === undefined) return row.status || "No signal";
   if (Number(row.paceDeltaPct || 0) >= 0) return "On pace";
   if (Number(row.paceDeltaPct || 0) <= -10) return "Behind pace";
@@ -6833,6 +6834,72 @@ function adminPhaseCapacityStatus(row) {
   if (remainingHours > capacityHours + 0.05) return "Off track";
   if (pacingStatus.includes("behind") || pacingStatus.includes("watch")) return "At risk";
   return "On track";
+}
+
+function adminPhaseLabelKey(value) {
+  return projectCreatorNormalizeKey(value);
+}
+
+function adminTruePaceForPhase(phaseName, cycleStatus, workdays, override, today = todayIso()) {
+  const defaultStartDate = cycleStatus.startDate || "";
+  const cycleEndDate = cycleStatus.endDate || "";
+  const phaseLabel = phaseName || "Unassigned";
+  const trueStartDate = String(override?.true_start_date || override?.trueStartDate || defaultStartDate || "").slice(0, 10);
+  const allWorkdays = Array.isArray(workdays) ? workdays : [];
+  const startIndex = Math.max(0, allWorkdays.indexOf(trueStartDate));
+  const hasOverride = Boolean(override?.true_start_date || override?.trueStartDate);
+  const trueWindow = allWorkdays.filter(date => !trueStartDate || date >= trueStartDate);
+  const effectiveToday = cycleEndDate && today > cycleEndDate ? cycleEndDate : today;
+  const elapsedWorkdays = trueStartDate && effectiveToday >= trueStartDate
+    ? trueWindow.filter(date => date <= effectiveToday).length
+    : 0;
+  const totalWorkdays = trueWindow.length || Number(cycleStatus.totalWorkdays || 0) || null;
+  const remainingWorkdays = totalWorkdays
+    ? (
+        cycleEndDate && today > cycleEndDate
+          ? 0
+          : trueWindow.filter(date => date >= (effectiveToday >= trueStartDate ? effectiveToday : trueStartDate)).length
+      )
+    : null;
+  const progressPct = totalWorkdays
+    ? round(Math.max(0, Math.min(100, (elapsedWorkdays / totalWorkdays) * 100)), 1)
+    : cycleStatus.progressPct;
+  const shiftWorkdays = hasOverride ? startIndex : 0;
+  const capacityWorkdays = today < trueStartDate
+    ? totalWorkdays
+    : remainingWorkdays;
+  const capacityWorkdayRatio = cycleStatus.totalWorkdays
+    ? Math.max(0, Math.min(1, Number(capacityWorkdays || 0) / Number(cycleStatus.totalWorkdays || 1)))
+    : null;
+  const status = hasOverride && today < trueStartDate
+    ? "queued"
+    : hasOverride && shiftWorkdays > 0
+      ? "shifted"
+      : hasOverride
+        ? "override"
+        : "default";
+
+  return {
+    phaseLabel,
+    phaseLabelKey: adminPhaseLabelKey(phaseLabel),
+    hasOverride,
+    status,
+    trueStartDate,
+    defaultStartDate,
+    cycleEndDate,
+    trueStartDateIsWorkday: trueStartDate ? allWorkdays.includes(trueStartDate) : false,
+    startWorkdayIndex: shiftWorkdays,
+    shiftWorkdays,
+    elapsedWorkdays,
+    totalWorkdays,
+    remainingWorkdays,
+    progressPct,
+    standardCycleProgressPct: cycleStatus.progressPct,
+    capacityWorkdayRatio,
+    note: override?.note || "",
+    updatedBy: override?.updated_by || "",
+    updatedAt: override?.updated_at || ""
+  };
 }
 
 function adminMergeCurrentRowsForPresentation(rows) {
@@ -6965,6 +7032,45 @@ async function adminPlhMetricsPayload() {
 
   const cycleStatus = adminCycleStatus(cycleResult.rows[0] || null);
   const currentCycleNumber = cycleStatus.cycleNumber;
+  const cycleRow = cycleResult.rows[0] || {};
+  const cycleHolidays = holidayDatesFromField(cycleRow.holidays, cycleStatus.startDate || cycleStatus.endDate);
+  const cycleWorkdayList = cycleWorkdays(cycleStatus.startDate, cycleStatus.endDate, cycleHolidays, cycleStatus.totalWorkdays);
+  const paceOverrideResult = currentCycleNumber
+    ? await pool.query(
+      `
+        select
+          phase_cycle_pace_override_id,
+          cycle_number,
+          cycle_label,
+          phase_label,
+          phase_label_key,
+          true_start_date::text,
+          note,
+          active,
+          updated_by,
+          updated_at::text
+        from hb.phase_cycle_pace_overrides
+        where cycle_number = $1::int
+          and active
+      `,
+      [currentCycleNumber]
+    )
+    : { rows: [] };
+  const paceOverrideByPhase = new Map(
+    paceOverrideResult.rows.map(row => [row.phase_label_key || adminPhaseLabelKey(row.phase_label), row])
+  );
+  const truePaceByPhase = new Map();
+  const truePaceForPhase = (phaseName) => {
+    const presentationName = adminPresentationPhaseName(phaseName || "Unassigned");
+    const key = adminPhaseLabelKey(presentationName);
+    if (!truePaceByPhase.has(key)) {
+      truePaceByPhase.set(
+        key,
+        adminTruePaceForPhase(presentationName, cycleStatus, cycleWorkdayList, paceOverrideByPhase.get(key), today)
+      );
+    }
+    return truePaceByPhase.get(key);
+  };
   const carryoverCycleNumbers = baselineCycleNumber && currentCycleNumber
     ? Array.from(
       { length: Math.max(currentCycleNumber - baselineCycleNumber - 1, 0) },
@@ -7187,23 +7293,31 @@ async function adminPlhMetricsPayload() {
   const phasePacing = currentPresentationRows
     .map(row => {
         const capacity = capacityByPresentation.get(row.phaseName) || capacityByPhase.get(row.phaseKey) || {};
+        const truePace = truePaceForPhase(row.phaseName);
+        const rowCycleProgressPct = truePace.progressPct ?? cycleProgressPct;
         const rowCompletionPct = row.totalLoadHours ? round((row.completedHours / row.totalLoadHours) * 100, 1) : null;
-        const rowExpectedHours = cycleProgressPct === null || cycleProgressPct === undefined
+        const rowExpectedHours = rowCycleProgressPct === null || rowCycleProgressPct === undefined
           ? null
-          : round(row.totalLoadHours * (cycleProgressPct / 100), 2);
+          : round(row.totalLoadHours * (rowCycleProgressPct / 100), 2);
         const rowPaceDeltaHours = rowExpectedHours === null ? null : round(row.completedHours - rowExpectedHours, 2);
-        const rowPaceDeltaPct = rowCompletionPct === null || cycleProgressPct === null || cycleProgressPct === undefined
+        const rowPaceDeltaPct = rowCompletionPct === null || rowCycleProgressPct === null || rowCycleProgressPct === undefined
           ? null
-          : round(rowCompletionPct - cycleProgressPct, 1);
+          : round(rowCompletionPct - rowCycleProgressPct, 1);
+        const capacityHours = truePace.capacityWorkdayRatio === null || truePace.capacityWorkdayRatio === undefined
+          ? round(capacity.capacityHours || 0, 2)
+          : round(Number(capacity.fullCycleCapacityHours || 0) * Number(truePace.capacityWorkdayRatio || 0), 2);
         const payload = {
           ...row,
           completionPct: rowCompletionPct,
-          cycleProgressPct,
+          cycleProgressPct: rowCycleProgressPct,
+          standardCycleProgressPct: cycleProgressPct,
+          trueCycleProgressPct: rowCycleProgressPct,
+          truePace,
           expectedCompletedHours: rowExpectedHours,
           paceDeltaHours: rowPaceDeltaHours,
           paceDeltaPct: rowPaceDeltaPct,
           workerCount: Number(capacity.workerCount || 0),
-          capacityHours: round(capacity.capacityHours || 0, 2),
+          capacityHours,
           fullCycleCapacityHours: round(capacity.fullCycleCapacityHours || 0, 2),
           bankRemainingHours: round(capacity.bankRemainingHours || 0, 2),
           assignedHoursTotal: round(capacity.assignedHoursTotal || 0, 2)
@@ -7214,11 +7328,20 @@ async function adminPlhMetricsPayload() {
           capacityDeltaHours: Math.abs(capacityDeltaSignedHours),
           capacityDeltaSignedHours,
           capacityLabel: capacityDeltaSignedHours >= 0 ? "Cushion" : "Gap",
-          status: adminPhasePacingStatus(payload, cycleProgressPct),
+          status: adminPhasePacingStatus(payload, rowCycleProgressPct),
           capacityStatus: adminPhaseCapacityStatus({ ...payload, capacityDeltaHours: capacityDeltaSignedHours })
         };
       })
     .sort((left, right) => Number(left.paceDeltaHours || -9999) - Number(right.paceDeltaHours || -9999));
+  const truePacePhases = phasePacing.map(row => row.truePace);
+  const truePacePhaseKeys = new Set(truePacePhases.map(row => row.phaseLabelKey).filter(Boolean));
+  for (const override of paceOverrideResult.rows) {
+    const overrideKey = override.phase_label_key || adminPhaseLabelKey(override.phase_label);
+    if (truePacePhaseKeys.has(overrideKey)) continue;
+    const truePace = adminTruePaceForPhase(override.phase_label, cycleStatus, cycleWorkdayList, override, today);
+    truePacePhases.push(truePace);
+    truePacePhaseKeys.add(truePace.phaseLabelKey);
+  }
 
   const debtMatrix = Array.from(matrix.values())
     .map(row => {
@@ -7287,6 +7410,16 @@ async function adminPlhMetricsPayload() {
     },
     scheduleAlignment,
     phasePacing,
+    truePace: {
+      cycleNumber: currentCycleNumber,
+      cycleLabel: cycleStatus.label,
+      cycleStartDate: cycleStatus.startDate,
+      cycleEndDate: cycleStatus.endDate,
+      workdays: cycleWorkdayList,
+      overrideCount: paceOverrideResult.rows.length,
+      source: "hb.phase_cycle_pace_overrides",
+      phases: truePacePhases
+    },
     debtMatrix,
     daily: {
       date: today,
@@ -7321,6 +7454,7 @@ async function adminPlhMetricsPayload() {
       scheduleAlignmentPhaseCount: scheduleAlignment.phaseTotals.length,
       capacityPhaseCount: capacityByPhase.size,
       capacityPresentationPhaseCount: capacityByPresentation.size,
+      truePaceOverrideCount: paceOverrideResult.rows.length,
       phaseFilterActive: ADMIN_PLH_PHASES.size > 0,
       phaseFilterValues: Array.from(ADMIN_PLH_PHASES)
     },
@@ -7518,6 +7652,171 @@ async function adminProjectCreatorPayload(url) {
       estimatedHours: secondsToHours(row.estimated_seconds)
     })),
     preview
+  };
+}
+
+async function adminCycleRowForNumber(cycleNumber) {
+  const result = await pool.query(
+    `
+      with cycle_rows as (
+        select
+          cycle_record_id,
+          cycle_number,
+          cycle_label,
+          start_date,
+          end_date,
+          days_in_cycle,
+          holidays,
+          cycle_percent,
+          0 as source_rank
+        from hb.cycles
+        where cycle_number = $1::int
+        union all
+        select
+          max(cycle_record_id) as cycle_record_id,
+          cycle_number,
+          coalesce(max(nullif(short_cycle_label, '')), max(nullif(cycle_label, '')), 'C' || cycle_number::text) as cycle_label,
+          min(start_date) as start_date,
+          max(end_date) as end_date,
+          max(days_in_cycle) as days_in_cycle,
+          null::text as holidays,
+          null::numeric as cycle_percent,
+          1 as source_rank
+        from hb.production_schedule
+        where cycle_number = $1::int
+        group by cycle_number
+      )
+      select
+        cycle_record_id,
+        cycle_number,
+        cycle_label,
+        start_date::text,
+        end_date::text,
+        days_in_cycle,
+        holidays,
+        cycle_percent
+      from cycle_rows
+      order by source_rank, start_date nulls last
+      limit 1
+    `,
+    [cycleNumber]
+  );
+  return result.rows[0] || null;
+}
+
+async function handleAdminPhaseCyclePaceOverride(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const cycleNumber = adminCycleNumber(body.cycleNumber || body.cycle);
+  const phaseLabel = adminPresentationPhaseName(body.phaseLabel || body.phase || "");
+  const phaseLabelKey = adminPhaseLabelKey(phaseLabel);
+  const reset = Boolean(body.reset);
+
+  if (!cycleNumber) {
+    throw actionError("Cycle number is required.", 400, { code: "CYCLE_REQUIRED" });
+  }
+  if (!phaseLabel || !phaseLabelKey) {
+    throw actionError("Phase label is required.", 400, { code: "PHASE_REQUIRED" });
+  }
+
+  const cycleRow = await adminCycleRowForNumber(cycleNumber);
+  if (!cycleRow) {
+    throw actionError(`Cycle C${cycleNumber} was not found in Hawley.`, 404, { code: "CYCLE_NOT_FOUND" });
+  }
+
+  if (reset) {
+    await writePool.query(
+      `
+        delete from hb.phase_cycle_pace_overrides
+        where cycle_number = $1::int
+          and phase_label_key = $2
+      `,
+      [cycleNumber, phaseLabelKey]
+    );
+    return {
+      ok: true,
+      action: "reset",
+      cycleNumber,
+      phaseLabel
+    };
+  }
+
+  const trueStartDate = String(body.trueStartDate || body.true_start_date || "").slice(0, 10);
+  if (!isIsoDate(trueStartDate)) {
+    throw actionError("True start date must be YYYY-MM-DD.", 400, { code: "TRUE_START_DATE_REQUIRED" });
+  }
+
+  const cycleStatus = adminCycleStatus(cycleRow);
+  const holidays = holidayDatesFromField(cycleRow.holidays, cycleStatus.startDate || cycleStatus.endDate);
+  const workdays = cycleWorkdays(cycleStatus.startDate, cycleStatus.endDate, holidays, cycleStatus.totalWorkdays);
+  if (!workdays.includes(trueStartDate)) {
+    throw actionError("True start date must be a workday inside the selected cycle.", 409, {
+      code: "TRUE_START_NOT_WORKDAY",
+      cycleNumber,
+      phaseLabel,
+      trueStartDate,
+      cycleStartDate: cycleStatus.startDate,
+      cycleEndDate: cycleStatus.endDate,
+      workdays
+    });
+  }
+
+  const note = String(body.note || "").trim().slice(0, 1000);
+  const actorEmail = actor?.email || actor?.username || "";
+  const result = await writePool.query(
+    `
+      insert into hb.phase_cycle_pace_overrides (
+        phase_cycle_pace_override_id,
+        cycle_number,
+        cycle_label,
+        phase_label,
+        phase_label_key,
+        true_start_date,
+        note,
+        active,
+        created_by,
+        updated_by,
+        created_at,
+        updated_at
+      )
+      values ($1, $2::int, $3, $4, $5, $6::date, $7, true, $8, $8, now(), now())
+      on conflict (cycle_number, phase_label_key)
+      do update set
+        cycle_label = excluded.cycle_label,
+        phase_label = excluded.phase_label,
+        true_start_date = excluded.true_start_date,
+        note = excluded.note,
+        active = true,
+        updated_by = excluded.updated_by,
+        updated_at = now()
+      returning
+        phase_cycle_pace_override_id,
+        cycle_number,
+        cycle_label,
+        phase_label,
+        phase_label_key,
+        true_start_date::text,
+        note,
+        updated_by,
+        updated_at::text
+    `,
+    [
+      crypto.randomUUID(),
+      cycleNumber,
+      cycleStatus.label || cycleRow.cycle_label || `C${cycleNumber}`,
+      phaseLabel,
+      phaseLabelKey,
+      trueStartDate,
+      note || null,
+      actorEmail
+    ]
+  );
+
+  return {
+    ok: true,
+    action: "saved",
+    override: result.rows[0]
   };
 }
 
@@ -8136,6 +8435,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/project-creator/create" && req.method === "POST") {
       sendJson(res, 200, await handleAdminProjectCreate(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/phase-cycle-pacing" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminPhaseCyclePaceOverride(req));
       return;
     }
 

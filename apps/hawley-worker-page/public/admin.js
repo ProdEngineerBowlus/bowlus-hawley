@@ -15,7 +15,8 @@
     error: "",
     loginPending: false,
     loginError: "",
-    createMessage: ""
+    createMessage: "",
+    dashboardMessage: ""
   };
 
   function escapeHtml(value) {
@@ -143,11 +144,21 @@
         ? explicitTotal
         : Number(row.completedHours || 0) + Number(row.remainingHours || 0));
     }, 0);
+    let hasExplicitTarget = false;
+    const expectedLoad = safeRows.reduce((sum, row) => {
+      const explicitTotal = Number(row.totalLoadHours);
+      const rowTotal = Number.isFinite(explicitTotal) && explicitTotal > 0
+        ? explicitTotal
+        : Number(row.completedHours || 0) + Number(row.remainingHours || 0);
+      const target = Number(row.trueCycleProgressPct ?? row.cycleProgressPct ?? cycleProgress);
+      if (Number.isFinite(target)) hasExplicitTarget = true;
+      return sum + (Number.isFinite(target) ? rowTotal * (target / 100) : 0);
+    }, 0);
     const completed = safeRows.reduce((sum, row) => sum + Number(row.completedHours || 0), 0);
     const remaining = safeRows.reduce((sum, row) => sum + Number(row.remainingHours || 0), 0);
     const capacity = safeRows.reduce((sum, row) => sum + Number(row.capacityHours || 0), 0);
     const completionPct = totalLoad > 0 ? (completed / totalLoad) * 100 : null;
-    const targetPct = Number(cycleProgress);
+    const targetPct = totalLoad > 0 && hasExplicitTarget ? (expectedLoad / totalLoad) * 100 : Number(cycleProgress);
     const efficiencyPct = completionPct !== null && Number.isFinite(targetPct) && targetPct > 0
       ? (completionPct / targetPct) * 100
       : null;
@@ -236,19 +247,26 @@
     `;
   }
 
-  function renderPaceSparkline({ totalLoad, completed, remaining, idealDailyCapacity, currentDailyPace, totalWorkdays, elapsedWorkdays, scaleMax }) {
+  function renderPaceSparkline({ totalLoad, completed, remaining, idealDailyCapacity, currentDailyPace, totalWorkdays, elapsedWorkdays, scaleMax, truePace }) {
     const width = 222;
     const height = 72;
     const days = Math.max(2, Math.round(Number(totalWorkdays) || 10));
     const safeTotal = Math.max(Number(totalLoad) || (Number(completed) || 0) + (Number(remaining) || 0), 1);
     const safeCompleted = Math.max(Number(completed) || 0, 0);
     const elapsed = clamp(Number(elapsedWorkdays) || 0, 0, days);
-    const safeIdealDaily = Number(idealDailyCapacity) || (safeTotal / days);
-    const safeCurrentDaily = Number(currentDailyPace) || (elapsed > 0 ? safeCompleted / elapsed : 0);
-    const idealPoints = Array.from({ length: days }, (_, index) => Math.max(safeTotal - safeIdealDaily * (index + 1), 0));
+    const startIndex = clamp(Number(truePace?.startWorkdayIndex || 0), 0, days - 1);
+    const trueWindowDays = Math.max(1, days - startIndex);
+    const trueElapsed = clamp(Number(truePace?.elapsedWorkdays ?? elapsed) || 0, 0, trueWindowDays);
+    const safeIdealDaily = Number(idealDailyCapacity) || (safeTotal / trueWindowDays);
+    const safeCurrentDaily = Number(currentDailyPace) || (trueElapsed > 0 ? safeCompleted / trueElapsed : 0);
+    const idealPoints = Array.from({ length: days }, (_, index) => {
+      if (index < startIndex) return safeTotal;
+      return Math.max(safeTotal - safeIdealDaily * (index - startIndex + 1), 0);
+    });
     const pacePoints = Array.from({ length: days }, (_, index) => {
+      if (index < startIndex) return safeTotal;
       if (!safeCurrentDaily) return safeTotal;
-      return Math.max(safeTotal - safeCurrentDaily * (index + 1), 0);
+      return Math.max(safeTotal - safeCurrentDaily * (index - startIndex + 1), 0);
     });
     const maxValue = Math.max(Number(scaleMax) || 0, safeTotal, ...idealPoints, ...pacePoints, 1);
     const elapsedIndex = clamp(Math.round(elapsed) - 1, 0, days - 1);
@@ -256,23 +274,29 @@
     const markerY = height - (Math.max(safeTotal - safeCompleted, 0) / maxValue) * height;
     const projectedRemainingAtEnd = pacePoints[pacePoints.length - 1] || 0;
     const currentDayLabel = `D${Math.max(1, Math.min(days, Math.round(elapsed) || 1))}/${days}`;
+    const trueStartX = days === 1 ? 0 : (startIndex / (days - 1)) * width;
+    const trueStartLabel = truePace?.hasOverride ? `start ${formatDate(truePace.trueStartDate)}` : "cycle start";
+    const preStartWidth = truePace?.hasOverride ? Math.max(0, trueStartX) : 0;
 
     return `
-      <div class="pace-spark" title="Target burn-down, current pace projection, and current remaining work.">
+      <div class="pace-spark" title="Target burn-down, current pace projection, true start, and current remaining work.">
         <svg viewBox="0 0 ${width} ${height}" aria-hidden="true">
+          ${preStartWidth ? `<rect x="0" y="0" width="${preStartWidth.toFixed(1)}" height="${height}" fill="rgba(115,199,242,0.08)" rx="3"></rect>` : ""}
           <line x1="0" y1="0" x2="${width}" y2="0" stroke="rgba(240,245,233,0.08)" stroke-width="1"></line>
           <line x1="0" y1="${(height / 2).toFixed(1)}" x2="${width}" y2="${(height / 2).toFixed(1)}" stroke="rgba(240,245,233,0.08)" stroke-width="1"></line>
           <line x1="0" y1="${height}" x2="${width}" y2="${height}" stroke="rgba(240,245,233,0.16)" stroke-width="1"></line>
+          ${truePace?.hasOverride ? `<line x1="${trueStartX.toFixed(1)}" y1="0" x2="${trueStartX.toFixed(1)}" y2="${height}" stroke="var(--blue)" stroke-width="2" stroke-dasharray="4 3"></line>` : ""}
           <line x1="${markerX.toFixed(1)}" y1="0" x2="${markerX.toFixed(1)}" y2="${height}" stroke="rgba(240,245,233,0.16)" stroke-width="1" stroke-dasharray="3 4"></line>
           <path d="${sparklinePath(idealPoints, width, height, maxValue)}" fill="none" stroke="var(--primary)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
           <path d="${sparklinePath(pacePoints, width, height, maxValue)}" fill="none" stroke="var(--warn)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
+          ${truePace?.hasOverride ? `<circle cx="${trueStartX.toFixed(1)}" cy="7" r="4" fill="var(--blue)" stroke="rgba(16,20,15,0.92)" stroke-width="2"></circle>` : ""}
           <circle cx="${markerX.toFixed(1)}" cy="${markerY.toFixed(1)}" r="4.6" fill="var(--ink)" stroke="rgba(16,20,15,0.92)" stroke-width="2"></circle>
         </svg>
         <div class="pace-spark-meta">
           <span>target</span>
           <span>pace</span>
           <span>${escapeHtml(currentDayLabel)}</span>
-          <span>${escapeHtml(formatHours(projectedRemainingAtEnd))} end</span>
+          <span>${escapeHtml(trueStartLabel)} / ${escapeHtml(formatHours(projectedRemainingAtEnd))} end</span>
         </div>
       </div>
     `;
@@ -515,10 +539,11 @@
   }
 
   function computedPhaseStatus(phase, fallbackCycleProgress = null) {
+    if (phase?.truePace?.status === "queued") return "Queued";
     const remaining = numberOrNull(phase?.remainingHours);
     const capacity = numberOrNull(phase?.capacityHours);
     const completion = numberOrNull(phase?.completionPct);
-    const cycle = numberOrNull(phase?.cyclePct) ?? numberOrNull(phase?.cycleProgressPct) ?? numberOrNull(fallbackCycleProgress);
+    const cycle = numberOrNull(phase?.trueCycleProgressPct) ?? numberOrNull(phase?.cyclePct) ?? numberOrNull(phase?.cycleProgressPct) ?? numberOrNull(fallbackCycleProgress);
     const status = String(phase?.status || "");
 
     if (remaining !== null && remaining <= 0.05) return "On Track";
@@ -526,6 +551,14 @@
     if (remaining !== null && capacity !== null && remaining > capacity + 0.05) return "Off Track";
     if (completion !== null && cycle !== null && completion + 0.01 < cycle) return "At Risk";
     return status || "On Track";
+  }
+
+  function truePaceChip(row) {
+    const truePace = row?.truePace || {};
+    if (!truePace.hasOverride) return "";
+    if (truePace.status === "queued") return `Starts ${formatDate(truePace.trueStartDate)}`;
+    const shift = Number(truePace.shiftWorkdays || 0);
+    return shift > 0 ? `Shifted +${formatNumber(shift)}d` : `True start ${formatDate(truePace.trueStartDate)}`;
   }
 
   function matrixCell(value) {
@@ -799,6 +832,8 @@
         ${rows.length ? renderCycleEfficiencyGauges(rows, cycleProgress) : ""}
         <div class="phase-pace-list">
           ${rows.map(row => {
+            const truePace = row.truePace || {};
+            const targetProgress = Number(row.trueCycleProgressPct ?? row.cycleProgressPct ?? cycleProgress);
             const status = computedPhaseStatus(row, cycleProgress);
             const tone = toneForPacingStatus(status);
             const completed = Number(row.completedHours || 0);
@@ -807,11 +842,14 @@
             const workerCount = Number(row.workerCount || 0);
             const hoursPerWorker = workerCount > 0 ? remaining / workerCount : null;
             const capacityHours = Number(row.capacityHours || 0);
-            const idealDailyCapacity = Number.isFinite(remainingWorkdays) && remainingWorkdays > 0
-              ? capacityHours / remainingWorkdays
+            const trueRemainingWorkdays = Number(truePace.remainingWorkdays ?? remainingWorkdays);
+            const trueElapsedWorkdays = Number(truePace.elapsedWorkdays ?? elapsedWorkdays);
+            const trueTotalWorkdays = Number(truePace.totalWorkdays || cycleDays);
+            const idealDailyCapacity = Number.isFinite(trueRemainingWorkdays) && trueRemainingWorkdays > 0
+              ? capacityHours / trueRemainingWorkdays
               : null;
             const idealWorkdays = idealDailyCapacity && idealDailyCapacity > 0 ? remaining / idealDailyCapacity : null;
-            const dailyPace = elapsedWorkdays && completed > 0 ? completed / elapsedWorkdays : null;
+            const dailyPace = trueElapsedWorkdays && completed > 0 ? completed / trueElapsedWorkdays : null;
             const projectedWorkdays = dailyPace && dailyPace > 0 ? remaining / dailyPace : null;
             const progress = clamp(row.completionPct, 0, 100).toFixed(1);
             const expectedDone = Number(row.expectedCompletedHours);
@@ -819,21 +857,27 @@
             const capacityDelta = Number(row.capacityDeltaSignedHours ?? row.capacityDeltaHours);
             const capacityLabel = row.capacityLabel || (Number.isFinite(capacityDelta) ? (capacityDelta >= 0 ? "Cushion" : "Gap") : "Capacity");
             const capacityDeltaText = Number.isFinite(capacityDelta) ? formatHours(Math.abs(capacityDelta)) : "n/a";
+            const shiftChip = truePaceChip(row);
             const detailItems = [
               ["Load", formatHours(totalLoad)],
               ["Done", formatHours(completed)],
               ["Open", formatHours(remaining)],
               ["Capacity", formatHours(capacityHours)],
               ["Expected", Number.isFinite(expectedDone) ? formatHours(expectedDone) : "n/a"],
-              ["Delta", Number.isFinite(paceDelta) ? formatSignedHours(paceDelta) : "n/a"]
+              ["Delta", Number.isFinite(paceDelta) ? formatSignedHours(paceDelta) : "n/a"],
+              ["True target", Number.isFinite(targetProgress) ? formatPercent(targetProgress) : "n/a"],
+              ["Cycle target", formatPercent(cycleProgress)]
             ];
             return `
               <div class="pace-row ${tone}">
                 <div class="pace-phase">${escapeHtml(phaseShortName(row.phaseName || row.phase))}</div>
                 <div class="pace-copy">
-                  <strong>${escapeHtml(status)}</strong>
+                  <div class="pace-status-line">
+                    <strong>${escapeHtml(status)}</strong>
+                    ${shiftChip ? `<span class="pace-shift-chip">${escapeHtml(shiftChip)}</span>` : ""}
+                  </div>
                   <small>${escapeHtml(formatHours(remaining))} remaining / ${escapeHtml(formatNumber(workerCount))} worker${workerCount === 1 ? "" : "s"} = ${escapeHtml(hoursPerWorker === null ? "--" : formatHours(hoursPerWorker))} per worker</small>
-                  <small>ideal ${escapeHtml(formatWorkdays(idealWorkdays))} | current pace ${escapeHtml(formatWorkdays(projectedWorkdays))}</small>
+                  <small>ideal ${escapeHtml(formatWorkdays(idealWorkdays))} | current pace ${escapeHtml(formatWorkdays(projectedWorkdays))}${truePace.hasOverride ? ` | true window ${escapeHtml(formatNumber(trueElapsedWorkdays))}/${escapeHtml(formatNumber(trueTotalWorkdays))} days` : ""}</small>
                   <div class="pace-detail-grid">
                     ${detailItems.map(([label, value]) => `
                       <span><em>${escapeHtml(label)}</em>${escapeHtml(value)}</span>
@@ -844,7 +888,7 @@
                   <div class="pace-meter-track">
                     <span class="pace-meter-fill ${escapeAttr(tone)}" style="width: ${progress}%"></span>
                   </div>
-                  <small>${escapeHtml(formatPercent(row.completionPct))} / ${escapeHtml(formatPercent(row.cyclePct ?? row.cycleProgressPct ?? cycleProgress))}</small>
+                  <small>${escapeHtml(formatPercent(row.completionPct))} / ${escapeHtml(formatPercent(targetProgress))}</small>
                   <small>${escapeHtml(capacityLabel)}: ${escapeHtml(capacityDeltaText)}</small>
                 </div>
                 ${renderPaceSparkline({
@@ -855,7 +899,8 @@
                   currentDailyPace: dailyPace,
                   totalWorkdays: cycleDays,
                   elapsedWorkdays,
-                  scaleMax: normalizedScaleHours
+                  scaleMax: normalizedScaleHours,
+                  truePace
                 })}
               </div>
             `;
@@ -930,6 +975,67 @@
     `;
   }
 
+  function renderTruePaceControls(plh) {
+    const truePace = plh?.truePace || {};
+    const phases = truePace.phases || [];
+    const cycleNumber = truePace.cycleNumber || plh?.cycleStatus?.cycleNumber || "";
+    const minDate = truePace.cycleStartDate || plh?.cycleStatus?.startDate || "";
+    const maxDate = truePace.cycleEndDate || plh?.cycleStatus?.endDate || "";
+    return `
+      <article class="panel config-inner-panel true-pace-panel">
+        <div class="panel-header">
+          <div>
+            <h3 class="panel-title">True Pace Starts</h3>
+            <p class="muted">Admin pacing overlay by dashboard phase label. This changes pace math only; task data stays untouched.</p>
+          </div>
+          <span class="pill ${Number(truePace.overrideCount || 0) ? "warn" : "good"}">${formatNumber(truePace.overrideCount || 0)} shifted</span>
+        </div>
+        <div class="panel-body table-wrap">
+          <table class="table true-pace-table">
+            <thead>
+              <tr>
+                <th>Phase Label</th>
+                <th>Default</th>
+                <th>True Start</th>
+                <th>Shift</th>
+                <th>Note</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${phases.map(row => {
+                const trueStart = row.trueStartDate || row.defaultStartDate || minDate;
+                const shiftText = row.hasOverride
+                  ? `${row.shiftWorkdays > 0 ? "+" : ""}${formatNumber(row.shiftWorkdays || 0)} workdays`
+                  : "Default";
+                return `
+                  <tr data-true-pace-row data-cycle-number="${escapeAttr(cycleNumber)}" data-phase-label="${escapeAttr(row.phaseLabel)}">
+                    <td>
+                      <strong>${escapeHtml(row.phaseLabel)}</strong>
+                      ${row.hasOverride ? `<br><small>${escapeHtml(truePaceChip({ truePace: row }))}</small>` : ""}
+                    </td>
+                    <td>${escapeHtml(formatDate(row.defaultStartDate))}</td>
+                    <td>
+                      <input class="table-input" type="date" data-true-pace-date min="${escapeAttr(minDate)}" max="${escapeAttr(maxDate)}" value="${escapeAttr(trueStart)}" />
+                    </td>
+                    <td>${escapeHtml(shiftText)}</td>
+                    <td>
+                      <input class="table-input" type="text" data-true-pace-note value="${escapeAttr(row.note || "")}" placeholder="Reason" />
+                    </td>
+                    <td class="true-pace-actions">
+                      <button class="btn primary compact" type="button" data-action="true-pace-save">Save</button>
+                      <button class="btn ghost compact" type="button" data-action="true-pace-reset" ${row.hasOverride ? "" : "disabled"}>Reset</button>
+                    </td>
+                  </tr>
+                `;
+              }).join("") || `<tr><td colspan="6">No current phase labels available for this cycle.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </article>
+    `;
+  }
+
   function renderConfigurationDrawer(plh, latestRuns) {
     const diagnostics = plh?.diagnostics || {};
     return `
@@ -942,6 +1048,7 @@
           <span class="section-tag">Open</span>
         </summary>
         <div class="config-drawer-body">
+          ${renderTruePaceControls(plh)}
           ${renderScheduleAlignment(plh)}
           <article class="panel config-inner-panel">
             <div class="panel-header">
@@ -968,6 +1075,7 @@
           <p class="muted">Checked ${escapeHtml(new Date(state.dashboard?.checkedAt || Date.now()).toLocaleString())}${escapeHtml(buildLabel)}</p>
         </section>
         ${state.dashboard?.plh ? "" : `<div class="notice risk">The admin API response did not include the PLH payload. Server build: ${escapeHtml(build.label || "unknown")}.</div>`}
+        ${state.dashboardMessage ? `<div class="notice">${escapeHtml(state.dashboardMessage)}</div>` : ""}
         ${renderPlhVisuals(plh)}
         ${renderConfigurationDrawer(plh, latestRuns)}
       </div>
@@ -1235,6 +1343,30 @@
       await loadAll();
     } else if (action === "logout") {
       await logout();
+    } else if (action === "true-pace-save" || action === "true-pace-reset") {
+      const row = event.target.closest("[data-true-pace-row]");
+      if (!row) return;
+      const phaseLabel = row.dataset.phaseLabel || "";
+      const cycleNumber = row.dataset.cycleNumber || "";
+      const dateInput = row.querySelector("[data-true-pace-date]");
+      const noteInput = row.querySelector("[data-true-pace-note]");
+      try {
+        const reset = action === "true-pace-reset";
+        await postJson("/api/admin/phase-cycle-pacing", {
+          cycleNumber,
+          phaseLabel,
+          trueStartDate: reset ? "" : dateInput?.value || "",
+          note: reset ? "" : noteInput?.value || "",
+          reset
+        });
+        state.dashboardMessage = reset
+          ? `Reset true pace start for ${phaseLabel}.`
+          : `Saved true pace start for ${phaseLabel}.`;
+        await loadDashboard();
+      } catch (error) {
+        state.dashboardMessage = error.message || "Could not save true pace start.";
+      }
+      render();
     } else if (action === "create-project") {
       try {
         const payload = await postJson("/api/admin/project-creator/create", {

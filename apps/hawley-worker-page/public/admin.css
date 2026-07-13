@@ -163,6 +163,12 @@ a {
   background: rgba(16, 20, 15, 0.34);
 }
 
+.btn.compact {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 0.78rem;
+}
+
 .btn:disabled {
   cursor: not-allowed;
   opacity: 0.48;
@@ -997,9 +1003,29 @@ a {
   gap: 7px;
 }
 
+.pace-status-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .pace-copy strong {
   color: var(--ink);
   font-size: 1.08rem;
+  font-weight: 900;
+}
+
+.pace-shift-chip {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(115, 199, 242, 0.42);
+  border-radius: 999px;
+  padding: 0 9px;
+  color: var(--blue);
+  background: rgba(115, 199, 242, 0.12);
+  font-size: 0.7rem;
   font-weight: 900;
 }
 
@@ -1245,6 +1271,40 @@ a {
 .table th {
   font-size: 0.76rem;
   text-transform: uppercase;
+}
+
+.table-input {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: #121710;
+  padding: 0 10px;
+}
+
+.true-pace-panel .panel-header {
+  align-items: flex-start;
+}
+
+.true-pace-panel .panel-header p {
+  margin: 5px 0 0;
+}
+
+.true-pace-table {
+  min-width: 960px;
+}
+
+.true-pace-table small {
+  color: var(--blue);
+  font-weight: 850;
+}
+
+.true-pace-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  white-space: nowrap;
 }
 
 .task-list {
