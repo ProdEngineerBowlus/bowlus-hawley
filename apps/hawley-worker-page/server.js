@@ -5727,6 +5727,17 @@ function projectCreatorScheduleCycleLabel(row) {
   return row?.short_cycle_label || row?.cycle_label || (row?.cycle_number ? `C${row.cycle_number}` : "");
 }
 
+function projectCreatorAsanaCycleLabel(row) {
+  const explicit = [row?.cycle_label, row?.short_cycle_label]
+    .map(value => String(value || "").trim())
+    .find(value => /^C\d{1,3}\.\d{2}$/i.test(value));
+  if (explicit) return explicit.toUpperCase();
+  const cycle = adminCycleNumber(row?.cycle_number || row?.short_cycle_label || row?.cycle_label);
+  const date = String(row?.start_date || row?.end_date || "");
+  const yearMatch = date.match(/^(\d{4})-/);
+  return cycle && yearMatch ? `C${cycle}.${yearMatch[1].slice(-2)}` : projectCreatorScheduleCycleLabel(row);
+}
+
 function projectCreatorSupportPhaseKey(value) {
   const compact = String(value || "")
     .trim()
@@ -8107,7 +8118,7 @@ function adminAsanaCustomFields(task, preview, registry) {
   adminPutTextCustomField(payload, registry, "SOP Link", task.document_link);
   adminPutTextCustomField(payload, registry, "Attachment summary", task.attachment_summary);
   adminPutDateCustomField(payload, registry, "Assigned On", schedule.start_date);
-  adminPutEnumCustomField(payload, registry, "Cycle", schedule.short_cycle_label || schedule.cycle_label);
+  adminPutEnumCustomField(payload, registry, "Cycle", projectCreatorAsanaCycleLabel(schedule));
   adminPutEnumCustomField(payload, registry, "Phase / Section", task.asanaSection || task.phaseLabel);
   adminPutEnumCustomField(payload, registry, "Model", projectCreatorArray(task.vinModelTypes)[0]);
   return payload;
@@ -8796,6 +8807,86 @@ function runAdminProjectDownstreamRebuild() {
   });
 }
 
+async function repairAuthorizedVin327CycleFields() {
+  const token = process.env.ASANA_PAT;
+  if (!token) return;
+  const runResult = await writePool.query(`
+    select project_creation_run_id, asana_project_gid, result_json
+    from hb.project_creation_runs
+    where status = 'success'
+      and vin = '327'
+      and asana_project_gid is not null
+      and coalesce(result_json ->> 'cycleFieldRepairAt', '') = ''
+    order by completed_at desc nulls last, created_at desc
+    limit 1
+  `);
+  const run = runResult.rows[0];
+  if (!run) return;
+
+  const taskResult = await writePool.query(`
+    select
+      ti.asana_task_gid,
+      ps.cycle_number,
+      ps.cycle_label,
+      ps.short_cycle_label,
+      ps.start_date::text,
+      ps.end_date::text
+    from hb.rev1_task_instances ti
+    join hb.production_schedule ps
+      on ps.production_record_id = ti.line_schedule_record_id
+    where ti.asana_project_gid = $1
+      and ti.asana_task_gid is not null
+    order by ti.task_order nulls last, ti.task_name
+  `, [run.asana_project_gid]);
+  if (!taskResult.rows.length) return;
+
+  const cycleField = await adminAsanaRequest(
+    token,
+    "/custom_fields/1203060130064229?opt_fields=enum_options.gid,enum_options.name,enum_options.enabled"
+  );
+  const optionByName = new Map(
+    (cycleField.enum_options || [])
+      .filter(option => option.enabled !== false)
+      .map(option => [projectCreatorNormalizeKey(option.name), option.gid])
+  );
+  const actions = [];
+  const missing = new Set();
+  for (const row of taskResult.rows) {
+    const label = projectCreatorAsanaCycleLabel(row);
+    const optionGid = optionByName.get(projectCreatorNormalizeKey(label));
+    if (!optionGid) {
+      missing.add(label);
+      continue;
+    }
+    actions.push({
+      method: "put",
+      relative_path: `/tasks/${row.asana_task_gid}`,
+      data: { custom_fields: { "1203060130064229": optionGid } }
+    });
+  }
+  if (missing.size) throw new Error(`VIN 327 cycle repair is missing Asana options: ${Array.from(missing).join(", ")}`);
+
+  for (let index = 0; index < actions.length; index += 10) {
+    const results = await adminAsanaRequest(token, "/batch", "POST", { actions: actions.slice(index, index + 10) });
+    const failed = (results || []).find(result => Number(result.status_code || 500) >= 400);
+    if (failed) throw new Error(`VIN 327 cycle repair batch failed with ${failed.status_code}.`);
+  }
+  await writePool.query(`
+    update hb.project_creation_runs
+    set result_json = coalesce(result_json, '{}'::jsonb) || jsonb_build_object(
+      'cycleFieldRepairAt', now()::text,
+      'cycleFieldRepairTasks', $2::int
+    )
+    where project_creation_run_id = $1
+  `, [run.project_creation_run_id, actions.length]);
+  console.log("[hawley-project-creator]", JSON.stringify({
+    action: "cycle_field_repair",
+    vin: 327,
+    projectGid: run.asana_project_gid,
+    updatedTasks: actions.length
+  }));
+}
+
 async function serveStatic(req, res, url) {
   const requested =
     url.pathname === "/" ? "index.html" :
@@ -9000,6 +9091,16 @@ async function startServer() {
   startNightlyRefreshScheduler();
   server.listen(PORT, HOST, () => {
     console.log(`Hawley worker pilot listening on http://${HOST}:${PORT}`);
+    // One-time, idempotent repair explicitly authorized for the first direct VIN 327 project.
+    setTimeout(() => {
+      repairAuthorizedVin327CycleFields().catch(error => {
+        console.error("[hawley-project-creator]", JSON.stringify({
+          action: "cycle_field_repair",
+          vin: 327,
+          error: error.message || String(error)
+        }));
+      });
+    }, 1000).unref?.();
   });
 }
 
