@@ -84,6 +84,11 @@ exceeds remaining capacity. A separate `On Pace` or `Behind Pace` chip compares
 completion with the phase's standard or true-phase target. This allows a phase
 to be capacity-covered while still showing that work needs to accelerate.
 
+Capacity uses active concurrent station staffing, not the total number of
+workers qualified for or assigned some tasks in a phase during the cycle. Phase
+F is capped at one concurrently assigned worker; additional Phase F-qualified
+workers do not multiply its pacing capacity.
+
 ## True Phase Pacing
 
 True pacing lets an admin shift the start date for a phase within a cycle

@@ -66,6 +66,9 @@ const ADMIN_PLH_PHASES = new Set(
     .map(formatPhaseName)
     .filter(Boolean)
 );
+const ADMIN_PHASE_ACTIVE_WORKER_CAPS = new Map([
+  ["Phase F", 1]
+]);
 const LIVE_WORKER_SOURCE = "hawley_worker_live_pilot";
 const APP_AUTH_ACTIVE = booleanEnv("HAWLEY_AUTH_ACTIVE", false);
 const APP_AUTH_SEED_ROSTER_ON_START = booleanEnv("HAWLEY_AUTH_SEED_ROSTER_ON_START", true);
@@ -7152,21 +7155,29 @@ async function adminPlhMetricsPayload() {
   for (const row of capacityResult.rows) {
     const phaseName = formatPhaseName(row.phase_name) || "Unassigned";
     const phaseKey = adminPhaseFamilyName(phaseName);
+    const qualifiedWorkerCount = Number(row.worker_count || 0);
+    const activeWorkerCap = ADMIN_PHASE_ACTIVE_WORKER_CAPS.get(phaseKey);
+    const activeWorkerCount = activeWorkerCap
+      ? Math.min(qualifiedWorkerCount, activeWorkerCap)
+      : qualifiedWorkerCount;
+    const activeStaffingRatio = qualifiedWorkerCount > 0 ? activeWorkerCount / qualifiedWorkerCount : 0;
     const existing = capacityByPhase.get(phaseKey) || {
       phaseName: phaseKey,
       phaseKey,
       workerCount: 0,
+      qualifiedWorkerCount: 0,
       capacityHours: 0,
       fullCycleCapacityHours: 0,
       bankRemainingHours: 0,
       assignedHoursTotal: 0
     };
-    const fullCycleCapacityHours = Number(row.effective_hours_bank || 0);
-    existing.workerCount += Number(row.worker_count || 0);
+    const fullCycleCapacityHours = Number(row.effective_hours_bank || 0) * activeStaffingRatio;
+    existing.workerCount += activeWorkerCount;
+    existing.qualifiedWorkerCount += qualifiedWorkerCount;
     existing.fullCycleCapacityHours = round(existing.fullCycleCapacityHours + fullCycleCapacityHours, 2);
     existing.capacityHours = round(existing.capacityHours + (fullCycleCapacityHours * remainingCapacityRatio), 2);
-    existing.bankRemainingHours = round(existing.bankRemainingHours + Number(row.remaining_bank_hours || 0), 2);
-    existing.assignedHoursTotal = round(existing.assignedHoursTotal + Number(row.assigned_hours_total || 0), 2);
+    existing.bankRemainingHours = round(existing.bankRemainingHours + (Number(row.remaining_bank_hours || 0) * activeStaffingRatio), 2);
+    existing.assignedHoursTotal = round(existing.assignedHoursTotal + (Number(row.assigned_hours_total || 0) * activeStaffingRatio), 2);
     capacityByPhase.set(phaseKey, existing);
   }
   const capacityByPresentation = new Map();
@@ -7176,12 +7187,14 @@ async function adminPlhMetricsPayload() {
       phaseName: presentationName,
       phaseKey: presentationName,
       workerCount: 0,
+      qualifiedWorkerCount: 0,
       capacityHours: 0,
       fullCycleCapacityHours: 0,
       bankRemainingHours: 0,
       assignedHoursTotal: 0
     };
     existing.workerCount += Number(capacity.workerCount || 0);
+    existing.qualifiedWorkerCount += Number(capacity.qualifiedWorkerCount || 0);
     existing.capacityHours = round(existing.capacityHours + Number(capacity.capacityHours || 0), 2);
     existing.fullCycleCapacityHours = round(existing.fullCycleCapacityHours + Number(capacity.fullCycleCapacityHours || 0), 2);
     existing.bankRemainingHours = round(existing.bankRemainingHours + Number(capacity.bankRemainingHours || 0), 2);
@@ -7315,6 +7328,7 @@ async function adminPlhMetricsPayload() {
           paceDeltaHours: rowPaceDeltaHours,
           paceDeltaPct: rowPaceDeltaPct,
           workerCount: Number(capacity.workerCount || 0),
+          qualifiedWorkerCount: Number(capacity.qualifiedWorkerCount || capacity.workerCount || 0),
           capacityHours,
           fullCycleCapacityHours: round(capacity.fullCycleCapacityHours || 0, 2),
           bankRemainingHours: round(capacity.bankRemainingHours || 0, 2),
