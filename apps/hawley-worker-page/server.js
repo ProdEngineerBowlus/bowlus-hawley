@@ -7282,21 +7282,15 @@ async function adminPlhMetricsPayload() {
   }
 
   const scheduleCurrentRows = (scheduleAlignment.phaseTotals || [])
-    .filter(row => Number(
-      row.phaseCycleTotalHours || row.phaseCycleCompletedHours || row.phaseCycleRemainingHours ||
-      row.mirrorTotalHours || row.mirrorCompletedHours || row.mirrorRemainingHours || 0
-    ) > 0)
+    // Current-cycle pacing is schedule scoped. Phase-cycle totals can also
+    // contain completed carryover or prototype work whose task instance shares
+    // the phase-cycle record but is not linked to a current schedule row.
+    .filter(row => Number(row.mirrorTotalHours || row.mirrorCompletedHours || row.mirrorRemainingHours || 0) > 0)
     .map(row => {
       const phaseName = row.phaseName || "Unassigned";
-      // The phase-cycle rollup includes both schedule-linked mirror tasks and
-      // phase work that has not been linked to a VIN schedule row. Using only
-      // the mirror here hid completed Phase A work from Phase A & Frames.
-      const hasPhaseCycleLoad = Number(
-        row.phaseCycleTotalHours || row.phaseCycleCompletedHours || row.phaseCycleRemainingHours || 0
-      ) > 0;
-      const totalLoadHours = round(hasPhaseCycleLoad ? row.phaseCycleTotalHours : row.mirrorTotalHours, 2);
-      const completedHours = round(hasPhaseCycleLoad ? row.phaseCycleCompletedHours : row.mirrorCompletedHours, 2);
-      const remainingHours = round(hasPhaseCycleLoad ? row.phaseCycleRemainingHours : row.mirrorRemainingHours, 2);
+      const totalLoadHours = round(row.mirrorTotalHours, 2);
+      const completedHours = round(row.mirrorCompletedHours, 2);
+      const remainingHours = round(row.mirrorRemainingHours, 2);
       const completion = totalLoadHours ? completedHours / totalLoadHours : 0;
       const cyclePct = Number(cycleStatus.progressPct || 0) / 100;
       return {
@@ -7308,7 +7302,7 @@ async function adminPlhMetricsPayload() {
         totalLoadHours,
         completedHours,
         status: completion < cyclePct ? "At Risk" : "On Track",
-        source: hasPhaseCycleLoad ? "production_schedule_phase_cycle" : "production_schedule_linked_mirror"
+        source: "production_schedule_linked_mirror"
       };
     });
   if (scheduleCurrentRows.length) currentRows = scheduleCurrentRows;
@@ -7490,7 +7484,7 @@ async function adminPlhMetricsPayload() {
       latestLineOverviewDate: "",
       latestLineOverviewPhaseCount: 0,
       phaseCycleLoadSource,
-      currentCyclePacingSource: scheduleCurrentRows.length ? "production_schedule_phase_cycle" : phaseCycleLoadSource,
+      currentCyclePacingSource: scheduleCurrentRows.length ? "production_schedule_linked_mirror" : phaseCycleLoadSource,
       phaseCycleLoadGroupCount: debtRows.length,
       hbPhaseCycleLoadGroupCount: debtResult.rows.length,
       rawPhaseCycleLoadRowCount: rawPhaseCycleLoad.stats.rawRowCount,

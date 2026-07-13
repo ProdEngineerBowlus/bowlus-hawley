@@ -84,10 +84,12 @@ completion with the phase's standard or true-phase target. This allows a phase
 to be capacity-covered while still showing that work needs to accelerate.
 
 `Phase A & Frames` combines A1/A2 and Frame-A/Frame-B into one presentation
-row. Its load, completed hours, and remaining hours come from the full current
-phase-cycle rollup. That rollup includes schedule-linked mirror tasks plus phase
-work that is not yet linked to a VIN schedule row; the linked-task mirror alone
-must not be used as the card total.
+row. Current-cycle load, completed hours, and remaining hours count only task
+instances linked to that cycle's production-schedule rows. Unlinked tasks that
+merely share a phase-cycle record are excluded because they may be carryover or
+out-of-order prototype work. For example, C11 work on VINs 325/326 must not be
+counted as C12 Phase A load. C12 VINs 327/328 enter the row after their task
+instances are created and linked to their C12 A1/A2 schedule rows.
 
 The True Pace Starts table includes a persistent `Just in time` mode. Enabling
 it sets the effective true start to the phase's current last safe start. Hawley
