@@ -87,7 +87,7 @@ Hawley's direct-create implementation now:
 5. Create only the appropriate VIN or Fabrication sections.
 6. Add the project to its 2026 portfolio.
 
-`Assigned On` is populated from the selected Production row's start date.
-`AirTableKey` is intentionally left blank until the Airtable backfill assigns
-the actual Airtable record key. No reusable template tasks were identified as
-necessary for project creation.
+`Assigned On` is attached as a date field but intentionally left blank for the
+line lead to assign. `AirTableKey` is also left blank until the Airtable
+backfill assigns the actual Airtable record key. No reusable template tasks
+were identified as necessary for project creation.

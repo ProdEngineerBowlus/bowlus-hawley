@@ -8102,12 +8102,6 @@ function adminPutEnumCustomField(payload, registry, name, value) {
   if (optionGid) payload[meta.gid] = meta.type === "multi_enum" ? [optionGid] : optionGid;
 }
 
-function adminPutDateCustomField(payload, registry, name, value) {
-  const meta = registry[projectCreatorNormalizeKey(name)];
-  if (!meta || meta.isFormula || meta.type !== "date" || value === null || value === undefined || value === "") return;
-  payload[meta.gid] = { date: String(value).slice(0, 10) };
-}
-
 async function adminAsanaUserGidsByEmail(token) {
   if (!ADMIN_ASANA_WORKSPACE_GID) return new Map();
   const users = await adminAsanaRequest(
@@ -8129,7 +8123,6 @@ function adminAsanaCustomFields(task, preview, registry) {
   adminPutTextCustomField(payload, registry, "TasksKey", task.tasks_key);
   adminPutTextCustomField(payload, registry, "SOP Link", task.document_link);
   adminPutTextCustomField(payload, registry, "Attachment summary", task.attachment_summary);
-  adminPutDateCustomField(payload, registry, "Assigned On", schedule.start_date);
   adminPutEnumCustomField(payload, registry, "Cycle", projectCreatorAsanaCycleLabel(schedule));
   const phaseOption = /^Phase A - (Lower|Upper)$/i.test(task.asanaSection || "")
     ? "Phase A"
@@ -8984,6 +8977,54 @@ async function repairAuthorizedVin327PhaseASections() {
   }));
 }
 
+async function clearAuthorizedVin327AssignedOnDates() {
+  const token = process.env.ASANA_PAT;
+  if (!token) return;
+  const runResult = await writePool.query(`
+    select project_creation_run_id, asana_project_gid
+    from hb.project_creation_runs
+    where status = 'success'
+      and vin = '327'
+      and asana_project_gid is not null
+      and coalesce(result_json ->> 'assignedOnClearAt', '') = ''
+    order by completed_at desc nulls last, created_at desc
+    limit 1
+  `);
+  const run = runResult.rows[0];
+  if (!run) return;
+  const taskResult = await writePool.query(`
+    select asana_task_gid
+    from hb.rev1_task_instances
+    where asana_project_gid = $1
+      and asana_task_gid is not null
+    order by task_order nulls last, task_name
+  `, [run.asana_project_gid]);
+  const actions = taskResult.rows.map(row => ({
+    method: "put",
+    relative_path: `/tasks/${row.asana_task_gid}`,
+    data: { custom_fields: { "1215603865689876": null } }
+  }));
+  for (let index = 0; index < actions.length; index += 10) {
+    const results = await adminAsanaRequest(token, "/batch", "POST", { actions: actions.slice(index, index + 10) });
+    const failed = (results || []).find(result => Number(result.status_code || 500) >= 400);
+    if (failed) throw new Error(`VIN 327 Assigned On clear batch failed with ${failed.status_code}.`);
+  }
+  await writePool.query(`
+    update hb.project_creation_runs
+    set result_json = coalesce(result_json, '{}'::jsonb) || jsonb_build_object(
+      'assignedOnClearAt', now()::text,
+      'assignedOnClearTasks', $2::int
+    )
+    where project_creation_run_id = $1
+  `, [run.project_creation_run_id, actions.length]);
+  console.log("[hawley-project-creator]", JSON.stringify({
+    action: "assigned_on_clear",
+    vin: 327,
+    projectGid: run.asana_project_gid,
+    clearedTasks: actions.length
+  }));
+}
+
 async function serveStatic(req, res, url) {
   const requested =
     url.pathname === "/" ? "index.html" :
@@ -9192,7 +9233,8 @@ async function startServer() {
     setTimeout(() => {
       Promise.all([
         repairAuthorizedVin327CycleFields(),
-        repairAuthorizedVin327PhaseASections()
+        repairAuthorizedVin327PhaseASections(),
+        clearAuthorizedVin327AssignedOnDates()
       ]).catch(error => {
         console.error("[hawley-project-creator]", JSON.stringify({
           action: "authorized_vin_327_repair",
