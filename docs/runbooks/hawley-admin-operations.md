@@ -68,13 +68,15 @@ immediate catch-up request. The refresh updates only dashboard state, so it does
 not reset unsaved Project Creator input. Worker and manager assignment views use
 the same 60-second refresh cadence.
 
-Phase pace sparklines use the green line for required full-cycle burn-down and
-the yellow line for the projection at the current completion rate. A dashed
-capacity projection begins at today's open work. When remaining capacity cannot
-cover that work, it ends above zero with a red endpoint and the unresolved hour
-gap is labeled explicitly. Each phase uses its own vertical hour scale, and the
-area between required burn-down and capacity projection is shaded red for a gap
-or blue for a cushion so smaller differences remain visible.
+Phase pace sparklines use the green line for ideal productive burn-down at 7
+hours 40 minutes per assigned worker per workday. This comes from the 7:00 a.m.
+to 3:30 p.m. shift less two 10-minute breaks and one 30-minute lunch. The yellow
+line is the projection at the current completion rate. A dashed capacity
+projection begins at today's open work. When remaining capacity cannot cover
+that work, it ends above zero with a red endpoint and the unresolved hour gap
+is labeled explicitly. Each phase uses its own vertical hour scale, and the area
+between ideal burn-down and capacity projection is shaded red for a gap or blue
+for a cushion so smaller differences remain visible.
 
 Phase rows intentionally separate capacity from schedule pace. `On Track` and
 `Off Track` are capacity decisions: a row is off track only when remaining work

@@ -1,6 +1,7 @@
 (() => {
   const root = document.getElementById("admin-root");
   const DASHBOARD_AUTO_REFRESH_MS = 60 * 1000;
+  const IDEAL_PRODUCTIVE_HOURS_PER_WORKER_DAY = 7 + (40 / 60);
   let dashboardRefreshInFlight = false;
   const state = {
     authStatus: null,
@@ -275,7 +276,7 @@
     `;
   }
 
-  function renderPaceSparkline({ totalLoad, completed, remaining, capacityHours, currentDailyPace, totalWorkdays, elapsedWorkdays, truePace }) {
+  function renderPaceSparkline({ totalLoad, completed, remaining, capacityHours, workerCount, currentDailyPace, totalWorkdays, elapsedWorkdays, truePace }) {
     const width = 222;
     const height = 96;
     const days = Math.max(2, Math.round(Number(totalWorkdays) || 10));
@@ -286,7 +287,7 @@
     const trueWindowDays = Math.max(1, days - startIndex);
     const trueElapsed = clamp(Number(truePace?.elapsedWorkdays ?? elapsed) || 0, 0, trueWindowDays);
     const safeCurrentDaily = Number(currentDailyPace) || (trueElapsed > 0 ? safeCompleted / trueElapsed : 0);
-    const targetDaily = safeTotal / trueWindowDays;
+    const targetDaily = IDEAL_PRODUCTIVE_HOURS_PER_WORKER_DAY * Math.max(Number(workerCount) || 0, 0);
     const targetPoints = Array.from({ length: days + 1 }, (_, boundary) => {
       if (boundary <= startIndex) return safeTotal;
       return Math.max(safeTotal - targetDaily * (boundary - startIndex), 0);
@@ -329,7 +330,7 @@
     const capacityTone = hasGap ? "var(--accent)" : "var(--blue)";
 
     return `
-      <div class="pace-spark" title="Green is the required cycle burn-down. Yellow is current pace. The dashed capacity line starts at today's open work and ends at the remaining capacity gap or cushion.">
+      <div class="pace-spark" title="Green is ideal productive capacity at 7h 40m per worker per workday. Yellow is current pace. The dashed capacity line starts at today's open work and ends at the remaining capacity gap or cushion.">
         <svg viewBox="0 0 ${width} ${height}" aria-hidden="true">
           ${preStartWidth ? `<rect x="0" y="0" width="${preStartWidth.toFixed(1)}" height="${height}" fill="rgba(115,199,242,0.08)" rx="3"></rect>` : ""}
           <line x1="0" y1="0" x2="${width}" y2="0" stroke="rgba(240,245,233,0.08)" stroke-width="1"></line>
@@ -347,7 +348,7 @@
           <circle cx="${markerX.toFixed(1)}" cy="${markerY.toFixed(1)}" r="4.6" fill="var(--ink)" stroke="rgba(16,20,15,0.92)" stroke-width="2"></circle>
         </svg>
         <div class="pace-spark-meta">
-          <span>target</span>
+          <span>ideal</span>
           <span>pace</span>
           <span>${escapeHtml(currentDayLabel)}</span>
           <span style="color: ${capacityTone}">${escapeHtml(capacityLabel)}</span>
@@ -974,6 +975,7 @@
                   completed,
                   remaining,
                   capacityHours,
+                  workerCount,
                   currentDailyPace: dailyPace,
                   totalWorkdays: cycleDays,
                   elapsedWorkdays,
