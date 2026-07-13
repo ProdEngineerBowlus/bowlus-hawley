@@ -124,6 +124,21 @@
     }).join(" ");
   }
 
+  function sparklineBandPath(firstPoints, secondPoints, startX, endX, height, maxValue) {
+    const count = Math.min(firstPoints.length, secondPoints.length);
+    if (!count) return "";
+    const safeMax = Math.max(Number(maxValue) || 0, 1);
+    const pointText = (point, index, total) => {
+      const ratio = total === 1 ? 0 : index / (total - 1);
+      const x = startX + ((endX - startX) * ratio);
+      const y = height - (clamp(point, 0, safeMax) / safeMax) * height;
+      return `${x.toFixed(1)} ${y.toFixed(1)}`;
+    };
+    const first = firstPoints.slice(0, count).map((point, index) => pointText(point, index, count));
+    const second = secondPoints.slice(0, count).map((point, index) => pointText(point, index, count)).reverse();
+    return `M${first.join(" L")} L${second.join(" L")} Z`;
+  }
+
   function phaseGroupLetter(row) {
     const label = String(row?.phaseName || row?.phase || "").toUpperCase();
     const normalized = label.replace(/[^A-Z0-9]+/g, " ").trim();
@@ -260,9 +275,9 @@
     `;
   }
 
-  function renderPaceSparkline({ totalLoad, completed, remaining, capacityHours, currentDailyPace, totalWorkdays, elapsedWorkdays, scaleMax, truePace }) {
+  function renderPaceSparkline({ totalLoad, completed, remaining, capacityHours, currentDailyPace, totalWorkdays, elapsedWorkdays, truePace }) {
     const width = 222;
-    const height = 72;
+    const height = 96;
     const days = Math.max(2, Math.round(Number(totalWorkdays) || 10));
     const safeTotal = Math.max(Number(totalLoad) || (Number(completed) || 0) + (Number(remaining) || 0), 1);
     const safeCompleted = Math.max(Number(completed) || 0, 0);
@@ -290,10 +305,17 @@
     const capacityPoints = Array.from({ length: remainingDays + 1 }, (_, index) =>
       Math.max(currentRemaining - (capacityDaily * index), 0)
     );
+    const targetComparisonPoints = capacityPoints.map((_point, index) => {
+      const boundary = currentBoundary + (((days - currentBoundary) * index) / remainingDays);
+      const lowerIndex = Math.floor(boundary);
+      const upperIndex = Math.min(days, Math.ceil(boundary));
+      const blend = boundary - lowerIndex;
+      return Number(targetPoints[lowerIndex] || 0) + ((Number(targetPoints[upperIndex] || 0) - Number(targetPoints[lowerIndex] || 0)) * blend);
+    });
     const capacityEndRemaining = capacityPoints[capacityPoints.length - 1] || 0;
     const capacityDelta = safeCapacity - currentRemaining;
     const hasGap = capacityDelta < -0.05;
-    const maxValue = Math.max(Number(scaleMax) || 0, safeTotal, ...targetPoints, ...pacePoints, ...capacityPoints, 1);
+    const maxValue = Math.max(safeTotal, ...targetPoints, ...pacePoints, ...capacityPoints, 1);
     const markerY = height - (currentRemaining / maxValue) * height;
     const capacityEndY = height - (capacityEndRemaining / maxValue) * height;
     const projectedRemainingAtEnd = pacePoints[pacePoints.length - 1] || 0;
@@ -315,6 +337,7 @@
           <line x1="0" y1="${height}" x2="${width}" y2="${height}" stroke="rgba(240,245,233,0.16)" stroke-width="1"></line>
           ${truePace?.hasOverride ? `<line x1="${trueStartX.toFixed(1)}" y1="0" x2="${trueStartX.toFixed(1)}" y2="${height}" stroke="var(--blue)" stroke-width="2" stroke-dasharray="4 3"></line>` : ""}
           <line x1="${markerX.toFixed(1)}" y1="0" x2="${markerX.toFixed(1)}" y2="${height}" stroke="rgba(240,245,233,0.16)" stroke-width="1" stroke-dasharray="3 4"></line>
+          <path d="${sparklineBandPath(capacityPoints, targetComparisonPoints, markerX, width, height, maxValue)}" fill="${capacityTone}" opacity="${hasGap ? "0.24" : "0.16"}"></path>
           <path d="${sparklinePath(targetPoints, width, height, maxValue)}" fill="none" stroke="var(--primary)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
           <path d="${sparklinePath(pacePoints, width, height, maxValue)}" fill="none" stroke="var(--warn)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
           <path d="${sparklineRangePath(capacityPoints, markerX, width, height, maxValue)}" fill="none" stroke="${capacityTone}" stroke-width="3" stroke-dasharray="5 4" stroke-linecap="round" stroke-linejoin="round"></path>
@@ -856,12 +879,6 @@
     const cycleDates = [cycle.startDate, cycle.endDate].filter(Boolean).map(formatDate).join(" - ");
     const elapsedDay = Number(cycle.elapsedWorkday || elapsedWorkdays || 0);
     const cycleDays = Number.isFinite(totalWorkdays) && totalWorkdays > 0 ? Math.round(totalWorkdays) : 10;
-    const normalizedScaleHours = rows.reduce((max, row) => {
-      const completed = Number(row.completedHours || 0);
-      const remaining = Number(row.remainingHours || 0);
-      const totalLoad = Number(row.totalLoadHours || completed + remaining || 0);
-      return Math.max(max, totalLoad, completed + remaining, remaining);
-    }, 1);
     const cycleMeta = [
       { label: "Cycle", value: cycleLabel },
       { label: "Day", value: Number.isFinite(totalWorkdays) && totalWorkdays > 0 ? `${formatNumber(Math.round(elapsedDay))}/${formatNumber(cycleDays)}` : "n/a" },
@@ -960,7 +977,6 @@
                   currentDailyPace: dailyPace,
                   totalWorkdays: cycleDays,
                   elapsedWorkdays,
-                  scaleMax: normalizedScaleHours,
                   truePace
                 })}
               </div>
