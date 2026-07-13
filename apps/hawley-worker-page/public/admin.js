@@ -1241,7 +1241,7 @@
     const tasks = preview.tasks || [];
     const skipped = preview.skipped || {};
     const sourceCounts = preview.sourceCounts || {};
-    const createBlocked = !preview.writeEnabled || !preview.creatableTaskCount || preview.existingSyncedTasks || preview.existingLegacyTasks || preview.existingNativePendingTasks;
+    const createBlocked = !preview.writeEnabled || !preview.creatableTaskCount || preview.existingLinkedScheduleRows || preview.existingSyncedTasks || preview.existingLegacyTasks || preview.existingNativePendingTasks;
     const projectName = state.projectName || preview.projectName;
     const scopeRows = preview.scheduleRows?.length ? preview.scheduleRows : (preview.schedule ? [preview.schedule] : []);
     const startDates = scopeRows.map(row => row.start_date).filter(Boolean).sort();
@@ -1266,6 +1266,7 @@
             ${preview.existingSyncedTasks ? pill(`${formatNumber(preview.existingSyncedTasks)} already in Asana`, "risk") : ""}
             ${preview.existingLegacyTasks ? pill(`${formatNumber(preview.existingLegacyTasks)} legacy rows exist`, "risk") : ""}
             ${preview.existingNativePendingTasks ? pill(`${formatNumber(preview.existingNativePendingTasks)} Hawley pending`, "warn") : ""}
+            ${preview.existingLinkedScheduleRows ? pill(`${formatNumber(preview.existingLinkedScheduleRows)} Production rows already instantiated`, "risk") : ""}
             ${phaseLabels.length ? pill(`${phaseLabels.length} phases`) : ""}
           </div>
         </div>

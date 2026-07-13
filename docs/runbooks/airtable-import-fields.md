@@ -69,6 +69,16 @@ The admin project-creator path also mirrors:
 Those records normalize into `hb.task_templates` and
 `hb.production_schedule` for Postgres-backed admin features.
 
+The admin creator follows the same scope rules as the established project
+creator: VIN projects use only Production rows directly linked to that VIN;
+Fabrication projects use the selected cycle's no-VIN FAB, CNC, and Frames
+rows. It preserves parent/child task ordering, applies model and frame filters,
+maps assignees by email, copies document and diagram attachments, reuses the
+template's matching sections, and blocks the entire scope when any selected
+Production row already has Task Instances Rev1 links. After a successful Asana
+create and Postgres link update, Hawley immediately rebuilds the downstream
+Rev1 pacing tables.
+
 `rev1-rebuild-downstream.mjs` additionally depends on:
 
 - `Assigned Worker`

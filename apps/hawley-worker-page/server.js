@@ -53,11 +53,17 @@ const WORKER_WRITE_IDS = new Set(
 );
 const TRANSITION_REVIEWS_ENABLED = booleanEnv("HAWLEY_TRANSITION_REVIEWS_ENABLED", true);
 const ADMIN_PROJECT_CREATE_ENABLED = booleanEnv("HAWLEY_ADMIN_PROJECT_CREATE_ENABLED", false);
+const ADMIN_ASANA_WORKSPACE_GID = process.env.HAWLEY_ASANA_WORKSPACE_GID || process.env.ASANA_WORKSPACE || "829365006370166";
 const ADMIN_PROJECT_TEMPLATE_GID = process.env.HAWLEY_ASANA_PROJECT_TEMPLATE_GID || "1211664083967075";
 const ADMIN_PROJECT_PORTFOLIOS = Object.freeze({
   Fabrication: process.env.HAWLEY_ASANA_FABRICATION_PORTFOLIO_GID || "1212620750946278",
   Cycle: process.env.HAWLEY_ASANA_FABRICATION_PORTFOLIO_GID || "1212620750946278",
   VIN: process.env.HAWLEY_ASANA_VIN_PORTFOLIO_GID || "1212620750946276"
+});
+const ADMIN_PROJECT_PORTFOLIO_NAMES = Object.freeze({
+  Fabrication: process.env.HAWLEY_ASANA_FABRICATION_PORTFOLIO_NAME || "Fabrication - 2026",
+  Cycle: process.env.HAWLEY_ASANA_FABRICATION_PORTFOLIO_NAME || "Fabrication - 2026",
+  VIN: process.env.HAWLEY_ASANA_VIN_PORTFOLIO_NAME || "VIN - 2026"
 });
 const ADMIN_FABRICATION_PHASES = new Set(["FAB-A", "FAB-B", "FRAME-A", "FRAME-B", "CNC-A", "CNC-B"]);
 const ADMIN_PLH_BASELINE_CYCLE = process.env.HAWLEY_ADMIN_PLH_BASELINE_CYCLE || "C5";
@@ -5615,11 +5621,11 @@ function adminProjectType(value) {
 
 function adminProjectNameForPreview(projectType, context = {}) {
   if (projectType === "Fabrication") {
-    const cycle = String(context.cycleLabel || (context.cycleNumber ? `C${context.cycleNumber}` : "")).trim();
-    return [cycle, "Fabrication"].filter(Boolean).join(" - ") || "Fabrication Project";
+    const cycle = adminCycleNumber(context.cycleLabel || context.cycleNumber);
+    return cycle ? `F${cycle}.26` : "Fabrication Project";
   }
   const vin = String(context.vin || "").trim();
-  return vin ? `VIN ${vin}` : "VIN Project";
+  return vin ? `${vin} - confirm model before live create` : "VIN Project";
 }
 
 function secondsToHours(value) {
@@ -5716,6 +5722,56 @@ function projectCreatorScheduleIsFabrication(row) {
   return ADMIN_FABRICATION_PHASES.has(projectCreatorSupportPhaseKey(projectCreatorPhaseName(row)));
 }
 
+function projectCreatorDisplayPhase(value) {
+  const text = projectCreatorNormalizeKey(value);
+  if (!text) return "";
+  if (text.includes("cnc")) return "CNC";
+  if (text.includes("fab") || text === "phase i") return "FAB";
+  if (text.includes("frame")) return "Frames";
+  if (text.includes("qc")) return "QC / Inventory";
+  if (["a", "a1", "a2", "phase a", "phase a lower", "phase a upper"].includes(text)) return "Phase A";
+  if (/^phase [b-h]$/.test(text)) return `Phase ${text.slice(-1).toUpperCase()}`;
+  if (/^[b-h]$/.test(text)) return `Phase ${text.toUpperCase()}`;
+  return String(value || "").trim();
+}
+
+function projectCreatorSectionFields(projectType, schedule) {
+  const phase = projectCreatorDisplayPhase(projectCreatorPhaseName(schedule)) || projectCreatorPhaseName(schedule);
+  const section = projectCreatorDisplayPhase(schedule.section_column) || schedule.section_column || phase;
+  return projectType === "VIN"
+    ? { phaseLabel: section, sectionColumn: section, asanaSection: phase }
+    : { phaseLabel: section, sectionColumn: phase, asanaSection: phase };
+}
+
+function projectCreatorOrderedTasks(tasks) {
+  const byName = new Map();
+  for (const task of tasks || []) {
+    const key = projectCreatorNormalizeKey(task.task_name);
+    if (key && !byName.has(key)) byName.set(key, task);
+  }
+  const childrenByTask = new Map();
+  const roots = [];
+  for (const task of tasks || []) {
+    const parent = byName.get(projectCreatorNormalizeKey(task.parent_task_name));
+    if (!parent || parent.task_record_id === task.task_record_id) roots.push(task);
+    else {
+      if (!childrenByTask.has(parent.task_record_id)) childrenByTask.set(parent.task_record_id, []);
+      childrenByTask.get(parent.task_record_id).push(task);
+    }
+  }
+  const sorter = (left, right) => Number(left.task_order || 999999) - Number(right.task_order || 999999) ||
+    String(left.task_name || "").localeCompare(String(right.task_name || ""));
+  roots.sort(sorter);
+  for (const children of childrenByTask.values()) children.sort(sorter);
+  const ordered = [];
+  const visit = (task, depth = 0) => {
+    ordered.push({ ...task, task_order: ordered.length + 1, isSubtask: depth > 0 });
+    for (const child of childrenByTask.get(task.task_record_id) || []) visit(child, depth + 1);
+  };
+  for (const root of roots) visit(root);
+  return ordered;
+}
+
 async function adminProjectCreatorScheduleData(projectType, cycleNumber) {
   const allResult = await pool.query(`
     select
@@ -5798,7 +5854,7 @@ async function adminProjectCreatorPreview(options) {
 
   const targetScheduleRows = projectType === "Fabrication"
     ? selectedCycleRows.filter(projectCreatorScheduleIsFabrication)
-    : allScheduleRows.filter(row => !projectCreatorScheduleIsFabrication(row));
+    : allScheduleRows.filter(row => projectCreatorVinNumber(row.vin) === selectedVin);
   if (!targetScheduleRows.length) return null;
 
   const existingLineScheduleIds = Array.from(new Set(targetScheduleRows.map(row => row.production_record_id).filter(Boolean)));
@@ -5829,6 +5885,7 @@ async function adminProjectCreatorPreview(options) {
         frame_class_names,
         document_link,
         attachment_summary,
+        attachment_files_json,
         task_description
       from hb.task_templates
       where coalesce(active, true)
@@ -5897,43 +5954,18 @@ async function adminProjectCreatorPreview(options) {
   const tasks = [];
   const projectScheduleIds = new Set();
   for (const schedule of targetScheduleRows) {
-    for (const task of taskResult.rows) {
-      if (!projectCreatorTaskMatchesSchedule(task, schedule)) {
-        skipped.phaseMismatch += 1;
-        continue;
-      }
-
-      const supportedPhase = String(task.supported_phase_name || "").trim();
-      const offset = Number(task.supported_offset || 0);
-      let vin = null;
-      let vinSource = "production";
-      if (supportedPhase) {
-        const anchor = anchorByCyclePhase.get(`${Number(schedule.cycle_number)}::${supportedPhase}`);
-        if (anchor === null || anchor === undefined) {
-          skipped.missingVinAnchor += 1;
-          continue;
-        }
-        vin = anchor + offset;
-        vinSource = `${supportedPhase}${offset ? ` ${offset > 0 ? "+" : ""}${offset}` : ""}`;
-      } else {
-        vin = projectCreatorVinNumber(schedule.vin);
-        if (vin === null) {
-          skipped.missingProductionVin += 1;
-          continue;
-        }
-      }
-
-      if (projectType === "VIN" && Number(vin) !== Number(selectedVin)) {
-        skipped.outsideProjectScope += 1;
-        continue;
-      }
-
-      const vinRecord = vinsByNumber.get(Number(vin));
-      if (!vinRecord) {
+    const matchingTasks = projectCreatorOrderedTasks(
+      taskResult.rows.filter(task => projectCreatorTaskMatchesSchedule(task, schedule))
+    );
+    for (const task of matchingTasks) {
+      const vin = projectType === "VIN" ? selectedVin : null;
+      const vinSource = projectType === "VIN" ? "production" : "cycle support";
+      const vinRecord = projectType === "VIN" ? vinsByNumber.get(Number(vin)) : null;
+      if (projectType === "VIN" && !vinRecord) {
         skipped.missingVinRecord += 1;
         continue;
       }
-      if (!projectCreatorTaskAppliesToVin(task, vinRecord)) {
+      if (projectType === "VIN" && !projectCreatorTaskAppliesToVin(task, vinRecord)) {
         skipped.modelFrameMismatch += 1;
         continue;
       }
@@ -5943,6 +5975,7 @@ async function adminProjectCreatorPreview(options) {
       const existing = existingByKey.get(instanceKey) || null;
       if (existing?.asana_task_gid || existing?.asana_project_gid) skipped.existingSynced += 1;
       const estimatedSeconds = Number(task.estimated_batch_task_time_seconds || task.estimated_task_time_seconds || 0);
+      const sectionFields = projectCreatorSectionFields(projectType, schedule);
       projectScheduleIds.add(schedule.production_record_id);
 
       tasks.push({
@@ -5950,14 +5983,15 @@ async function adminProjectCreatorPreview(options) {
         schedule,
         vin,
         vinSource,
-        vinModelTypes: vinRecord.model_type_names || [],
-        vinFrameClasses: vinRecord.frame_class_names || [],
+        vinModelTypes: vinRecord?.model_type_names || [],
+        vinFrameClasses: vinRecord?.frame_class_names || [],
         nativeKey,
         instanceKey,
         estimatedSeconds,
         estimatedHours: secondsToHours(estimatedSeconds),
-        phaseLabel: projectCreatorPhaseName(schedule),
-        asanaSection: schedule.asana_section || projectCreatorPhaseName(schedule) || "Unassigned",
+        phaseLabel: sectionFields.phaseLabel,
+        sectionColumn: sectionFields.sectionColumn,
+        asanaSection: sectionFields.asanaSection || "Unassigned",
         existingTaskInstanceId: existing?.rev1_task_instance_id || null,
         existingSourceSystem: existing?.source_system || "",
         existingAsanaTaskGid: existing?.asana_task_gid || "",
@@ -5986,6 +6020,8 @@ async function adminProjectCreatorPreview(options) {
   const existingSyncedTasks = tasks.filter(row => row.existingAsanaTaskGid || row.existingAsanaProjectGid).length;
   const existingLegacyTasks = tasks.filter(row => row.existingTaskInstanceId && row.existingSourceSystem !== "hawley_project_creator").length;
   const existingNativePendingTasks = tasks.filter(row => row.existingTaskInstanceId && row.existingSourceSystem === "hawley_project_creator" && !row.existingAsanaTaskGid && !row.existingAsanaProjectGid).length;
+  const existingLinkedScheduleRows = projectScheduleRows.filter(row => Number(row.existing_rev1_task_instance_links || 0) > 0).length;
+  const scopeBlocked = existingLinkedScheduleRows > 0;
 
   return {
     mode: ADMIN_PROJECT_CREATE_ENABLED ? "write-ready" : "preview-only",
@@ -6003,13 +6039,14 @@ async function adminProjectCreatorPreview(options) {
     schedule: firstSchedule,
     scheduleRows: projectScheduleRows,
     taskCount: tasks.length,
-    creatableTaskCount: Math.max(0, tasks.length - existingSyncedTasks - existingLegacyTasks),
+    creatableTaskCount: scopeBlocked ? 0 : Math.max(0, tasks.length - existingSyncedTasks - existingLegacyTasks),
     estimatedHours: secondsToHours(totalSeconds),
     estimatedSeconds: totalSeconds,
     missingEstimates,
     existingSyncedTasks,
     existingLegacyTasks,
     existingNativePendingTasks,
+    existingLinkedScheduleRows,
     skipped,
     sourceCounts: {
       taskTemplates: taskResult.rows.length,
@@ -7955,7 +7992,7 @@ async function adminProjectSections(token, projectGid) {
 async function adminCustomFieldRegistry(token, projectGid) {
   const project = await adminAsanaRequest(
     token,
-    `/projects/${projectGid}?opt_fields=custom_field_settings.custom_field.gid,custom_field_settings.custom_field.name,custom_field_settings.custom_field.resource_subtype`
+    `/projects/${projectGid}?opt_fields=custom_field_settings.custom_field.gid,custom_field_settings.custom_field.name,custom_field_settings.custom_field.resource_subtype,custom_field_settings.custom_field.is_formula_field`
   );
   const registry = {};
   for (const setting of project.custom_field_settings || []) {
@@ -7965,6 +8002,7 @@ async function adminCustomFieldRegistry(token, projectGid) {
       gid: field.gid,
       name: field.name,
       type: field.resource_subtype,
+      isFormula: field.is_formula_field === true,
       options: {}
     };
     if (meta.type === "enum" || meta.type === "multi_enum") {
@@ -7980,22 +8018,32 @@ async function adminCustomFieldRegistry(token, projectGid) {
 
 function adminPutNumberCustomField(payload, registry, name, value) {
   const meta = registry[projectCreatorNormalizeKey(name)];
-  if (!meta || meta.type !== "number" || value === null || value === undefined || value === "") return;
+  if (!meta || meta.isFormula || meta.type !== "number" || value === null || value === undefined || value === "") return;
   const parsed = Number(value);
   if (Number.isFinite(parsed)) payload[meta.gid] = parsed;
 }
 
 function adminPutTextCustomField(payload, registry, name, value) {
   const meta = registry[projectCreatorNormalizeKey(name)];
-  if (!meta || meta.type !== "text" || value === null || value === undefined || value === "") return;
+  if (!meta || meta.isFormula || meta.type !== "text" || value === null || value === undefined || value === "") return;
   payload[meta.gid] = String(value);
 }
 
 function adminPutEnumCustomField(payload, registry, name, value) {
   const meta = registry[projectCreatorNormalizeKey(name)];
   if (!meta || value === null || value === undefined || value === "") return;
+  if (meta.isFormula || (meta.type !== "enum" && meta.type !== "multi_enum")) return;
   const optionGid = meta.options[projectCreatorNormalizeKey(value)];
-  if (optionGid) payload[meta.gid] = optionGid;
+  if (optionGid) payload[meta.gid] = meta.type === "multi_enum" ? [optionGid] : optionGid;
+}
+
+async function adminAsanaUserGidsByEmail(token) {
+  if (!ADMIN_ASANA_WORKSPACE_GID) return new Map();
+  const users = await adminAsanaRequest(
+    token,
+    `/workspaces/${ADMIN_ASANA_WORKSPACE_GID}/users?limit=100&opt_fields=gid,name,email`
+  );
+  return new Map((users || []).filter(user => user.email).map(user => [String(user.email).toLowerCase(), user.gid]));
 }
 
 function adminAsanaCustomFields(task, preview, registry) {
@@ -8010,12 +8058,13 @@ function adminAsanaCustomFields(task, preview, registry) {
   adminPutTextCustomField(payload, registry, "TasksKey", task.tasks_key);
   adminPutTextCustomField(payload, registry, "AirTableKey", task.nativeKey);
   adminPutTextCustomField(payload, registry, "SOP Link", task.document_link);
+  adminPutTextCustomField(payload, registry, "Attachment summary", task.attachment_summary);
   adminPutEnumCustomField(payload, registry, "Cycle", schedule.short_cycle_label || schedule.cycle_label);
   adminPutEnumCustomField(payload, registry, "Phase / Section", task.asanaSection || task.phaseLabel);
   return payload;
 }
 
-async function adminCreateAsanaTask(token, projectGid, sectionGid, parentGid, task, preview, registry) {
+async function adminCreateAsanaTask(token, projectGid, sectionGid, parentGid, task, preview, registry, userGidsByEmail) {
   const schedule = task.schedule || preview.schedule || {};
   const notes = [
     task.task_description || "",
@@ -8027,6 +8076,8 @@ async function adminCreateAsanaTask(token, projectGid, sectionGid, parentGid, ta
   };
   if (schedule.start_date) body.start_on = String(schedule.start_date).slice(0, 10);
   if (schedule.end_date) body.due_on = String(schedule.end_date).slice(0, 10);
+  const assigneeEmail = String(task.assignee_email || "").trim().toLowerCase();
+  if (assigneeEmail && userGidsByEmail?.has(assigneeEmail)) body.assignee = userGidsByEmail.get(assigneeEmail);
   const customFields = adminAsanaCustomFields(task, preview, registry);
   if (Object.keys(customFields).length) body.custom_fields = customFields;
 
@@ -8038,6 +8089,23 @@ async function adminCreateAsanaTask(token, projectGid, sectionGid, parentGid, ta
   }
 
   return adminAsanaRequest(token, "/tasks", "POST", body);
+}
+
+async function adminUploadTaskAttachments(token, taskGid, attachments) {
+  for (const attachment of attachments || []) {
+    if (!attachment?.url) continue;
+    const download = await fetch(attachment.url);
+    if (!download.ok) throw actionError(`Could not download attachment ${attachment.filename || "attachment"}.`, 502);
+    const form = new FormData();
+    form.append("file", await download.blob(), attachment.filename || "attachment");
+    const response = await fetch(`https://app.asana.com/api/1.0/tasks/${taskGid}/attachments`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: form
+    });
+    const text = await response.text();
+    if (!response.ok) throw actionError(`Asana attachment upload failed: ${text}`, response.status);
+  }
 }
 
 async function insertAdminProjectCreationRows(preview, runId, projectName, actor, requestJson) {
@@ -8093,7 +8161,8 @@ async function insertAdminProjectCreationRows(preview, runId, projectName, actor
         selectedCycleNumber: preview.selectedCycleNumber,
         sourceTaskTemplate: task.task_record_id,
         sourceProductionSchedule: schedule.production_record_id,
-        vinSource: task.vinSource
+        vinSource: task.vinSource,
+        attachmentFiles: task.attachment_files_json || []
       };
       await client.query(
         `
@@ -8136,6 +8205,9 @@ async function insertAdminProjectCreationRows(preview, runId, projectName, actor
             days_in_cycle,
             document_link,
             attachment_summary,
+            is_subtask,
+            asana_portfolio_gid,
+            asana_portfolio_name,
             active_in_production,
             production_match_status,
             sync_status,
@@ -8148,7 +8220,7 @@ async function insertAdminProjectCreationRows(preview, runId, projectName, actor
             $1, $1, $2, $3, $4, $5, $6, 'Not Started', 'Open', false,
             $7, $8, $9, $9, $10, $11, $12, $13, $13, $14, $15, $16, $17,
             $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, 0, $27, $28,
-            $29, $30, true, 'hawley_project_creator_pending', false, $31, $32::jsonb,
+            $29, $30, $31, $32, $33, true, 'hawley_project_creator_pending', false, $34, $35::jsonb,
             'hawley_project_creator', now()
           )
           on conflict (task_instance_rev1_key)
@@ -8187,6 +8259,9 @@ async function insertAdminProjectCreationRows(preview, runId, projectName, actor
             days_in_cycle = excluded.days_in_cycle,
             document_link = excluded.document_link,
             attachment_summary = excluded.attachment_summary,
+            is_subtask = excluded.is_subtask,
+            asana_portfolio_gid = excluded.asana_portfolio_gid,
+            asana_portfolio_name = excluded.asana_portfolio_name,
             active_in_production = excluded.active_in_production,
             production_match_status = excluded.production_match_status,
             rev1_import_notes = excluded.rev1_import_notes,
@@ -8205,26 +8280,29 @@ async function insertAdminProjectCreationRows(preview, runId, projectName, actor
           task.primary_worker_name || null,
           task.assignee_email || null,
           schedule.phase_record_id || null,
-          projectCreatorPhaseName(schedule) || null,
-          schedule.section_column || null,
+          task.phaseLabel || null,
+          task.sectionColumn || null,
           projectCreatorPhaseCycleKey(schedule),
           schedule.cycle_record_id || null,
           schedule.short_cycle_label || schedule.cycle_label || null,
-          task.vin,
-          String(task.vin),
+          task.vin ?? null,
+          task.vin === null || task.vin === undefined ? null : String(task.vin),
           schedule.production_record_id,
           task.task_record_id,
           task.tasks_key || null,
           projectCreatorArray(task.vinModelTypes).join(", ") || null,
           schedule.start_date || null,
           schedule.end_date || null,
-          task.quantity,
+          task.quantity ?? 1,
           task.estimated_task_time_seconds || null,
           task.estimated_batch_task_time_seconds || null,
           secondsToHours(estimatedSeconds),
           schedule.days_in_cycle || null,
           task.document_link || null,
           task.attachment_summary || null,
+          Boolean(task.isSubtask),
+          preview.projectType === "Fabrication" ? ADMIN_PROJECT_PORTFOLIOS.Fabrication : null,
+          preview.projectType === "Fabrication" ? ADMIN_PROJECT_PORTFOLIO_NAMES.Fabrication : null,
           `Created by Hawley admin project creator run ${runId}.`,
           JSON.stringify(fieldsJson)
         ]
@@ -8295,6 +8373,7 @@ async function createAdminAsanaProjectFromPreview(token, preview, projectName, r
   }
   await adminAddProjectToPortfolio(token, projectGid, preview.projectType);
   const registry = await adminCustomFieldRegistry(token, projectGid);
+  const userGidsByEmail = await adminAsanaUserGidsByEmail(token);
   const sectionByLabel = {};
   const existingSections = await adminProjectSections(token, projectGid);
   for (const section of existingSections || []) {
@@ -8338,7 +8417,8 @@ async function createAdminAsanaProjectFromPreview(token, preview, projectName, r
 
   async function createTree(task, parentGid = null) {
     const sectionGid = sectionByLabel[projectCreatorNormalizeKey(task.asanaSection || task.phaseLabel || "Unassigned")];
-    const asanaTask = await adminCreateAsanaTask(token, projectGid, sectionGid, parentGid, task, preview, registry);
+    const asanaTask = await adminCreateAsanaTask(token, projectGid, sectionGid, parentGid, task, preview, registry, userGidsByEmail);
+    await adminUploadTaskAttachments(token, asanaTask.gid, task.attachment_files_json || []);
     createdTasks.push({
       nativeKey: task.nativeKey,
       asanaTaskGid: asanaTask.gid,
@@ -8425,6 +8505,12 @@ async function handleAdminProjectCreate(req) {
       existingLegacyTasks: preview.existingLegacyTasks
     });
   }
+  if (preview.existingLinkedScheduleRows) {
+    throw actionError("At least one selected Production row already has Task Instances Rev1 links. The current project creator treats the whole scope as already instantiated.", 409, {
+      code: "PROJECT_SCHEDULE_ALREADY_INSTANTIATED",
+      existingLinkedScheduleRows: preview.existingLinkedScheduleRows
+    });
+  }
   if (preview.existingNativePendingTasks) {
     throw actionError("This project scope has a pending or failed Hawley creation run. Inspect the latest run before retrying so an Asana project is not duplicated.", 409, {
       code: "PROJECT_CREATE_PENDING_REVIEW",
@@ -8442,12 +8528,19 @@ async function handleAdminProjectCreate(req) {
   try {
     const result = await createAdminAsanaProjectFromPreview(token, preview, projectName, runId);
     await updateAdminProjectTaskAsanaLinks(result.createdTasks, result.asanaProjectGid, projectName);
-    await updateAdminProjectCreationResult(runId, "success", result);
+    let downstreamRebuild = { ok: true };
+    try {
+      downstreamRebuild = await runAdminProjectDownstreamRebuild();
+    } catch (error) {
+      downstreamRebuild = { ok: false, error: error.message || String(error) };
+    }
+    const completedResult = { ...result, downstreamRebuild };
+    await updateAdminProjectCreationResult(runId, "success", completedResult);
     return {
       ok: true,
       message: `Created Asana test project ${projectName}.`,
       runId,
-      ...result
+      ...completedResult
     };
   } catch (error) {
     const failure = {
@@ -8528,6 +8621,27 @@ async function handleAdminProjectCreationCleanup(req) {
   } finally {
     client.release();
   }
+}
+
+function runAdminProjectDownstreamRebuild() {
+  return new Promise((resolve, reject) => {
+    const child = spawn(npmCommand(), ["run", "pg:build:hb"], {
+      cwd: repoRoot,
+      env: process.env,
+      windowsHide: true
+    });
+    let output = "";
+    const capture = chunk => {
+      output = `${output}${String(chunk || "")}`.slice(-12000);
+    };
+    child.stdout?.on("data", capture);
+    child.stderr?.on("data", capture);
+    child.once("error", reject);
+    child.once("exit", code => {
+      if (code === 0) resolve({ ok: true, outputTail: output.trim().slice(-2000) });
+      else reject(new Error(`Hawley downstream rebuild exited ${code}: ${output.trim().slice(-2000)}`));
+    });
+  });
 }
 
 async function serveStatic(req, res, url) {
