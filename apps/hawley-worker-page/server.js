@@ -8147,7 +8147,9 @@ async function insertAdminProjectCreationRows(preview, runId, projectName, actor
             $29, $30, true, 'hawley_project_creator_pending', false, $31, $32::jsonb,
             'hawley_project_creator', now()
           )
-          on conflict (task_instance_rev1_key) where source_system = 'hawley_project_creator'
+          on conflict (task_instance_rev1_key)
+          where source_system = 'hawley_project_creator'
+            and task_instance_rev1_key is not null
           do update set
             asana_section = excluded.asana_section,
             parent_task_name = excluded.parent_task_name,
