@@ -1293,7 +1293,7 @@
           ${skipped.outsideProjectScope ? pill(`${formatNumber(skipped.outsideProjectScope)} outside scope`, "warn") : ""}
         </div>
         <div class="inline-actions">
-          <button class="btn primary" type="button" data-action="create-project" ${createBlocked ? "disabled" : ""}>Create test project</button>
+          <button class="btn primary" type="button" data-action="create-project" ${createBlocked ? "disabled" : ""}>Create Project</button>
           ${state.createMessage ? `<span class="muted">${escapeHtml(state.createMessage)}</span>` : ""}
         </div>
         <div class="task-list">
