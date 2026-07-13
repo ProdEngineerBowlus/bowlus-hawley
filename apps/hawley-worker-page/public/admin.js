@@ -1155,7 +1155,7 @@
             ${selectedVin ? pill(`VIN ${selectedVin}`, "blue") : ""}
             ${state.projectLoading ? pill("Loading", "warn") : ""}
           </div>
-          ${latestRun?.status === "failed" ? `<div class="notice risk-text" style="margin-top: 12px;"><strong>Latest create failed: ${escapeHtml(latestRun.project_name || "Unnamed project")}</strong><br>${escapeHtml(latestRun.error_message || "No failure detail was recorded.")}${latestRun.asana_project_gid ? "" : `<div class="inline-actions" style="margin-top: 10px;"><button class="btn" type="button" data-action="cleanup-project-run" data-run-id="${escapeAttr(latestRun.project_creation_run_id)}">Remove failed Hawley run</button></div>`}</div>` : ""}
+          ${latestRun?.status === "failed" ? `<div class="notice risk-text" style="margin-top: 12px;"><strong>Latest create failed: ${escapeHtml(latestRun.project_name || "Unnamed project")}</strong><br>${escapeHtml(latestRun.error_message || "No failure detail was recorded.")}<div class="inline-actions" style="margin-top: 10px;"><button class="btn" type="button" data-action="cleanup-project-run" data-delete-asana="${latestRun.asana_project_gid ? "true" : "false"}" data-run-id="${escapeAttr(latestRun.project_creation_run_id)}">${latestRun.asana_project_gid ? "Delete failed Asana project and reset" : "Remove failed Hawley run"}</button></div></div>` : ""}
         </section>
         <section class="panel">
           <div class="panel-header">
@@ -1259,6 +1259,7 @@
           <h3 class="section-title" style="font-size: 1.22rem;">${escapeHtml(projectName)}</h3>
           <div class="chip-row" style="margin-top: 10px;">
             ${pill(preview.mode, preview.writeEnabled ? "good" : "warn")}
+            ${preview.creationStrategy === "direct" ? pill("Direct Asana project", "blue") : ""}
             ${pill(preview.projectType || "Project", "good")}
             ${preview.selectedVin ? pill(`VIN ${preview.selectedVin}`, "blue") : ""}
             ${preview.selectedCycleNumber ? pill(`C${preview.selectedCycleNumber}`, "blue") : ""}
@@ -1440,9 +1441,12 @@
       }
       render();
     } else if (action === "cleanup-project-run") {
-      const runId = event.target.closest("[data-run-id]")?.dataset.runId || "";
+      const cleanupButton = event.target.closest("[data-run-id]");
+      const runId = cleanupButton?.dataset.runId || "";
+      const deleteAsanaProject = cleanupButton?.dataset.deleteAsana === "true";
+      if (deleteAsanaProject && !window.confirm("Delete the failed Asana project and all tasks in it, then reset this Hawley run?")) return;
       try {
-        const payload = await postJson("/api/admin/project-creator/cleanup", { runId });
+        const payload = await postJson("/api/admin/project-creator/cleanup", { runId, deleteAsanaProject });
         state.createMessage = `Removed failed Hawley run for ${payload.projectName || runId}.`;
         await loadProjectCreator();
       } catch (error) {

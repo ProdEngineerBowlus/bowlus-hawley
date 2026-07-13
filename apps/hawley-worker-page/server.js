@@ -54,7 +54,26 @@ const WORKER_WRITE_IDS = new Set(
 const TRANSITION_REVIEWS_ENABLED = booleanEnv("HAWLEY_TRANSITION_REVIEWS_ENABLED", true);
 const ADMIN_PROJECT_CREATE_ENABLED = booleanEnv("HAWLEY_ADMIN_PROJECT_CREATE_ENABLED", false);
 const ADMIN_ASANA_WORKSPACE_GID = process.env.HAWLEY_ASANA_WORKSPACE_GID || process.env.ASANA_WORKSPACE || "829365006370166";
-const ADMIN_PROJECT_TEMPLATE_GID = process.env.HAWLEY_ASANA_PROJECT_TEMPLATE_GID || "1211664083967075";
+const ADMIN_ASANA_TEAM_GID = process.env.HAWLEY_ASANA_TEAM_GID || "1199106825647568";
+const ADMIN_PROJECT_SHARED_CUSTOM_FIELDS = Object.freeze([
+  { name: "Estimated time", gid: "1208345165206058" },
+  { name: "Estimated Time (w/ Qty)", gid: "1208854525971252" },
+  { name: "Quantity", gid: "1208345982510557" },
+  { name: "Task Order", gid: "1208563286024683" },
+  { name: "VIN", gid: "1208346878390176" },
+  { name: "Cycle", gid: "1203060130064229" },
+  { name: "Phase / Section", gid: "1207105939484341" },
+  { name: "Model", gid: "1208702088573486" },
+  { name: "Est Time Remaining (Project)", gid: "1208347136544342" },
+  { name: "SOP Link", gid: "1211295831856206" },
+  { name: "TasksKey", gid: "1211631396593040" },
+  { name: "Assigned On", gid: "1215603865689876" }
+]);
+const ADMIN_PROJECT_LOCAL_CUSTOM_FIELDS = Object.freeze([
+  { name: "Days in Cycle", resource_subtype: "number" },
+  { name: "Attachment summary", resource_subtype: "text" },
+  { name: "AirTableKey", resource_subtype: "text" }
+]);
 const ADMIN_PROJECT_PORTFOLIOS = Object.freeze({
   Fabrication: process.env.HAWLEY_ASANA_FABRICATION_PORTFOLIO_GID || "1212620750946278",
   Cycle: process.env.HAWLEY_ASANA_FABRICATION_PORTFOLIO_GID || "1212620750946278",
@@ -6036,7 +6055,7 @@ async function adminProjectCreatorPreview(options) {
     projectType,
     selectedVin,
     selectedCycleNumber,
-    templateProjectGid: ADMIN_PROJECT_TEMPLATE_GID,
+    creationStrategy: "direct",
     portfolioGid: ADMIN_PROJECT_PORTFOLIOS[projectType] || "",
     schedule: firstSchedule,
     scheduleRows: projectScheduleRows,
@@ -7959,22 +7978,30 @@ async function adminAsanaRequest(token, pathOrUrl, method = "GET", body = null, 
   return text ? JSON.parse(text).data : null;
 }
 
-async function instantiateAdminAsanaProject(token, projectName) {
-  const job = await adminAsanaRequest(
-    token,
-    `/project_templates/${ADMIN_PROJECT_TEMPLATE_GID}/instantiateProject`,
-    "POST",
-    { name: projectName }
-  );
+async function createAdminAsanaProject(token, projectName) {
+  const project = await adminAsanaRequest(token, "/projects", "POST", {
+    name: projectName,
+    workspace: ADMIN_ASANA_WORKSPACE_GID,
+    team: ADMIN_ASANA_TEAM_GID,
+    default_view: "list"
+  });
+  if (!project?.gid) throw actionError("Asana did not return a project GID.", 502);
+  return project.gid;
+}
 
-  for (let index = 0; index < 45; index += 1) {
-    const status = await adminAsanaRequest(token, `/jobs/${job.gid}`);
-    if (status.status === "succeeded") return status.new_project?.gid;
-    if (status.status === "failed") throw actionError("Asana project creation failed.", 502);
-    await new Promise(resolve => setTimeout(resolve, 1000));
+async function adminAttachProjectCustomFields(token, projectGid) {
+  for (const field of ADMIN_PROJECT_SHARED_CUSTOM_FIELDS) {
+    await adminAsanaRequest(token, `/projects/${projectGid}/addCustomFieldSetting`, "POST", {
+      custom_field: field.gid,
+      is_important: false
+    });
   }
-
-  throw actionError("Timed out waiting for Asana project creation.", 504);
+  for (const field of ADMIN_PROJECT_LOCAL_CUSTOM_FIELDS) {
+    await adminAsanaRequest(token, `/projects/${projectGid}/addCustomFieldSetting`, "POST", {
+      custom_field: field,
+      is_important: false
+    });
+  }
 }
 
 async function adminAddProjectToPortfolio(token, projectGid, projectType) {
@@ -8018,6 +8045,19 @@ async function adminCustomFieldRegistry(token, projectGid) {
   return registry;
 }
 
+async function adminEnsureEnumOption(token, registry, fieldName, value) {
+  if (value === null || value === undefined || value === "") return;
+  const meta = registry[projectCreatorNormalizeKey(fieldName)];
+  if (!meta || (meta.type !== "enum" && meta.type !== "multi_enum")) return;
+  const key = projectCreatorNormalizeKey(value);
+  if (meta.options[key]) return;
+  const option = await adminAsanaRequest(token, `/custom_fields/${meta.gid}/enum_options`, "POST", {
+    name: String(value),
+    enabled: true
+  });
+  if (option?.gid) meta.options[key] = option.gid;
+}
+
 function adminPutNumberCustomField(payload, registry, name, value) {
   const meta = registry[projectCreatorNormalizeKey(name)];
   if (!meta || meta.isFormula || meta.type !== "number" || value === null || value === undefined || value === "") return;
@@ -8039,6 +8079,12 @@ function adminPutEnumCustomField(payload, registry, name, value) {
   if (optionGid) payload[meta.gid] = meta.type === "multi_enum" ? [optionGid] : optionGid;
 }
 
+function adminPutDateCustomField(payload, registry, name, value) {
+  const meta = registry[projectCreatorNormalizeKey(name)];
+  if (!meta || meta.isFormula || meta.type !== "date" || value === null || value === undefined || value === "") return;
+  payload[meta.gid] = { date: String(value).slice(0, 10) };
+}
+
 async function adminAsanaUserGidsByEmail(token) {
   if (!ADMIN_ASANA_WORKSPACE_GID) return new Map();
   const users = await adminAsanaRequest(
@@ -8055,14 +8101,15 @@ function adminAsanaCustomFields(task, preview, registry) {
   adminPutNumberCustomField(payload, registry, "Estimated Time (w/ Qty)", Math.round(Number(task.estimated_batch_task_time_seconds || task.estimated_task_time_seconds || 0) / 60));
   adminPutNumberCustomField(payload, registry, "Quantity", task.quantity);
   adminPutNumberCustomField(payload, registry, "Task Order", task.task_order);
-  adminPutNumberCustomField(payload, registry, "VIN", task.vin);
+  adminPutEnumCustomField(payload, registry, "VIN", task.vin);
   adminPutNumberCustomField(payload, registry, "Days in Cycle", schedule.days_in_cycle);
   adminPutTextCustomField(payload, registry, "TasksKey", task.tasks_key);
-  adminPutTextCustomField(payload, registry, "AirTableKey", task.nativeKey);
   adminPutTextCustomField(payload, registry, "SOP Link", task.document_link);
   adminPutTextCustomField(payload, registry, "Attachment summary", task.attachment_summary);
+  adminPutDateCustomField(payload, registry, "Assigned On", schedule.start_date);
   adminPutEnumCustomField(payload, registry, "Cycle", schedule.short_cycle_label || schedule.cycle_label);
   adminPutEnumCustomField(payload, registry, "Phase / Section", task.asanaSection || task.phaseLabel);
+  adminPutEnumCustomField(payload, registry, "Model", projectCreatorArray(task.vinModelTypes)[0]);
   return payload;
 }
 
@@ -8423,14 +8470,18 @@ async function createAdminAsanaProjectFromPreview(token, preview, projectName, r
   // Airtable attachment URLs are temporary. Refresh them before the Asana
   // project exists so a stale cached URL cannot leave another project shell.
   const freshAttachmentsByRecordId = await adminFreshTaskAttachmentsByRecordId(preview.tasks);
-  const projectGid = await instantiateAdminAsanaProject(token, projectName);
+  const projectGid = await createAdminAsanaProject(token, projectName);
   if (runId) {
     await updateAdminProjectCreationResult(runId, "project_created", {
       asanaProjectGid: projectGid
     });
   }
   await adminAddProjectToPortfolio(token, projectGid, preview.projectType);
+  await adminAttachProjectCustomFields(token, projectGid);
   const registry = await adminCustomFieldRegistry(token, projectGid);
+  if (preview.projectType === "VIN") {
+    await adminEnsureEnumOption(token, registry, "VIN", preview.selectedVin);
+  }
   const userGidsByEmail = await adminAsanaUserGidsByEmail(token);
   const sectionByLabel = {};
   const existingSections = await adminProjectSections(token, projectGid);
@@ -8632,6 +8683,30 @@ async function handleAdminProjectCreationCleanup(req) {
   const runId = String(body.runId || "").trim();
   if (!runId) throw actionError("runId is required.", 400, { code: "PROJECT_RUN_ID_REQUIRED" });
 
+  const runLookup = await writePool.query(
+    `select project_creation_run_id, project_name, status, vin, asana_project_gid from hb.project_creation_runs where project_creation_run_id = $1`,
+    [runId]
+  );
+  const existingRun = runLookup.rows[0];
+  if (!existingRun) throw actionError("Project creation run was not found.", 404, { code: "PROJECT_RUN_NOT_FOUND" });
+  if (existingRun.status !== "failed") {
+    throw actionError("Only failed project creation runs can be cleaned up.", 409, { code: "PROJECT_RUN_CLEANUP_BLOCKED" });
+  }
+  if (existingRun.asana_project_gid) {
+    if (body.deleteAsanaProject !== true) {
+      throw actionError("Confirm deletion of the failed Asana project before resetting this run.", 409, {
+        code: "PROJECT_RUN_ASANA_DELETE_CONFIRMATION_REQUIRED"
+      });
+    }
+    const token = process.env.ASANA_PAT;
+    if (!token) throw actionError("ASANA_PAT is not configured for failed project cleanup.", 503);
+    try {
+      await adminAsanaRequest(token, `/projects/${existingRun.asana_project_gid}`, "DELETE");
+    } catch (error) {
+      if (error.statusCode !== 404) throw error;
+    }
+  }
+
   const client = await writePool.connect();
   try {
     await client.query("begin");
@@ -8646,11 +8721,10 @@ async function handleAdminProjectCreationCleanup(req) {
     );
     const run = runResult.rows[0];
     if (!run) throw actionError("Project creation run was not found.", 404, { code: "PROJECT_RUN_NOT_FOUND" });
-    if (run.status !== "failed" || run.asana_project_gid) {
-      throw actionError("Only failed runs without a recorded Asana project can be cleaned up.", 409, {
+    if (run.status !== "failed") {
+      throw actionError("Only failed runs can be cleaned up.", 409, {
         code: "PROJECT_RUN_CLEANUP_BLOCKED",
-        status: run.status,
-        asanaProjectGid: run.asana_project_gid || ""
+        status: run.status
       });
     }
 
@@ -8664,7 +8738,7 @@ async function handleAdminProjectCreationCleanup(req) {
       `,
       [runId]
     );
-    if (Number(linkedResult.rows[0]?.count || 0) > 0) {
+    if (Number(linkedResult.rows[0]?.count || 0) > 0 && !run.asana_project_gid) {
       throw actionError("Cleanup blocked because this run has Asana-linked tasks.", 409, {
         code: "PROJECT_RUN_HAS_ASANA_LINKS"
       });
@@ -8686,6 +8760,7 @@ async function handleAdminProjectCreationCleanup(req) {
       projectName: run.project_name || "",
       vin: run.vin || "",
       deletedTaskInstances: taskDelete.rowCount || 0,
+      deletedAsanaProject: Boolean(run.asana_project_gid),
       deletedRuns: 1
     };
   } catch (error) {

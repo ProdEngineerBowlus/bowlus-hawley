@@ -50,11 +50,11 @@ be safely configured as fixed GIDs from an existing project.
 | AirTableKey | `1215946435239604` | `1216424270754164` | text |
 | Assigned On | `1215963210544230` | `1216424421802440` | date |
 
-For direct creation, reuse the stable workspace versions of `Task Order` and
-`Assigned On`. Create or promote stable workspace fields for `Task ID`, `Days
-in Cycle`, `Assignee Email`, `Attachment summary`, and `AirTableKey` before
-removing the template dependency. Promoting them to shared fields is preferable
-to creating another project-local copy on every run.
+For direct creation, Hawley reuses the stable workspace versions of `Task
+Order` and `Assigned On`. It creates project-local `Days in Cycle`, `Attachment
+summary`, and `AirTableKey` fields. `Task ID` and `Assignee Email` are not
+required by the current server creator because it assigns the task directly and
+stores the task-template identity in `TasksKey`.
 
 ## Required enum work
 
@@ -77,13 +77,17 @@ The `Untitled section` seen on template-instantiated projects is not required.
 
 ## Direct-create readiness
 
-The template dependency can be removed after Hawley can:
+Hawley's direct-create implementation now:
 
 1. Create an empty project in Production team `1199106825647568`.
 2. Attach the stable workspace fields above.
-3. Create or attach stable replacements for the five missing shared fields.
+3. Create local `Days in Cycle`, `Attachment summary`, and `AirTableKey`
+   fields while attaching the shared `Assigned On` date field.
 4. Ensure the required VIN option exists and write its multi-enum option GID.
 5. Create only the appropriate VIN or Fabrication sections.
 6. Add the project to its 2026 portfolio.
 
-No reusable template tasks were identified as necessary for project creation.
+`Assigned On` is populated from the selected Production row's start date.
+`AirTableKey` is intentionally left blank until the Airtable backfill assigns
+the actual Airtable record key. No reusable template tasks were identified as
+necessary for project creation.
