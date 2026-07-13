@@ -68,6 +68,12 @@ immediate catch-up request. The refresh updates only dashboard state, so it does
 not reset unsaved Project Creator input. Worker and manager assignment views use
 the same 60-second refresh cadence.
 
+Phase pace sparklines use the green line for required full-cycle burn-down and
+the yellow line for the projection at the current completion rate. A dashed
+capacity projection begins at today's open work. When remaining capacity cannot
+cover that work, it ends above zero with a red endpoint and the unresolved hour
+gap is labeled explicitly.
+
 ## True Phase Pacing
 
 True pacing lets an admin shift the start date for a phase within a cycle

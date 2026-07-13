@@ -1084,7 +1084,7 @@ a {
 .pace-spark {
   width: 100%;
   min-width: 222px;
-  height: 94px;
+  min-height: 112px;
   display: grid;
   gap: 5px;
   align-content: center;
@@ -1117,6 +1117,13 @@ a {
 }
 
 .pace-spark-meta span:nth-child(4) {
+  text-align: right;
+}
+
+.pace-spark-note {
+  color: var(--muted);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
   text-align: right;
 }
 

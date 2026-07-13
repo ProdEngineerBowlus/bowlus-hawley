@@ -113,6 +113,17 @@
     }).join(" ");
   }
 
+  function sparklineRangePath(points, startX, endX, height, maxValue) {
+    const safePoints = points.length ? points : [0];
+    const safeMax = Math.max(Number(maxValue) || 0, 1);
+    return safePoints.map((point, index) => {
+      const ratio = safePoints.length === 1 ? 0 : index / (safePoints.length - 1);
+      const x = startX + ((endX - startX) * ratio);
+      const y = height - (clamp(point, 0, safeMax) / safeMax) * height;
+      return `${index === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`;
+    }).join(" ");
+  }
+
   function phaseGroupLetter(row) {
     const label = String(row?.phaseName || row?.phase || "").toUpperCase();
     const normalized = label.replace(/[^A-Z0-9]+/g, " ").trim();
@@ -249,7 +260,7 @@
     `;
   }
 
-  function renderPaceSparkline({ totalLoad, completed, remaining, idealDailyCapacity, currentDailyPace, totalWorkdays, elapsedWorkdays, scaleMax, truePace }) {
+  function renderPaceSparkline({ totalLoad, completed, remaining, capacityHours, currentDailyPace, totalWorkdays, elapsedWorkdays, scaleMax, truePace }) {
     const width = 222;
     const height = 72;
     const days = Math.max(2, Math.round(Number(totalWorkdays) || 10));
@@ -259,29 +270,44 @@
     const startIndex = clamp(Number(truePace?.startWorkdayIndex || 0), 0, days - 1);
     const trueWindowDays = Math.max(1, days - startIndex);
     const trueElapsed = clamp(Number(truePace?.elapsedWorkdays ?? elapsed) || 0, 0, trueWindowDays);
-    const safeIdealDaily = Number(idealDailyCapacity) || (safeTotal / trueWindowDays);
     const safeCurrentDaily = Number(currentDailyPace) || (trueElapsed > 0 ? safeCompleted / trueElapsed : 0);
-    const idealPoints = Array.from({ length: days }, (_, index) => {
-      if (index < startIndex) return safeTotal;
-      return Math.max(safeTotal - safeIdealDaily * (index - startIndex + 1), 0);
+    const targetDaily = safeTotal / trueWindowDays;
+    const targetPoints = Array.from({ length: days + 1 }, (_, boundary) => {
+      if (boundary <= startIndex) return safeTotal;
+      return Math.max(safeTotal - targetDaily * (boundary - startIndex), 0);
     });
-    const pacePoints = Array.from({ length: days }, (_, index) => {
-      if (index < startIndex) return safeTotal;
+    const pacePoints = Array.from({ length: days + 1 }, (_, boundary) => {
+      if (boundary <= startIndex) return safeTotal;
       if (!safeCurrentDaily) return safeTotal;
-      return Math.max(safeTotal - safeCurrentDaily * (index - startIndex + 1), 0);
+      return Math.max(safeTotal - safeCurrentDaily * (boundary - startIndex), 0);
     });
-    const maxValue = Math.max(Number(scaleMax) || 0, safeTotal, ...idealPoints, ...pacePoints, 1);
-    const elapsedIndex = clamp(Math.round(elapsed) - 1, 0, days - 1);
-    const markerX = days === 1 ? width / 2 : (elapsedIndex / (days - 1)) * width;
-    const markerY = height - (Math.max(safeTotal - safeCompleted, 0) / maxValue) * height;
+    const currentRemaining = Math.max(Number(remaining) || safeTotal - safeCompleted, 0);
+    const remainingDays = Math.max(1, Math.round(Number(truePace?.remainingWorkdays) || (days - Math.max(0, Math.round(elapsed) - 1))));
+    const currentBoundary = clamp(Math.round(elapsed) - 1, 0, days);
+    const markerX = (currentBoundary / days) * width;
+    const safeCapacity = Math.max(Number(capacityHours) || 0, 0);
+    const capacityDaily = safeCapacity / remainingDays;
+    const capacityPoints = Array.from({ length: remainingDays + 1 }, (_, index) =>
+      Math.max(currentRemaining - (capacityDaily * index), 0)
+    );
+    const capacityEndRemaining = capacityPoints[capacityPoints.length - 1] || 0;
+    const capacityDelta = safeCapacity - currentRemaining;
+    const hasGap = capacityDelta < -0.05;
+    const maxValue = Math.max(Number(scaleMax) || 0, safeTotal, ...targetPoints, ...pacePoints, ...capacityPoints, 1);
+    const markerY = height - (currentRemaining / maxValue) * height;
+    const capacityEndY = height - (capacityEndRemaining / maxValue) * height;
     const projectedRemainingAtEnd = pacePoints[pacePoints.length - 1] || 0;
     const currentDayLabel = `D${Math.max(1, Math.min(days, Math.round(elapsed) || 1))}/${days}`;
-    const trueStartX = days === 1 ? 0 : (startIndex / (days - 1)) * width;
+    const trueStartX = (startIndex / days) * width;
     const trueStartLabel = truePace?.hasOverride ? `start ${formatDate(truePace.trueStartDate)}` : "cycle start";
     const preStartWidth = truePace?.hasOverride ? Math.max(0, trueStartX) : 0;
+    const capacityLabel = hasGap
+      ? `${formatHours(Math.abs(capacityDelta))} gap`
+      : `${formatHours(Math.max(capacityDelta, 0))} cushion`;
+    const capacityTone = hasGap ? "var(--accent)" : "var(--blue)";
 
     return `
-      <div class="pace-spark" title="Target burn-down, current pace projection, true start, and current remaining work.">
+      <div class="pace-spark" title="Green is the required cycle burn-down. Yellow is current pace. The dashed capacity line starts at today's open work and ends at the remaining capacity gap or cushion.">
         <svg viewBox="0 0 ${width} ${height}" aria-hidden="true">
           ${preStartWidth ? `<rect x="0" y="0" width="${preStartWidth.toFixed(1)}" height="${height}" fill="rgba(115,199,242,0.08)" rx="3"></rect>` : ""}
           <line x1="0" y1="0" x2="${width}" y2="0" stroke="rgba(240,245,233,0.08)" stroke-width="1"></line>
@@ -289,8 +315,11 @@
           <line x1="0" y1="${height}" x2="${width}" y2="${height}" stroke="rgba(240,245,233,0.16)" stroke-width="1"></line>
           ${truePace?.hasOverride ? `<line x1="${trueStartX.toFixed(1)}" y1="0" x2="${trueStartX.toFixed(1)}" y2="${height}" stroke="var(--blue)" stroke-width="2" stroke-dasharray="4 3"></line>` : ""}
           <line x1="${markerX.toFixed(1)}" y1="0" x2="${markerX.toFixed(1)}" y2="${height}" stroke="rgba(240,245,233,0.16)" stroke-width="1" stroke-dasharray="3 4"></line>
-          <path d="${sparklinePath(idealPoints, width, height, maxValue)}" fill="none" stroke="var(--primary)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
+          <path d="${sparklinePath(targetPoints, width, height, maxValue)}" fill="none" stroke="var(--primary)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
           <path d="${sparklinePath(pacePoints, width, height, maxValue)}" fill="none" stroke="var(--warn)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
+          <path d="${sparklineRangePath(capacityPoints, markerX, width, height, maxValue)}" fill="none" stroke="${capacityTone}" stroke-width="3" stroke-dasharray="5 4" stroke-linecap="round" stroke-linejoin="round"></path>
+          ${hasGap ? `<line x1="${width}" y1="${capacityEndY.toFixed(1)}" x2="${width}" y2="${height}" stroke="var(--accent)" stroke-width="7" opacity="0.42"></line>` : ""}
+          <circle cx="${width}" cy="${capacityEndY.toFixed(1)}" r="4" fill="${capacityTone}" stroke="rgba(16,20,15,0.92)" stroke-width="2"></circle>
           ${truePace?.hasOverride ? `<circle cx="${trueStartX.toFixed(1)}" cy="7" r="4" fill="var(--blue)" stroke="rgba(16,20,15,0.92)" stroke-width="2"></circle>` : ""}
           <circle cx="${markerX.toFixed(1)}" cy="${markerY.toFixed(1)}" r="4.6" fill="var(--ink)" stroke="rgba(16,20,15,0.92)" stroke-width="2"></circle>
         </svg>
@@ -298,8 +327,9 @@
           <span>target</span>
           <span>pace</span>
           <span>${escapeHtml(currentDayLabel)}</span>
-          <span>${escapeHtml(trueStartLabel)} / ${escapeHtml(formatHours(projectedRemainingAtEnd))} end</span>
+          <span style="color: ${capacityTone}">${escapeHtml(capacityLabel)}</span>
         </div>
+        <div class="pace-spark-note">${escapeHtml(trueStartLabel)} · current pace leaves ${escapeHtml(formatHours(projectedRemainingAtEnd))} open</div>
       </div>
     `;
   }
@@ -918,7 +948,7 @@
                   totalLoad,
                   completed,
                   remaining,
-                  idealDailyCapacity,
+                  capacityHours,
                   currentDailyPace: dailyPace,
                   totalWorkdays: cycleDays,
                   elapsedWorkdays,
