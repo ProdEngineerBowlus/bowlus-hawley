@@ -432,6 +432,16 @@
     state.auth.active = Boolean(account.active);
     state.auth.authenticated = !state.auth.active || Boolean(account.authenticated);
     state.auth.user = account.user || null;
+    redirectManagerFromWorkerLink();
+  }
+
+  function redirectManagerFromWorkerLink() {
+    const role = state.auth.user?.role || "";
+    if (!queryEmployee || !state.auth.authenticated || !["manager", "admin"].includes(role)) return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("employee");
+    url.searchParams.delete("selected");
+    window.location.replace(`${url.pathname}${url.search}`);
   }
 
   function applyAssignments(payload, source) {
