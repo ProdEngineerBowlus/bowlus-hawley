@@ -857,6 +857,15 @@ a {
 .capacity-task-table td { vertical-align: top; }
 .skill-dot { display: inline-grid; place-items: center; min-width: 22px; height: 22px; border-radius: 50%; background: rgba(92, 219, 180, 0.16); color: var(--primary-strong); font-weight: 900; }
 .capacity-commit-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-top: 12px; }
+.capacity-staged-schedule { margin: 12px 0; border: 1px solid rgba(78,207,160,0.34); border-radius: 8px; background: rgba(78,207,160,0.05); }
+.capacity-staged-schedule > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; cursor: pointer; color: var(--ink); }
+.capacity-staged-schedule > summary span { color: var(--muted); font-size: 0.75rem; }
+.capacity-staged-schedule > p { margin: 0 13px 10px; }
+.capacity-staged-worker { margin: 0 12px 10px; border: 1px solid rgba(85,105,79,0.32); border-radius: 6px; background: rgba(9,14,9,0.45); }
+.capacity-staged-worker header { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; border-bottom: 1px solid rgba(85,105,79,0.24); }
+.capacity-staged-worker header span, .capacity-staged-worker li span { color: var(--muted); font-size: 0.72rem; }
+.capacity-staged-worker ul { display: grid; gap: 6px; margin: 0; padding: 9px 10px 9px 27px; }
+.capacity-staged-worker li { display: flex; justify-content: space-between; gap: 12px; }
 
 @media (max-width: 900px) {
   .capacity-controls, .capacity-preview-summary { grid-template-columns: 1fr; }
@@ -871,6 +880,7 @@ a {
   .capacity-balance-scale { padding-left: 0; }
   .capacity-balance-row { grid-template-columns: 1fr; gap: 6px; }
   .capacity-balance-result { text-align: left; }
+  .capacity-staged-schedule > summary, .capacity-staged-worker header, .capacity-staged-worker li { align-items: flex-start; flex-direction: column; }
 }
 
 .phase-pace-list {
