@@ -53,7 +53,7 @@ HAWLEY_ADMIN_PLH_PHASES=
 HAWLEY_ASANA_EVENT_WATCH_IN_WEB=true
 HAWLEY_ASANA_EVENT_INTERVAL_MS=60000
 HAWLEY_ASANA_EVENT_BUILD_HB=true
-HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB=false
+HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB=true
 HAWLEY_ASANA_INCLUDE_SUBTASKS=true
 HAWLEY_ASANA_SUBTASK_DEPTH=1
 HAWLEY_ASANA_COMPLETED_SINCE=1970-01-01T00:00:00.000Z
@@ -203,18 +203,17 @@ It reads Asana event streams for the imported portfolio projects, refreshes
 changed task rows in Hawley/Postgres, and rebuilds HB when task changes are
 found. It does not write to Asana or Airtable.
 
-The web service must not start the old Worker Daily Task Actuals Airtable
-puller. Hawley Worker live pages read and write Postgres only. Worker actuals
-on screen come from Hawley-owned rows in `hb.worker_daily_task_actuals` with
-`source_system = 'hawley_worker_live_pilot'`.
+The web service can run the Worker Daily Task Actuals Airtable puller alongside
+the Hawley-owned worker rows. It keeps the historical actuals mirror current;
+the Hawley Worker live pages continue to read and write Postgres only.
 
 Startup rules:
 
 - `NODE_ENV=production` starts the watcher by default.
 - `HAWLEY_ASANA_EVENT_WATCH_IN_WEB=false` disables it.
 - `HAWLEY_ASANA_EVENT_WATCH_IN_WEB=true` enables it explicitly.
-- `HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB=false` is retained as a safety/env marker;
-  the web service ignores this old Airtable puller path.
+- `HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB=true` enables the 60-second Worker Daily
+  Task Actuals mirror; set it to `false` only to intentionally pause it.
 - `ASANA_PAT` and `HAWLEY_SYNC_DATABASE_URL` or
   `HAWLEY_MIGRATION_DATABASE_URL` must be present.
 

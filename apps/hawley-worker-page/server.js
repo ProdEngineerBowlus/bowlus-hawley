@@ -377,7 +377,10 @@ function shouldStartAsanaEventWatcher() {
 }
 
 function shouldStartWorkerActualsWatcher() {
-  return false;
+  if (process.env.HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB !== undefined) {
+    return booleanEnv("HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB", false);
+  }
+  return process.env.NODE_ENV === "production";
 }
 
 function shouldStartNightlyRefreshScheduler() {
