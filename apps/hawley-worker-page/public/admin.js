@@ -224,7 +224,7 @@
         <div class="efficiency-details">
           <span><em>Remaining</em>${escapeHtml(formatHours(gauge.remaining))}</span>
           <span><em>${escapeHtml(deltaTone)}</em>${escapeHtml(formatHours(Math.abs(gauge.capacityDelta || 0)))}</span>
-          <span><em>Pace Index</em>${escapeHtml(paceText)}</span>
+          <span title="Pace Index = actual completion percent divided by expected cycle completion percent. 1.0x is on pace; below 1.0x is behind; above 1.0x is ahead."><em>Pace Index ⓘ</em>${escapeHtml(paceText)}</span>
         </div>
       </article>
     `;
@@ -1137,12 +1137,7 @@
           </div>
           ${state.capacityMessage ? `<div class="notice ${state.capacityMessage.toLowerCase().includes("could") || state.capacityMessage.toLowerCase().includes("stale") ? "risk" : ""}">${escapeHtml(state.capacityMessage)}</div>` : ""}
           ${preview ? `
-            <div class="capacity-preview-summary">
-              <div><span>Recommended worker</span><strong>${escapeHtml(preview.targetWorker?.name || "—")}</strong><small>${escapeHtml(preview.targetWorker?.homePhase || "No home phase")} · ${formatHours(preview.targetWorker?.availableHours)} bank available</small></div>
-              <div><span>Task load moved</span><strong>${formatHours(preview.recommendedHours)}</strong><small>${formatNumber(preview.actions?.length)} tasks · requested ${formatHours(preview.requestedHours)}</small></div>
-              <div><span>${escapeHtml(preview.phaseLabel)} capacity</span><strong>${formatHours(pace?.beforeCapacityHours)} → ${formatHours(pace?.afterCapacityHours)}</strong><small>${escapeHtml(pace?.note || "")}</small></div>
-              <div><span>Gap / cushion</span><strong>${formatSignedHours(pace?.beforeDeltaHours)} → ${formatSignedHours(pace?.afterDeltaHours)}</strong><small>${pace?.sourcePhase ? `${escapeHtml(pace.sourcePhase.phaseLabel)}: ${formatSignedHours(pace.sourcePhase.beforeDeltaHours)} → ${formatSignedHours(pace.sourcePhase.afterDeltaHours)}` : "Positive is cushion; negative is gap"}</small></div>
-            </div>
+            ${renderCapacityFlowStory(preview)}
             ${renderCapacityPreviewSparkline(pace, plh?.cycleStatus)}
             <div class="table-scroll"><table class="data-table capacity-task-table"><thead><tr><th>Task</th><th>Current</th><th>Proposed</th><th>Hours</th><th>Skill evidence</th></tr></thead><tbody>
               ${(preview.actions || []).map(action => `<tr><td><strong>${escapeHtml(action.taskName)}</strong></td><td>${escapeHtml(action.previousWorkerName || action.previousWorkerEmail || "Unassigned")}</td><td>${escapeHtml(action.targetWorkerName)}</td><td>${formatHours(action.estimatedHours)}</td><td><span class="skill-dot">${escapeHtml(action.requiredSkillLevel ?? "—")}</span> ${escapeHtml(action.capabilityReason)}</td></tr>`).join("")}
@@ -1151,6 +1146,41 @@
           ` : `<div class="notice">Choose a phase to generate a deterministic pace and task reassignment preview. Nothing changes until Commit is selected.</div>`}
         </div>
       </article>`;
+  }
+
+  function renderCapacityFlowStory(preview) {
+    const pace = preview?.pacePreview || {};
+    const target = preview?.targetWorker || {};
+    const source = pace.sourcePhase;
+    const priorOwners = [...new Set((preview.actions || []).map(action => action.previousWorkerName || action.previousWorkerEmail || "Unassigned"))];
+    const ownerText = priorOwners.length > 2 ? `${priorOwners.slice(0, 2).join(", ")} +${priorOwners.length - 2}` : priorOwners.join(", ");
+    const sourceLabel = source?.phaseLabel || target.homePhase || preview.phaseLabel;
+    const sourceBefore = source ? formatSignedHours(source.beforeDeltaHours) : "same phase";
+    const sourceAfter = source ? formatSignedHours(source.afterDeltaHours) : "unchanged";
+    return `
+      <div class="capacity-flow-story" aria-label="Capacity transfer story">
+        <div class="capacity-flow-node source">
+          <span>Capacity comes from</span>
+          <strong>${escapeHtml(sourceLabel || "Worker bank")}</strong>
+          <small>${sourceBefore} → ${sourceAfter}</small>
+        </div>
+        <div class="capacity-flow-person">
+          <span>Floating worker</span>
+          <strong>${escapeHtml(target.name || "—")}</strong>
+          <small>${formatHours(target.availableHours)} available</small>
+        </div>
+        <div class="capacity-flow-arrow">
+          <span>${formatHours(preview.recommendedHours)}</span>
+          <i></i>
+          <small>${formatNumber(preview.actions?.length)} task${Number(preview.actions?.length) === 1 ? "" : "s"}</small>
+        </div>
+        <div class="capacity-flow-node destination">
+          <span>Capacity goes to</span>
+          <strong>${escapeHtml(preview.phaseLabel)}</strong>
+          <small>${formatSignedHours(pace.beforeDeltaHours)} → ${formatSignedHours(pace.afterDeltaHours)}</small>
+        </div>
+        <div class="capacity-flow-assignment"><span>Task ownership</span><strong>${escapeHtml(ownerText || "Unassigned")} → ${escapeHtml(target.name || "—")}</strong></div>
+      </div>`;
   }
 
   function renderCapacityPreviewSparkline(pace, cycleStatus) {
