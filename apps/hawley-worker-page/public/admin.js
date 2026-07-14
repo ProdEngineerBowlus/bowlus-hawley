@@ -121,6 +121,15 @@
     }).join(" ");
   }
 
+  function capacityPhaseKey(value) {
+    const key = String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+    if (key.includes("fabrication") || key === "fab") return "fab";
+    if (key.includes("frame") || key === "phasea") return "frames";
+    if (key.includes("cnc")) return "cnc";
+    const phase = key.match(/phase([b-h])/);
+    return phase ? `phase${phase[1]}` : key;
+  }
+
   function phaseGroupLetter(row) {
     const label = String(row?.phaseName || row?.phase || "").toUpperCase();
     const normalized = label.replace(/[^A-Z0-9]+/g, " ").trim();
@@ -1126,6 +1135,14 @@
     const preview = state.capacityPreview;
     const pace = preview?.pacePreview;
     const selectedPhase = state.capacityPhase || phases[0]?.phaseName || "";
+    const selectedPhaseKey = capacityPhaseKey(selectedPhase);
+    const eligibleWorkers = workers.map(worker => {
+      const sourcePhase = phases.find(row => capacityPhaseKey(row.phaseName) === capacityPhaseKey(worker.home_section_column));
+      const bankHours = Math.max(0, Number(worker.capacity_bank_remaining_hours || 0));
+      const sourceCushion = Math.max(0, Number(sourcePhase?.capacityDeltaSignedHours || 0));
+      return { ...worker, sourcePhase, bankHours, sourceCushion, transferableHours: Math.min(bankHours, sourceCushion) };
+    }).filter(worker => capacityPhaseKey(worker.home_section_column) !== selectedPhaseKey && worker.transferableHours >= 0.25);
+    if (state.capacityWorker && !eligibleWorkers.some(worker => worker.workforce_record_id === state.capacityWorker)) state.capacityWorker = "";
     return `
       <article class="panel config-inner-panel capacity-planner">
         <div class="panel-header">
@@ -1135,9 +1152,9 @@
         <div class="panel-body">
           <div class="capacity-controls">
             <label class="field"><span>Phase</span><select data-capacity-phase>${phases.map(row => `<option value="${escapeAttr(row.phaseName)}" ${row.phaseName === selectedPhase ? "selected" : ""}>${escapeHtml(row.phaseName)} · ${escapeHtml(row.capacityLabel)} ${formatHours(row.capacityDeltaHours)}</option>`).join("")}</select></label>
-            <label class="field"><span>Worker</span><select data-capacity-worker><option value="">Automatic recommendation</option>${workers.map(worker => `<option value="${escapeAttr(worker.workforce_record_id)}" ${state.capacityWorker === worker.workforce_record_id ? "selected" : ""}>${escapeHtml(worker.worker_name)} · ${escapeHtml(worker.home_section_column || "No home phase")}</option>`).join("")}</select><small>Manager selection overrides task-history ranking.</small></label>
+            <label class="field"><span>Worker</span><select data-capacity-worker><option value="">Automatic recommendation</option>${eligibleWorkers.map(worker => `<option value="${escapeAttr(worker.workforce_record_id)}" ${state.capacityWorker === worker.workforce_record_id ? "selected" : ""}>${escapeHtml(worker.worker_name)} · ${escapeHtml(worker.home_section_column || "No home phase")} · ${formatHours(worker.transferableHours)} safe</option>`).join("")}</select><small>${eligibleWorkers.length ? `${formatNumber(eligibleWorkers.length)} workers have bank and source-phase cushion.` : "No workers currently have safe transferable capacity."}</small></label>
             <label class="field"><span>Hours to ease</span><input data-capacity-hours type="number" min="0.25" max="80" step="0.25" value="${escapeAttr(state.capacityHours)}" placeholder="Auto from gap" /><small>Approximate task hours to move. Blank uses the current gap.</small></label>
-            <button class="btn primary" type="button" data-action="capacity-preview" ${state.capacityLoading || !phases.length ? "disabled" : ""}>${state.capacityLoading ? "Building preview…" : "Generate preview"}</button>
+            <button class="btn primary" type="button" data-action="capacity-preview" ${state.capacityLoading || !phases.length || !eligibleWorkers.length ? "disabled" : ""}>${state.capacityLoading ? "Building preview…" : "Generate preview"}</button>
           </div>
           ${state.capacityMessage ? `<div class="notice ${state.capacityMessage.toLowerCase().includes("could") || state.capacityMessage.toLowerCase().includes("stale") ? "risk" : ""}">${escapeHtml(state.capacityMessage)}</div>` : ""}
           ${preview ? `

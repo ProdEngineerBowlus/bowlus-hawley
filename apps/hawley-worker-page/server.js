@@ -7707,13 +7707,21 @@ async function adminDashboardPayload() {
       limit 10
     `),
     pool.query(`
-      select workforce_record_id, worker_name, worker_email, home_section_column,
+      select wf.workforce_record_id, wf.worker_name, wf.worker_email, wf.home_section_column,
         fab_skill_level, cnc_skill_level, frames_skill_level,
         phase_a_skill_level, phase_b_skill_level, phase_c_skill_level, phase_d_skill_level,
-        phase_e_skill_level, phase_f_skill_level, phase_g_skill_level, phase_h_skill_level
-      from hb.work_force
-      where actively_employed
-      order by worker_name
+        phase_e_skill_level, phase_f_skill_level, phase_g_skill_level, phase_h_skill_level,
+        coalesce(bank.remaining_hours, 0)::numeric(12,2) as capacity_bank_remaining_hours
+      from hb.work_force wf
+      left join hb.worker_cycle_bank_rev1 bank
+        on bank.worker_record_id = wf.workforce_record_id
+       and bank.cycle_record_id = (
+         select cycle_record_id from hb.cycles
+         where current_date between start_date and end_date
+         order by start_date desc limit 1
+       )
+      where wf.actively_employed
+      order by wf.worker_name
     `),
     adminPlhMetricsPayload()
   ]);
