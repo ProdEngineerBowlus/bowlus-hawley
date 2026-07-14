@@ -1162,8 +1162,8 @@ async function applyAuthSchemaMigrationIfNeeded() {
 }
 
 function todayIso() {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const parts = timeZoneParts(new Date(), SHOP_TIME_ZONE);
+  return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
 }
 
 function isIsoDate(value) {
@@ -3133,6 +3133,18 @@ function authSessionTtlSeconds() {
     ? APP_AUTH_SESSION_TTL_HOURS
     : 12;
   return Math.round(hours * 60 * 60);
+}
+
+function shopWorkdayFractions(now = new Date()) {
+  const parts = timeZoneParts(now, SHOP_TIME_ZONE);
+  const currentMinute = (parts.hour * 60) + parts.minute + ((parts.second || 0) / 60);
+  const elapsedMinutes = SHOP_WORK_WINDOWS.reduce((sum, window) => {
+    const start = clockToMinutes(window.start);
+    const end = clockToMinutes(window.end);
+    return sum + Math.max(0, Math.min(currentMinute, end) - start);
+  }, 0);
+  const elapsed = Math.max(0, Math.min(1, elapsedMinutes / SHOP_DAILY_AVAILABLE_MINUTES));
+  return { elapsed, remaining: 1 - elapsed };
 }
 
 async function refreshWorkerTaskCapabilities() {
@@ -6992,15 +7004,22 @@ function adminTruePaceForPhase(phaseName, cycleStatus, workdays, override, today
   const hasOverride = Boolean(override?.true_start_date || override?.trueStartDate);
   const trueWindow = allWorkdays.filter(date => !trueStartDate || date >= trueStartDate);
   const effectiveToday = cycleEndDate && today > cycleEndDate ? cycleEndDate : today;
-  const elapsedWorkdays = trueStartDate && effectiveToday >= trueStartDate
-    ? trueWindow.filter(date => date <= effectiveToday).length
-    : 0;
+  const currentShopDate = isoDateInTimeZone(new Date(), SHOP_TIME_ZONE);
+  const currentFractions = today === currentShopDate ? shopWorkdayFractions() : { elapsed: 1, remaining: 0 };
+  const todayIsWorkday = trueWindow.includes(effectiveToday);
+  const elapsedWorkdays = cycleEndDate && today > cycleEndDate
+    ? trueWindow.length
+    : trueStartDate && effectiveToday >= trueStartDate
+      ? trueWindow.filter(date => date < effectiveToday).length + (todayIsWorkday ? currentFractions.elapsed : 0)
+      : 0;
   const totalWorkdays = trueWindow.length || Number(cycleStatus.totalWorkdays || 0) || null;
   const remainingWorkdays = totalWorkdays
     ? (
         cycleEndDate && today > cycleEndDate
           ? 0
-          : trueWindow.filter(date => date >= (effectiveToday >= trueStartDate ? effectiveToday : trueStartDate)).length
+          : today < trueStartDate
+            ? trueWindow.length
+            : trueWindow.filter(date => date > effectiveToday).length + (todayIsWorkday ? currentFractions.remaining : 0)
       )
     : null;
   const progressPct = totalWorkdays

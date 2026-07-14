@@ -24,7 +24,8 @@
     capacityHours: "",
     capacityPreview: null,
     capacityLoading: false,
-    capacityMessage: ""
+    capacityMessage: "",
+    configurationOpen: false
   };
 
   function escapeHtml(value) {
@@ -1095,7 +1096,7 @@
   function renderConfigurationDrawer(plh, latestRuns) {
     const diagnostics = plh?.diagnostics || {};
     return `
-      <details class="config-drawer">
+      <details class="config-drawer" ${state.configurationOpen ? "open" : ""}>
         <summary>
           <span>
             <strong>Configuration</strong>
@@ -1166,10 +1167,10 @@
           <strong>${escapeHtml(sourceLabel || "Worker bank")}</strong>
           <div class="capacity-flow-metrics">
             <span><em>Open load</em><b>${source ? formatHours(source.remainingHours) : "—"}</b></span>
-            <span><em>Capacity</em><b>${source ? formatHours(source.beforeCapacityHours) : "—"}</b></span>
+            <span><em>Capacity before</em><b>${source ? formatHours(source.beforeCapacityHours) : "—"}</b></span>
             <span><em>${escapeHtml(sourceState)}</em><b>${sourceBefore}</b></span>
           </div>
-          <small>After lending: ${sourceAfter}</small>
+          <small>After transfer: ${source ? `${formatHours(source.afterCapacityHours)} capacity · ${sourceAfter} ${sourceAfter.startsWith("-") ? "gap" : "cushion"}` : "capacity unchanged"}</small>
         </div>
         <div class="capacity-flow-person">
           <span>Float</span>
@@ -1186,10 +1187,10 @@
           <strong>${escapeHtml(preview.phaseLabel)}</strong>
           <div class="capacity-flow-metrics">
             <span><em>Open load</em><b>${formatHours(pace.remainingHours)}</b></span>
-            <span><em>New capacity</em><b>${formatHours(pace.afterCapacityHours)}</b></span>
+            <span><em>Capacity before</em><b>${formatHours(pace.beforeCapacityHours)}</b></span>
             <span><em>${escapeHtml(destinationState)}</em><b>${formatSignedHours(pace.afterDeltaHours)}</b></span>
           </div>
-          <small>Before: ${formatSignedHours(pace.beforeDeltaHours)}</small>
+          <small>After transfer: ${formatHours(pace.afterCapacityHours)} capacity · ${formatSignedHours(pace.beforeDeltaHours)} → ${formatSignedHours(pace.afterDeltaHours)}</small>
         </div>
         <div class="capacity-flow-assignment"><span>Task ownership</span><strong>${escapeHtml(ownerText || "Unassigned")} → ${escapeHtml(target.name || "—")}</strong></div>
       </div>`;
@@ -1630,6 +1631,11 @@
     state.projectName = nameInput.value;
     state.projectNameDirty = true;
   });
+
+  root.addEventListener("toggle", event => {
+    const drawer = event.target.closest?.(".config-drawer");
+    if (drawer) state.configurationOpen = drawer.open;
+  }, true);
 
   root.addEventListener("submit", event => {
     const form = event.target.closest("[data-auth-form]");
