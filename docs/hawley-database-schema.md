@@ -108,6 +108,8 @@ Purpose: Hawley-owned runtime data. These are the tables Hawley can own directly
 | `core.app_users` | one user account | Login identity, role, temporary password state, active flag. |
 | `core.app_sessions` | one login session | Web session tokens. |
 | `core.app_auth_events` | one auth event | Login/audit event trail. |
+| `core.task_completion_evidence` | one worker contribution to one completed task instance | Historical task completion, timing, confidence, assistance, quality, and verification evidence. |
+| `core.worker_task_capabilities` | one worker/task-template pair | Refreshable capability rollup with completion counts, median/recent timing, consistency, and verification state. |
 
 ### Admin-Owned Overlays
 
@@ -167,6 +169,7 @@ Purpose: stable app read surfaces. UI code should prefer these over raw tables w
 | `reporting.unreviewed_transition_queue` | Manager review queue. |
 | `reporting.daily_owner_action_list` | Daily manager action list. |
 | `reporting.hawley_reporting_day_summary` | Day-level reporting navigation summary. |
+| `reporting.worker_task_capability_rankings` | Evidence-first and time-based worker ranking within each task template. |
 
 ### `sync`
 

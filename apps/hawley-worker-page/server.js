@@ -3135,6 +3135,20 @@ function authSessionTtlSeconds() {
   return Math.round(hours * 60 * 60);
 }
 
+async function refreshWorkerTaskCapabilities() {
+  if (!syncDatabaseConfigured()) return null;
+  const client = new pg.Client(getDatabaseConfig({ useSyncUrl: true }));
+  await client.connect();
+  try {
+    const result = await client.query("select core.refresh_worker_task_capabilities() as summary");
+    const summary = result.rows[0]?.summary || {};
+    console.log("[hawley-capabilities]", JSON.stringify(summary));
+    return summary;
+  } finally {
+    await client.end();
+  }
+}
+
 function refreshedAuthCookieHeaders(req, user) {
   if (!APP_AUTH_PERSISTENT_SESSIONS || !user) return {};
   const token = parseCookies(req)[APP_AUTH_COOKIE_NAME];
@@ -5607,6 +5621,8 @@ async function healthPayload() {
         (select count(*)::int from hb.worker_phase_allocation_rev1) as worker_phase_allocation_rows,
         (select count(*)::int from hb.worker_cycle_bank_rev1) as worker_cycle_bank_rows,
         (select count(*)::int from hb.worker_daily_task_actuals) as worker_daily_actual_rows,
+        (select count(*)::int from core.task_completion_evidence) as task_completion_evidence_rows,
+        (select count(*)::int from core.worker_task_capabilities) as worker_task_capability_rows,
         (
           select count(*)::int
           from hb.work_force
@@ -9248,6 +9264,11 @@ async function startServer() {
     console.error(`Hawley auth schema migration failed: ${error.message}`);
   }
   await applyRuntimeReadGrants();
+  try {
+    await refreshWorkerTaskCapabilities();
+  } catch (error) {
+    console.error(`[hawley-capabilities] refresh failed: ${error.message}`);
+  }
   await seedInactiveAuthUsersFromWorkForce();
   await applyBootstrapAdminUser();
   startAsanaEventWatcher();

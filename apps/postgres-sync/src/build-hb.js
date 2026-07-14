@@ -1811,12 +1811,16 @@ async function main() {
     await client.query("begin");
     const normalized = await normalizeBaseTables(client);
     const rebuilt = await rebuildCalculations(client);
+    const capabilityRefresh = (await client.query(
+      "select core.refresh_worker_task_capabilities() as summary"
+    )).rows[0]?.summary || {};
     await client.query("commit");
     console.log(JSON.stringify({
       status: "ok",
       writes: "hawley_db_only",
       normalized,
-      rebuilt
+      rebuilt,
+      capabilityRefresh
     }, null, 2));
   } catch (error) {
     await client.query("rollback");
