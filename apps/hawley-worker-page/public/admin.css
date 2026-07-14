@@ -741,7 +741,7 @@ a {
 
 .capacity-controls {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(150px, 0.35fr) auto;
+  grid-template-columns: minmax(200px, 0.9fr) minmax(230px, 1fr) minmax(150px, 0.4fr) auto;
   align-items: end;
   gap: 12px;
   margin-bottom: 12px;

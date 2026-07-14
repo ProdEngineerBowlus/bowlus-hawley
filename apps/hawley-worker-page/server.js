@@ -7650,7 +7650,7 @@ async function adminPlhMetricsPayload() {
 }
 
 async function adminDashboardPayload() {
-  const [countsResult, cycleResult, runResult, phaseResult, plhMetrics] = await Promise.all([
+  const [countsResult, cycleResult, runResult, phaseResult, workerResult, plhMetrics] = await Promise.all([
     pool.query(`
       select
         (select count(*)::int from hb.task_templates) as task_template_count,
@@ -7706,6 +7706,15 @@ async function adminDashboardPayload() {
       order by task_count desc, phase_name
       limit 10
     `),
+    pool.query(`
+      select workforce_record_id, worker_name, worker_email, home_section_column,
+        fab_skill_level, cnc_skill_level, frames_skill_level,
+        phase_a_skill_level, phase_b_skill_level, phase_c_skill_level, phase_d_skill_level,
+        phase_e_skill_level, phase_f_skill_level, phase_g_skill_level, phase_h_skill_level
+      from hb.work_force
+      where actively_employed
+      order by worker_name
+    `),
     adminPlhMetricsPayload()
   ]);
 
@@ -7722,6 +7731,7 @@ async function adminDashboardPayload() {
     plh: plhMetrics,
     cycles: cycleResult.rows,
     latestRuns: runResult.rows,
+    capacityWorkers: workerResult.rows,
     taskTemplatePhases: phaseResult.rows.map(row => ({
       ...row,
       estimatedHours: secondsToHours(row.estimated_seconds)
@@ -8186,6 +8196,7 @@ async function handleAdminCapacityRecommendationPreview(req) {
   const metrics = await adminPlhMetricsPayload();
   const cycleNumber = adminCycleNumber(body.cycleNumber || metrics.cycleStatus?.cycleNumber);
   const phaseLabel = adminPresentationPhaseName(body.phaseLabel || body.phase || "");
+  const requestedWorkerRecordId = String(body.targetWorkerRecordId || "").trim();
   const phaseRow = (metrics.phasePacing || []).find(row => adminPhaseLabelKey(row.phaseName) === adminPhaseLabelKey(phaseLabel));
   if (!cycleNumber || !phaseRow) throw actionError("Choose a current-cycle phase.", 400);
   const requestedHours = Math.max(0.25, Math.min(80, Number(body.hours || Math.max(0, -Number(phaseRow.capacityDeltaSignedHours || 0)) || 8)));
@@ -8241,7 +8252,11 @@ async function handleAdminCapacityRecommendationPreview(req) {
   if (targetGapHours <= 0.05) {
     throw actionError(`${phaseLabel} does not currently have a phase-level capacity gap to ease.`, 409);
   }
-  const candidatePlans = workersResult.rows.map(worker => {
+  const candidateWorkers = requestedWorkerRecordId
+    ? workersResult.rows.filter(worker => worker.workforce_record_id === requestedWorkerRecordId)
+    : workersResult.rows;
+  if (requestedWorkerRecordId && !candidateWorkers.length) throw actionError("The selected worker is not active or could not be found.", 409);
+  const candidatePlans = candidateWorkers.map(worker => {
     const available = Math.max(0, Number(worker.remaining_hours || 0));
     if (available < 0.25) return { worker, selected: [], hours: 0, exactCount: 0, available };
     const samePhase = adminPhaseLabelKey(adminPresentationPhaseName(worker.home_section_column)) === adminPhaseLabelKey(phaseLabel);
@@ -8253,7 +8268,7 @@ async function handleAdminCapacityRecommendationPreview(req) {
     const eligible = tasks.filter(task => {
       if (task.worker_record_id === worker.workforce_record_id || (task.worker_email && worker.worker_email && task.worker_email.toLowerCase() === worker.worker_email.toLowerCase())) return false;
       const capability = capabilityFor(worker, task);
-      return Boolean(capability?.completion_count) || adminPhaseSkillValue(worker, phaseLabel) >= Number(task.required_skill_level || 0);
+      return Boolean(requestedWorkerRecordId) || Boolean(capability?.completion_count) || adminPhaseSkillValue(worker, phaseLabel) >= Number(task.required_skill_level || 0);
     }).sort((a, b) => {
       const aCap = capabilityFor(worker, a);
       const bCap = capabilityFor(worker, b);
@@ -8275,7 +8290,9 @@ async function handleAdminCapacityRecommendationPreview(req) {
   }).filter(plan => plan.selected.length && plan.hours > 0)
     .sort((a, b) => b.exactCount - a.exactCount || b.hours - a.hours || b.available - a.available);
   const plan = candidatePlans[0];
-  if (!plan) throw actionError(`No qualified transfer can reduce the ${phaseLabel} gap without creating a gap in another phase.`, 409);
+  if (!plan) throw actionError(requestedWorkerRecordId
+    ? `The selected worker cannot reduce the ${phaseLabel} gap without creating a gap in their source phase, or no assignable task fits the safe transfer hours.`
+    : `No qualified transfer can reduce the ${phaseLabel} gap without creating a gap in another phase.`, 409);
 
   const recommendationId = crypto.randomUUID();
   const actions = plan.selected.map(task => {
@@ -8286,7 +8303,11 @@ async function handleAdminCapacityRecommendationPreview(req) {
       estimatedHours: Number(task.estimated_hours || 0), requiredSkillLevel: task.required_skill_level === null ? null : Number(task.required_skill_level),
       previousWorkerRecordId: task.worker_record_id, previousWorkerName: task.worker_name, previousWorkerEmail: task.worker_email,
       targetWorkerRecordId: plan.worker.workforce_record_id, targetWorkerName: plan.worker.worker_name, targetWorkerEmail: plan.worker.worker_email,
-      capabilityReason: capability?.completion_count ? `Completed this task ${capability.completion_count} time${Number(capability.completion_count) === 1 ? "" : "s"}` : `Declared ${phaseLabel} skill ${adminPhaseSkillValue(plan.worker, phaseLabel)}`,
+      capabilityReason: capability?.completion_count
+        ? `Completed this task ${capability.completion_count} time${Number(capability.completion_count) === 1 ? "" : "s"}`
+        : requestedWorkerRecordId
+          ? `Manager selected; no prior completion evidence (declared ${phaseLabel} skill ${adminPhaseSkillValue(plan.worker, phaseLabel) || "not set"})`
+          : `Declared ${phaseLabel} skill ${adminPhaseSkillValue(plan.worker, phaseLabel)}`,
       completionCount: Number(capability?.completion_count || 0)
     };
   });
@@ -8311,7 +8332,7 @@ async function handleAdminCapacityRecommendationPreview(req) {
     mode: samePhase ? "workload_rebalance" : "capacity_float",
     note: samePhase ? "This balances work inside the phase; total phase capacity does not change." : `Adds ${recommendedHours.toFixed(2)}h to ${phaseLabel}; the worker's home phase gives up the same scheduled time.`
   };
-  const preview = { recommendationId, cycleNumber, cycleLabel: metrics.cycleStatus?.label || `C${cycleNumber}`, phaseLabel, requestedHours, recommendedHours, targetWorker: { name: plan.worker.worker_name, email: plan.worker.worker_email, homePhase: plan.worker.home_section_column, availableHours: plan.available }, pacePreview, actions, expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(), status: "preview" };
+  const preview = { recommendationId, cycleNumber, cycleLabel: metrics.cycleStatus?.label || `C${cycleNumber}`, phaseLabel, requestedHours, recommendedHours, selectionMode: requestedWorkerRecordId ? "manager_selected" : "automatic", targetWorker: { recordId: plan.worker.workforce_record_id, name: plan.worker.worker_name, email: plan.worker.worker_email, homePhase: plan.worker.home_section_column, availableHours: plan.available, declaredSkill: adminPhaseSkillValue(plan.worker, phaseLabel) || null }, pacePreview, actions, expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(), status: "preview" };
   const client = await writePool.connect();
   try {
     await client.query("begin");

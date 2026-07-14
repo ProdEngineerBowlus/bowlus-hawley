@@ -22,6 +22,7 @@
     dashboardMessage: "",
     capacityPhase: "",
     capacityHours: "",
+    capacityWorker: "",
     capacityPreview: null,
     capacityLoading: false,
     capacityMessage: "",
@@ -1121,6 +1122,7 @@
 
   function renderCapacityRecommendationControls(plh) {
     const phases = plh?.phasePacing || [];
+    const workers = state.dashboard?.capacityWorkers || [];
     const preview = state.capacityPreview;
     const pace = preview?.pacePreview;
     const selectedPhase = state.capacityPhase || phases[0]?.phaseName || "";
@@ -1133,11 +1135,13 @@
         <div class="panel-body">
           <div class="capacity-controls">
             <label class="field"><span>Phase</span><select data-capacity-phase>${phases.map(row => `<option value="${escapeAttr(row.phaseName)}" ${row.phaseName === selectedPhase ? "selected" : ""}>${escapeHtml(row.phaseName)} · ${escapeHtml(row.capacityLabel)} ${formatHours(row.capacityDeltaHours)}</option>`).join("")}</select></label>
+            <label class="field"><span>Worker</span><select data-capacity-worker><option value="">Automatic recommendation</option>${workers.map(worker => `<option value="${escapeAttr(worker.workforce_record_id)}" ${state.capacityWorker === worker.workforce_record_id ? "selected" : ""}>${escapeHtml(worker.worker_name)} · ${escapeHtml(worker.home_section_column || "No home phase")}</option>`).join("")}</select><small>Manager selection overrides task-history ranking.</small></label>
             <label class="field"><span>Hours to ease</span><input data-capacity-hours type="number" min="0.25" max="80" step="0.25" value="${escapeAttr(state.capacityHours)}" placeholder="Auto from gap" /><small>Approximate task hours to move. Blank uses the current gap.</small></label>
             <button class="btn primary" type="button" data-action="capacity-preview" ${state.capacityLoading || !phases.length ? "disabled" : ""}>${state.capacityLoading ? "Building preview…" : "Generate preview"}</button>
           </div>
           ${state.capacityMessage ? `<div class="notice ${state.capacityMessage.toLowerCase().includes("could") || state.capacityMessage.toLowerCase().includes("stale") ? "risk" : ""}">${escapeHtml(state.capacityMessage)}</div>` : ""}
           ${preview ? `
+            ${preview.selectionMode === "manager_selected" && !(preview.actions || []).some(action => Number(action.completionCount || 0) > 0) ? `<div class="notice risk"><strong>Manager override:</strong> ${escapeHtml(preview.targetWorker?.name || "Selected worker")} has no prior completion evidence for these tasks. Review the declared skill and task list before committing.</div>` : ""}
             ${renderCapacityFlowStory(preview)}
             ${renderCapacityPreviewSparkline(pace, plh?.cycleStatus)}
             <div class="table-scroll"><table class="data-table capacity-task-table"><thead><tr><th>Task</th><th>Current</th><th>Proposed</th><th>Hours</th><th>Skill evidence</th></tr></thead><tbody>
@@ -1525,7 +1529,8 @@
       try {
         state.capacityPreview = await postJson("/api/admin/capacity-recommendations/preview", {
           phaseLabel: state.capacityPhase || state.dashboard?.plh?.phasePacing?.[0]?.phaseName || "",
-          hours: state.capacityHours || undefined
+          hours: state.capacityHours || undefined,
+          targetWorkerRecordId: state.capacityWorker || undefined
         });
         state.capacityMessage = `Preview ready: ${state.capacityPreview.actions?.length || 0} task moves.`;
       } catch (error) {
@@ -1630,6 +1635,16 @@
     if (!nameInput) return;
     state.projectName = nameInput.value;
     state.projectNameDirty = true;
+  });
+
+  root.addEventListener("change", event => {
+    const workerInput = event.target.closest("[data-capacity-worker]");
+    if (!workerInput) return;
+    const hadPreview = Boolean(state.capacityPreview);
+    state.capacityWorker = workerInput.value;
+    state.capacityPreview = null;
+    state.capacityMessage = hadPreview ? "Rebuilding preview for the selected worker…" : "";
+    if (hadPreview) setTimeout(() => root.querySelector('[data-action="capacity-preview"]')?.click(), 0);
   });
 
   root.addEventListener("toggle", event => {
