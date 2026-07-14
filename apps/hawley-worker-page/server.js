@@ -8272,6 +8272,9 @@ async function handleAdminCapacityRecommendationPreview(req) {
     afterDeltaHours: round(Number(phaseRow.capacityDeltaSignedHours || 0) + (samePhase ? 0 : recommendedHours), 2),
     sourcePhase: sourcePhaseRow ? {
       phaseLabel: sourcePhaseRow.phaseName,
+      remainingHours: Number(sourcePhaseRow.remainingHours || 0),
+      beforeCapacityHours: Number(sourcePhaseRow.capacityHours || 0),
+      afterCapacityHours: round(Number(sourcePhaseRow.capacityHours || 0) - recommendedHours, 2),
       beforeDeltaHours: Number(sourcePhaseRow.capacityDeltaSignedHours || 0),
       afterDeltaHours: round(Number(sourcePhaseRow.capacityDeltaSignedHours || 0) - recommendedHours, 2)
     } : null,

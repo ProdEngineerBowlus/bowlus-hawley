@@ -1157,27 +1157,39 @@
     const sourceLabel = source?.phaseLabel || target.homePhase || preview.phaseLabel;
     const sourceBefore = source ? formatSignedHours(source.beforeDeltaHours) : "same phase";
     const sourceAfter = source ? formatSignedHours(source.afterDeltaHours) : "unchanged";
+    const sourceState = source && Number(source.beforeDeltaHours) >= 0 ? "cushion" : "gap";
+    const destinationState = Number(pace.afterDeltaHours) >= 0 ? "cushion" : "gap";
     return `
       <div class="capacity-flow-story" aria-label="Capacity transfer story">
         <div class="capacity-flow-node source">
           <span>Capacity comes from</span>
           <strong>${escapeHtml(sourceLabel || "Worker bank")}</strong>
-          <small>${sourceBefore} → ${sourceAfter}</small>
+          <div class="capacity-flow-metrics">
+            <span><em>Open load</em><b>${source ? formatHours(source.remainingHours) : "—"}</b></span>
+            <span><em>Capacity</em><b>${source ? formatHours(source.beforeCapacityHours) : "—"}</b></span>
+            <span><em>${escapeHtml(sourceState)}</em><b>${sourceBefore}</b></span>
+          </div>
+          <small>After lending: ${sourceAfter}</small>
         </div>
         <div class="capacity-flow-person">
-          <span>Floating worker</span>
+          <span>Float</span>
           <strong>${escapeHtml(target.name || "—")}</strong>
-          <small>${formatHours(target.availableHours)} available</small>
+          <small>${formatHours(target.availableHours)} bank</small>
         </div>
         <div class="capacity-flow-arrow">
           <span>${formatHours(preview.recommendedHours)}</span>
           <i></i>
-          <small>${formatNumber(preview.actions?.length)} task${Number(preview.actions?.length) === 1 ? "" : "s"}</small>
+          <small class="capacity-task-count"><i aria-hidden="true"><b></b><b></b><b></b></i>${formatNumber(preview.actions?.length)} task${Number(preview.actions?.length) === 1 ? "" : "s"}</small>
         </div>
         <div class="capacity-flow-node destination">
           <span>Capacity goes to</span>
           <strong>${escapeHtml(preview.phaseLabel)}</strong>
-          <small>${formatSignedHours(pace.beforeDeltaHours)} → ${formatSignedHours(pace.afterDeltaHours)}</small>
+          <div class="capacity-flow-metrics">
+            <span><em>Open load</em><b>${formatHours(pace.remainingHours)}</b></span>
+            <span><em>New capacity</em><b>${formatHours(pace.afterCapacityHours)}</b></span>
+            <span><em>${escapeHtml(destinationState)}</em><b>${formatSignedHours(pace.afterDeltaHours)}</b></span>
+          </div>
+          <small>Before: ${formatSignedHours(pace.beforeDeltaHours)}</small>
         </div>
         <div class="capacity-flow-assignment"><span>Task ownership</span><strong>${escapeHtml(ownerText || "Unassigned")} → ${escapeHtml(target.name || "—")}</strong></div>
       </div>`;
