@@ -24,6 +24,8 @@
     capacityHours: "",
     capacityWorker: "",
     capacityPreview: null,
+    capacityPlanIds: [],
+    capacitySelectedActionIds: [],
     capacityLoading: false,
     capacityMessage: "",
     configurationOpen: false
@@ -1134,6 +1136,7 @@
     const workers = state.dashboard?.capacityWorkers || [];
     const preview = state.capacityPreview;
     const pace = preview?.pacePreview;
+    const stagedWorkers = state.capacityPlanIds.length;
     const selectedPhase = state.capacityPhase || phases[0]?.phaseName || "";
     const selectedPhaseKey = capacityPhaseKey(selectedPhase);
     const eligibleWorkers = workers.map(worker => {
@@ -1156,16 +1159,17 @@
             <label class="field"><span>Hours to ease</span><input data-capacity-hours type="number" min="0.25" max="80" step="0.25" value="${escapeAttr(state.capacityHours)}" placeholder="Auto from gap" /><small>Approximate task hours to move. Blank uses the current gap.</small></label>
             <button class="btn primary" type="button" data-action="capacity-preview" ${state.capacityLoading || !phases.length || !eligibleWorkers.length ? "disabled" : ""}>${state.capacityLoading ? "Building preview…" : "Generate preview"}</button>
           </div>
+          ${stagedWorkers ? `<div class="notice good"><strong>Plan in progress:</strong> ${formatNumber(stagedWorkers)} worker${stagedWorkers === 1 ? "" : "s"} staged. Keep the task checkboxes you want, then add another worker or commit the combined plan. <button class="btn ghost" type="button" data-action="capacity-clear-plan">Clear staged plan</button></div>` : ""}
           ${state.capacityMessage ? `<div class="notice ${state.capacityMessage.toLowerCase().includes("could") || state.capacityMessage.toLowerCase().includes("stale") ? "risk" : ""}">${escapeHtml(state.capacityMessage)}</div>` : ""}
           ${preview ? `
             ${preview.selectionMode === "manager_selected" && !(preview.actions || []).some(action => Number(action.completionCount || 0) > 0) ? `<div class="notice risk"><strong>Manager override:</strong> ${escapeHtml(preview.targetWorker?.name || "Selected worker")} has no prior completion evidence for these tasks. Review the declared skill and task list before committing.</div>` : ""}
             ${renderCapacityFlowStory(preview)}
             ${renderCapacityPreviewSparkline(pace, plh?.cycleStatus)}
-            <div class="table-scroll"><table class="data-table capacity-task-table"><thead><tr><th>Task</th><th>Current</th><th>Proposed</th><th>Hours</th><th>Skill evidence</th></tr></thead><tbody>
-              ${(preview.actions || []).map(action => `<tr><td><strong>${escapeHtml(action.taskName)}</strong></td><td>${escapeHtml(action.previousWorkerName || action.previousWorkerEmail || "Unassigned")}</td><td>${escapeHtml(action.targetWorkerName)}</td><td>${formatHours(action.estimatedHours)}</td><td><span class="skill-dot">${escapeHtml(action.requiredSkillLevel ?? "—")}</span> ${escapeHtml(action.capabilityReason)}</td></tr>`).join("")}
+            <div class="table-scroll"><table class="data-table capacity-task-table"><thead><tr><th>Keep</th><th>Task</th><th>Current</th><th>Proposed</th><th>Hours</th><th>Skill evidence</th></tr></thead><tbody>
+              ${(preview.actions || []).map(action => `<tr><td><input type="checkbox" data-capacity-task-select data-action-id="${escapeAttr(action.actionId)}" ${state.capacitySelectedActionIds.includes(action.actionId) ? "checked" : ""} aria-label="Keep ${escapeAttr(action.taskName)} in plan" /></td><td><strong>${escapeHtml(action.taskName)}</strong></td><td>${escapeHtml(action.previousWorkerName || action.previousWorkerEmail || "Unassigned")}</td><td>${escapeHtml(action.targetWorkerName)}</td><td>${formatHours(action.estimatedHours)}</td><td><span class="skill-dot">${escapeHtml(action.requiredSkillLevel ?? "—")}</span> ${escapeHtml(action.capabilityReason)}</td></tr>`).join("")}
             </tbody></table></div>
-            <div class="capacity-commit-row"><small>Preview expires ${escapeHtml(new Date(preview.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}. Commit rechecks every live assignee first.</small><div class="inline-actions"><button class="btn ghost" type="button" data-action="capacity-discard">Discard preview</button><button class="btn primary" type="button" data-action="capacity-commit" ${state.capacityLoading || preview.status !== "preview" ? "disabled" : ""}>Commit changes to schedule</button></div></div>
-          ` : `<div class="notice">Choose a phase to generate a deterministic pace and task reassignment preview. Nothing changes until Commit is selected.</div>`}
+            <div class="capacity-commit-row"><small>Preview expires ${escapeHtml(new Date(preview.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}. Commit rechecks every live assignee first.</small><div class="inline-actions"><button class="btn ghost" type="button" data-action="capacity-discard">Discard current preview</button><button class="btn ghost" type="button" data-action="capacity-add-worker" ${state.capacityLoading || !state.capacitySelectedActionIds.length ? "disabled" : ""}>Keep tasks &amp; add worker</button><button class="btn primary" type="button" data-action="capacity-commit" ${state.capacityLoading || preview.status !== "preview" || !state.capacitySelectedActionIds.length ? "disabled" : ""}>Commit ${stagedWorkers ? "combined " : ""}plan</button></div></div>
+          ` : `<div class="notice">Choose a phase to generate a deterministic pace and task reassignment preview. Nothing changes until Commit is selected.${stagedWorkers ? " Select the next worker and generate their task list for the remaining gap." : ""}</div>`}
         </div>
       </article>`;
   }
@@ -1547,28 +1551,82 @@
         state.capacityPreview = await postJson("/api/admin/capacity-recommendations/preview", {
           phaseLabel: state.capacityPhase || state.dashboard?.plh?.phasePacing?.[0]?.phaseName || "",
           hours: state.capacityHours || undefined,
-          targetWorkerRecordId: state.capacityWorker || undefined
+          targetWorkerRecordId: state.capacityWorker || undefined,
+          priorRecommendationIds: state.capacityPlanIds
         });
+        state.capacitySelectedActionIds = (state.capacityPreview.actions || []).map(action => action.actionId);
         state.capacityMessage = `Preview ready: ${state.capacityPreview.actions?.length || 0} task moves.`;
       } catch (error) {
         state.capacityPreview = null;
+        state.capacitySelectedActionIds = [];
         state.capacityMessage = error.message || "Could not build a recommendation preview.";
       } finally {
         state.capacityLoading = false;
         render();
       }
-    } else if (action === "capacity-discard") {
-      state.capacityPreview = null;
-      state.capacityMessage = "Preview discarded. No schedule changes were made.";
-      render();
-    } else if (action === "capacity-commit") {
-      const preview = state.capacityPreview;
-      if (!preview || !window.confirm(`Commit ${preview.actions?.length || 0} task assignment changes to the live Asana schedule?`)) return;
+    } else if (action === "capacity-clear-plan") {
+      const planIds = [...new Set(state.capacityPlanIds)];
       state.capacityLoading = true;
       render();
       try {
-        const result = await postJson(`/api/admin/capacity-recommendations/${preview.recommendationId}/commit`, {});
+        await Promise.all(planIds.map(id => postJson(`/api/admin/capacity-recommendations/${id}/selection`, { actionIds: [] })));
+        state.capacityPlanIds = [];
+        state.capacityPreview = null;
+        state.capacitySelectedActionIds = [];
+        state.capacityMessage = "Staged plan cleared. No schedule changes were made.";
+      } catch (error) {
+        state.capacityMessage = error.message || "Could not clear the staged plan.";
+      } finally {
+        state.capacityLoading = false;
+        render();
+      }
+    } else if (action === "capacity-discard") {
+      const preview = state.capacityPreview;
+      if (!preview) return;
+      state.capacityLoading = true;
+      render();
+      try {
+        await postJson(`/api/admin/capacity-recommendations/${preview.recommendationId}/selection`, { actionIds: [] });
+        state.capacityPreview = null;
+        state.capacitySelectedActionIds = [];
+        state.capacityMessage = "Preview discarded. No schedule changes were made.";
+      } catch (error) {
+        state.capacityMessage = error.message || "Could not discard the preview.";
+      } finally {
+        state.capacityLoading = false;
+        render();
+      }
+    } else if (action === "capacity-add-worker") {
+      const preview = state.capacityPreview;
+      if (!preview || !state.capacitySelectedActionIds.length) return;
+      state.capacityLoading = true;
+      render();
+      try {
+        await postJson(`/api/admin/capacity-recommendations/${preview.recommendationId}/selection`, { actionIds: state.capacitySelectedActionIds });
+        state.capacityPlanIds = [...new Set([...state.capacityPlanIds, preview.recommendationId])];
+        state.capacityPreview = null;
+        state.capacitySelectedActionIds = [];
+        state.capacityWorker = "";
+        state.capacityMessage = "Selected tasks are staged. Choose another worker and generate their task list for the remaining gap.";
+      } catch (error) {
+        state.capacityMessage = error.message || "Could not stage the selected tasks.";
+      } finally {
+        state.capacityLoading = false;
+        render();
+      }
+    } else if (action === "capacity-commit") {
+      const preview = state.capacityPreview;
+      if (!preview || !state.capacitySelectedActionIds.length) return;
+      const planIds = [...new Set([...state.capacityPlanIds, preview.recommendationId])];
+      if (!window.confirm(`Commit the selected task assignment changes for ${planIds.length} worker${planIds.length === 1 ? "" : "s"} to the live Asana schedule?`)) return;
+      state.capacityLoading = true;
+      render();
+      try {
+        await postJson(`/api/admin/capacity-recommendations/${preview.recommendationId}/selection`, { actionIds: state.capacitySelectedActionIds });
+        const result = await postJson(`/api/admin/capacity-recommendations/${preview.recommendationId}/commit`, { recommendationIds: state.capacityPlanIds });
         state.capacityPreview = { ...preview, status: result.status };
+        state.capacityPlanIds = [];
+        state.capacitySelectedActionIds = [];
         state.capacityMessage = result.ok ? `Committed ${result.changedTasks} live schedule changes. Hawley will reflect them on the next one-minute refresh.` : `Committed ${result.changedTasks} changes with ${result.failures?.length || 0} failures.`;
         await loadDashboard();
       } catch (error) {
@@ -1655,6 +1713,15 @@
   });
 
   root.addEventListener("change", event => {
+    const taskSelect = event.target.closest("[data-capacity-task-select]");
+    if (taskSelect) {
+      const actionId = taskSelect.dataset.actionId || "";
+      state.capacitySelectedActionIds = taskSelect.checked
+        ? [...new Set([...state.capacitySelectedActionIds, actionId])]
+        : state.capacitySelectedActionIds.filter(value => value !== actionId);
+      render();
+      return;
+    }
     const workerInput = event.target.closest("[data-capacity-worker]");
     if (!workerInput) return;
     const hadPreview = Boolean(state.capacityPreview);

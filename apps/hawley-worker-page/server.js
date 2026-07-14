@@ -8186,8 +8186,20 @@ async function handleAdminCapacityRecommendationPreview(req) {
   const cycleNumber = adminCycleNumber(body.cycleNumber || metrics.cycleStatus?.cycleNumber);
   const phaseLabel = adminPresentationPhaseName(body.phaseLabel || body.phase || "");
   const requestedWorkerRecordId = String(body.targetWorkerRecordId || "").trim();
+  const priorRecommendationIds = [...new Set((Array.isArray(body.priorRecommendationIds) ? body.priorRecommendationIds : [])
+    .map(value => String(value || "").trim())
+    .filter(value => /^[0-9a-f-]{36}$/i.test(value)))];
   const phaseRow = (metrics.phasePacing || []).find(row => adminPhaseLabelKey(row.phaseName) === adminPhaseLabelKey(phaseLabel));
   if (!cycleNumber || !phaseRow) throw actionError("Choose a current-cycle phase.", 400);
+  if (priorRecommendationIds.length) {
+    const priorRunsResult = await pool.query(`select recommendation_id, status, expires_at, preview_json from core.capacity_recommendation_runs where recommendation_id = any($1::uuid[])`, [priorRecommendationIds]);
+    if (priorRunsResult.rows.length !== priorRecommendationIds.length || priorRunsResult.rows.some(run => run.status !== "preview" || new Date(run.expires_at) <= new Date())) {
+      throw actionError("A staged worker preview is stale. Start a fresh plan.", 409);
+    }
+    if (priorRunsResult.rows.some(run => adminPhaseLabelKey(run.preview_json?.phaseLabel) !== adminPhaseLabelKey(phaseLabel))) {
+      throw actionError("All workers in a plan must ease the same destination phase.", 409);
+    }
+  }
   const requestedHours = Math.max(0.25, Math.min(80, Number(body.hours || Math.max(0, -Number(phaseRow.capacityDeltaSignedHours || 0)) || 8)));
 
   const [tasksResult, workersResult] = await Promise.all([
@@ -8237,24 +8249,47 @@ async function handleAdminCapacityRecommendationPreview(req) {
     }
     return null;
   };
+  const priorActionsResult = priorRecommendationIds.length
+    ? await pool.query(`
+        select a.* from core.capacity_recommendation_actions a
+        join core.capacity_recommendation_runs r on r.recommendation_id = a.recommendation_id
+        where a.recommendation_id = any($1::uuid[]) and a.status = 'preview' and r.status = 'preview'
+      `, [priorRecommendationIds])
+    : { rows: [] };
+  const priorActions = priorActionsResult.rows;
+  const priorTaskIds = new Set(priorActions.map(action => Number(action.task_instance_id)));
+  const priorWorkerIds = new Set(priorActions.map(action => String(action.target_worker_record_id || "")).filter(Boolean));
+  const priorHours = round(priorActions.reduce((sum, action) => sum + Number(action.estimated_hours || 0), 0), 2);
+  const priorHoursByWorker = new Map();
+  for (const action of priorActions) priorHoursByWorker.set(action.target_worker_record_id, round((priorHoursByWorker.get(action.target_worker_record_id) || 0) + Number(action.estimated_hours || 0), 2));
+  const workersById = new Map(workersResult.rows.map(worker => [worker.workforce_record_id, worker]));
+  const priorHoursBySourcePhase = new Map();
+  for (const action of priorActions) {
+    const worker = workersById.get(action.target_worker_record_id);
+    const sourceKey = adminPhaseLabelKey(adminPresentationPhaseName(worker?.home_section_column));
+    if (sourceKey) priorHoursBySourcePhase.set(sourceKey, round((priorHoursBySourcePhase.get(sourceKey) || 0) + Number(action.estimated_hours || 0), 2));
+  }
   const targetGapHours = Math.max(0, -Number(phaseRow.capacityDeltaSignedHours || 0));
-  if (targetGapHours <= 0.05) {
+  const remainingGapHours = Math.max(0, targetGapHours - priorHours);
+  if (targetGapHours <= 0.05 || remainingGapHours <= 0.05) {
     throw actionError(`${phaseLabel} does not currently have a phase-level capacity gap to ease.`, 409);
   }
+  if (requestedWorkerRecordId && priorWorkerIds.has(requestedWorkerRecordId)) throw actionError("That worker is already staged in this plan. Choose another worker for the remaining gap.", 409);
   const candidateWorkers = requestedWorkerRecordId
     ? workersResult.rows.filter(worker => worker.workforce_record_id === requestedWorkerRecordId)
-    : workersResult.rows;
+    : workersResult.rows.filter(worker => !priorWorkerIds.has(String(worker.workforce_record_id || "")));
   if (requestedWorkerRecordId && !candidateWorkers.length) throw actionError("The selected worker is not active or could not be found.", 409);
   const candidatePlans = candidateWorkers.map(worker => {
-    const available = Math.max(0, Number(worker.remaining_hours || 0));
+    const available = Math.max(0, Number(worker.remaining_hours || 0) - Number(priorHoursByWorker.get(worker.workforce_record_id) || 0));
     if (available < 0.25) return { worker, selected: [], hours: 0, exactCount: 0, available };
     const samePhase = adminPhaseLabelKey(adminPresentationPhaseName(worker.home_section_column)) === adminPhaseLabelKey(phaseLabel);
     const sourcePhaseRow = samePhase ? null : (metrics.phasePacing || []).find(row => adminPhaseLabelKey(row.phaseName) === adminPhaseLabelKey(adminPresentationPhaseName(worker.home_section_column)));
-    const sourceCushion = Math.max(0, Number(sourcePhaseRow?.capacityDeltaSignedHours || 0));
+    const sourceCushion = Math.max(0, Number(sourcePhaseRow?.capacityDeltaSignedHours || 0) - Number(priorHoursBySourcePhase.get(adminPhaseLabelKey(sourcePhaseRow?.phaseName)) || 0));
     if (samePhase || !sourcePhaseRow || sourceCushion < 0.25) {
       return { worker, selected: [], hours: 0, exactCount: 0, available, samePhase, sourcePhaseRow, sourceCushion };
     }
     const eligible = tasks.filter(task => {
+      if (priorTaskIds.has(Number(task.rev1_task_instance_id))) return false;
       if (task.worker_record_id === worker.workforce_record_id || (task.worker_email && worker.worker_email && task.worker_email.toLowerCase() === worker.worker_email.toLowerCase())) return false;
       const capability = capabilityFor(worker, task);
       return Boolean(capability?.completion_count) || adminPhaseSkillValue(worker, phaseLabel) >= Number(task.required_skill_level || 0);
@@ -8265,7 +8300,7 @@ async function handleAdminCapacityRecommendationPreview(req) {
     });
     const selected = [];
     let hours = 0;
-    const ceiling = Math.min(requestedHours, targetGapHours, available, sourceCushion);
+    const ceiling = Math.min(requestedHours, remainingGapHours, available, sourceCushion);
     const atomicCeiling = Math.min(ceiling * 1.2, available, sourceCushion);
     for (const task of eligible) {
       const taskHours = Number(task.estimated_hours || 0);
@@ -8301,27 +8336,29 @@ async function handleAdminCapacityRecommendationPreview(req) {
     };
   });
   const recommendedHours = round(actions.reduce((sum, action) => sum + action.estimatedHours, 0), 2);
+  const planRecommendedHours = round(priorHours + recommendedHours, 2);
   const samePhase = plan.samePhase;
   const sourcePhaseRow = plan.sourcePhaseRow;
+  const priorSourceHours = sourcePhaseRow ? Number(priorHoursBySourcePhase.get(adminPhaseLabelKey(sourcePhaseRow.phaseName)) || 0) : 0;
   const pacePreview = {
     phaseLabel,
     beforeCapacityHours: Number(phaseRow.capacityHours || 0),
-    afterCapacityHours: round(Number(phaseRow.capacityHours || 0) + (samePhase ? 0 : recommendedHours), 2),
+    afterCapacityHours: round(Number(phaseRow.capacityHours || 0) + planRecommendedHours, 2),
     remainingHours: Number(phaseRow.remainingHours || 0),
     beforeDeltaHours: Number(phaseRow.capacityDeltaSignedHours || 0),
-    afterDeltaHours: round(Number(phaseRow.capacityDeltaSignedHours || 0) + (samePhase ? 0 : recommendedHours), 2),
+    afterDeltaHours: round(Number(phaseRow.capacityDeltaSignedHours || 0) + planRecommendedHours, 2),
     sourcePhase: sourcePhaseRow ? {
       phaseLabel: sourcePhaseRow.phaseName,
       remainingHours: Number(sourcePhaseRow.remainingHours || 0),
-      beforeCapacityHours: Number(sourcePhaseRow.capacityHours || 0),
-      afterCapacityHours: round(Number(sourcePhaseRow.capacityHours || 0) - recommendedHours, 2),
-      beforeDeltaHours: Number(sourcePhaseRow.capacityDeltaSignedHours || 0),
-      afterDeltaHours: round(Number(sourcePhaseRow.capacityDeltaSignedHours || 0) - recommendedHours, 2)
+      beforeCapacityHours: round(Number(sourcePhaseRow.capacityHours || 0) - priorSourceHours, 2),
+      afterCapacityHours: round(Number(sourcePhaseRow.capacityHours || 0) - priorSourceHours - recommendedHours, 2),
+      beforeDeltaHours: round(Number(sourcePhaseRow.capacityDeltaSignedHours || 0) - priorSourceHours, 2),
+      afterDeltaHours: round(Number(sourcePhaseRow.capacityDeltaSignedHours || 0) - priorSourceHours - recommendedHours, 2)
     } : null,
     mode: samePhase ? "workload_rebalance" : "capacity_float",
     note: samePhase ? "This balances work inside the phase; total phase capacity does not change." : `Adds ${recommendedHours.toFixed(2)}h to ${phaseLabel}; the worker's home phase gives up the same scheduled time.`
   };
-  const preview = { recommendationId, cycleNumber, cycleLabel: metrics.cycleStatus?.label || `C${cycleNumber}`, phaseLabel, requestedHours, recommendedHours, selectionMode: requestedWorkerRecordId ? "manager_selected" : "automatic", targetWorker: { recordId: plan.worker.workforce_record_id, name: plan.worker.worker_name, email: plan.worker.worker_email, homePhase: plan.worker.home_section_column, availableHours: plan.available, declaredSkill: adminPhaseSkillValue(plan.worker, phaseLabel) || null }, pacePreview, actions, expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(), status: "preview" };
+  const preview = { recommendationId, cycleNumber, cycleLabel: metrics.cycleStatus?.label || `C${cycleNumber}`, phaseLabel, requestedHours, recommendedHours, planRecommendedHours, priorRecommendationIds, lockedTaskCount: priorActions.length, selectionMode: requestedWorkerRecordId ? "manager_selected" : "automatic", targetWorker: { recordId: plan.worker.workforce_record_id, name: plan.worker.worker_name, email: plan.worker.worker_email, homePhase: plan.worker.home_section_column, availableHours: plan.available, declaredSkill: adminPhaseSkillValue(plan.worker, phaseLabel) || null }, pacePreview, actions, expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(), status: "preview" };
   const client = await writePool.connect();
   try {
     await client.query("begin");
@@ -8335,30 +8372,44 @@ async function handleAdminCapacityRecommendationPreview(req) {
 async function handleAdminCapacityRecommendationCommit(req, recommendationId) {
   const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
   requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const recommendationIds = [...new Set([recommendationId, ...(Array.isArray(body.recommendationIds) ? body.recommendationIds : [])]
+    .map(value => String(value || "")).filter(value => /^[0-9a-f-]{36}$/i.test(value)))];
   const token = process.env.ASANA_PAT;
   if (!token) throw actionError("ASANA_PAT is not configured for schedule writes.", 503);
-  const runResult = await pool.query(`select * from core.capacity_recommendation_runs where recommendation_id=$1`, [recommendationId]);
-  const run = runResult.rows[0];
-  if (!run) throw actionError("Recommendation preview was not found.", 404);
-  if (run.status !== "preview" || new Date(run.expires_at) <= new Date()) throw actionError("This preview is stale or has already been committed. Generate a fresh preview.", 409);
-  const storedPreview = run.preview_json || {};
-  const storedPace = storedPreview.pacePreview || {};
-  if (storedPace.mode !== "capacity_float" || !storedPace.sourcePhase || Number(storedPace.sourcePhase.afterDeltaHours || 0) < -0.05) {
-    throw actionError("This preview does not produce a safe net schedule improvement. Generate a fresh preview.", 409);
+  const runsResult = await pool.query(`select * from core.capacity_recommendation_runs where recommendation_id = any($1::uuid[])`, [recommendationIds]);
+  if (runsResult.rows.length !== recommendationIds.length) throw actionError("One or more recommendation previews were not found.", 404);
+  if (runsResult.rows.some(run => run.status !== "preview" || new Date(run.expires_at) <= new Date())) {
+    throw actionError("One or more previews are stale or have already been committed. Generate a fresh plan.", 409);
+  }
+  const storedPreview = runsResult.rows.find(run => run.recommendation_id === recommendationId)?.preview_json || {};
+  const targetPhaseKey = adminPhaseLabelKey(storedPreview.phaseLabel);
+  if (!targetPhaseKey || runsResult.rows.some(run => adminPhaseLabelKey(run.preview_json?.phaseLabel) !== targetPhaseKey)) {
+    throw actionError("All staged previews must target the same phase.", 409);
   }
   const currentMetrics = await adminPlhMetricsPayload();
-  const currentSource = (currentMetrics.phasePacing || []).find(row => adminPhaseLabelKey(row.phaseName) === adminPhaseLabelKey(storedPace.sourcePhase.phaseLabel));
   const currentTarget = (currentMetrics.phasePacing || []).find(row => adminPhaseLabelKey(row.phaseName) === adminPhaseLabelKey(storedPreview.phaseLabel));
-  if (!currentSource || Number(currentSource.capacityDeltaSignedHours || 0) + 0.05 < Number(storedPreview.recommendedHours || 0)) {
-    throw actionError("The source phase no longer has enough cushion for this transfer. Generate a fresh preview.", 409);
-  }
   if (!currentTarget || Number(currentTarget.capacityDeltaSignedHours || 0) >= -0.05) {
     throw actionError("The destination phase no longer has a capacity gap. Generate a fresh preview.", 409);
   }
-  const actionsResult = await pool.query(`select * from core.capacity_recommendation_actions where recommendation_id=$1 order by estimated_hours desc`, [recommendationId]);
+  const actionsResult = await pool.query(`select * from core.capacity_recommendation_actions where recommendation_id = any($1::uuid[]) and status='preview' order by estimated_hours desc`, [recommendationIds]);
+  if (!actionsResult.rows.length) throw actionError("Choose at least one proposed task before committing the plan.", 409);
+  const targetWorkerIds = [...new Set(actionsResult.rows.map(action => action.target_worker_record_id).filter(Boolean))];
+  const targetWorkersResult = await pool.query(`select workforce_record_id, home_section_column from hb.work_force where workforce_record_id = any($1::text[])`, [targetWorkerIds]);
+  const sourceHours = new Map();
+  const workerHomePhase = new Map(targetWorkersResult.rows.map(worker => [worker.workforce_record_id, adminPhaseLabelKey(adminPresentationPhaseName(worker.home_section_column))]));
+  for (const action of actionsResult.rows) {
+    const sourceKey = workerHomePhase.get(action.target_worker_record_id);
+    if (!sourceKey || sourceKey === targetPhaseKey) throw actionError("A selected worker no longer has a valid source phase. Generate a fresh preview.", 409);
+    sourceHours.set(sourceKey, round((sourceHours.get(sourceKey) || 0) + Number(action.estimated_hours || 0), 2));
+  }
+  for (const [sourceKey, hours] of sourceHours) {
+    const source = (currentMetrics.phasePacing || []).find(row => adminPhaseLabelKey(row.phaseName) === sourceKey);
+    if (!source || Number(source.capacityDeltaSignedHours || 0) + 0.05 < hours) {
+      throw actionError(`The source phase no longer has enough cushion for the selected ${hours.toFixed(2)}h transfer. Generate a fresh plan.`, 409);
+    }
+  }
   const userGids = await adminAsanaUserGidsByEmail(token);
-  const targetGid = userGids.get(String(actionsResult.rows[0]?.target_worker_email || "").toLowerCase());
-  if (!targetGid) throw actionError("The recommended worker could not be matched to an Asana user by email.", 409);
   const verified = [];
   for (const action of actionsResult.rows) {
     const live = await adminAsanaRequest(token, `/tasks/${action.asana_task_gid}?opt_fields=gid,completed,assignee.gid,assignee.email,assignee.name`);
@@ -8370,6 +8421,8 @@ async function handleAdminCapacityRecommendationCommit(req, recommendationId) {
   const results = [];
   for (const action of verified) {
     try {
+      const targetGid = userGids.get(String(action.target_worker_email || "").toLowerCase());
+      if (!targetGid) throw actionError(`The recommended worker for “${action.task_name}” could not be matched to an Asana user.`, 409);
       await updateAsanaTask(token, action.asana_task_gid, { assignee: targetGid });
       await writePool.query(`update core.capacity_recommendation_actions set status='committed', committed_at=now() where recommendation_action_id=$1`, [action.recommendation_action_id]);
       results.push({ taskName: action.task_name, ok: true });
@@ -8380,8 +8433,27 @@ async function handleAdminCapacityRecommendationCommit(req, recommendationId) {
   }
   const failures = results.filter(row => !row.ok);
   const status = failures.length ? (failures.length === results.length ? "failed" : "partial") : "committed";
-  await writePool.query(`update core.capacity_recommendation_runs set status=$2, committed_at=case when $2='committed' then now() else committed_at end, commit_result_json=$3::jsonb where recommendation_id=$1`, [recommendationId, status, JSON.stringify({ actor: actor?.email || "admin", results })]);
+  await writePool.query(`update core.capacity_recommendation_runs set status=$2, committed_at=case when $2='committed' then now() else committed_at end, commit_result_json=$3::jsonb where recommendation_id = any($1::uuid[])`, [recommendationIds, status, JSON.stringify({ actor: actor?.email || "admin", results })]);
   return { ok: !failures.length, status, recommendationId, changedTasks: results.length - failures.length, failures };
+}
+
+async function handleAdminCapacityRecommendationSelection(req, recommendationId) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const selected = [...new Set((Array.isArray(body.actionIds) ? body.actionIds : []).map(value => String(value || "")).filter(value => /^[0-9a-f-]{36}$/i.test(value)))];
+  const runResult = await pool.query(`select status, expires_at from core.capacity_recommendation_runs where recommendation_id=$1`, [recommendationId]);
+  const run = runResult.rows[0];
+  if (!run) throw actionError("Recommendation preview was not found.", 404);
+  if (run.status !== "preview" || new Date(run.expires_at) <= new Date()) throw actionError("This preview is stale or has already been committed. Generate a fresh preview.", 409);
+  const result = await writePool.query(`
+    update core.capacity_recommendation_actions
+    set status = case when recommendation_action_id = any($2::uuid[]) then 'preview' else 'discarded' end
+    where recommendation_id = $1::uuid
+    returning recommendation_action_id, status
+  `, [recommendationId, selected]);
+  if (!result.rows.length) throw actionError("Recommendation preview was not found.", 404);
+  return { ok: true, kept: result.rows.filter(row => row.status === 'preview').length, discarded: result.rows.filter(row => row.status === 'discarded').length };
 }
 
 function adminAsanaCustomFields(task, preview, registry) {
@@ -9398,6 +9470,12 @@ const server = http.createServer(async (req, res) => {
     const capacityCommitMatch = url.pathname.match(/^\/api\/admin\/capacity-recommendations\/([0-9a-f-]+)\/commit$/i);
     if (capacityCommitMatch && req.method === "POST") {
       sendJson(res, 200, await handleAdminCapacityRecommendationCommit(req, capacityCommitMatch[1]));
+      return;
+    }
+
+    const capacitySelectionMatch = url.pathname.match(/^\/api\/admin\/capacity-recommendations\/([0-9a-f-]+)\/selection$/i);
+    if (capacitySelectionMatch && req.method === "POST") {
+      sendJson(res, 200, await handleAdminCapacityRecommendationSelection(req, capacitySelectionMatch[1]));
       return;
     }
 
