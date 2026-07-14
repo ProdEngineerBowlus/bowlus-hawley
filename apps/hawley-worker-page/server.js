@@ -8442,13 +8442,15 @@ async function handleAdminCapacityRecommendationPreview(req) {
   const samePhase = plan.samePhase;
   const sourcePhaseRow = plan.sourcePhaseRow;
   const priorSourceHours = sourcePhaseRow ? Number(priorHoursBySourcePhase.get(adminPhaseLabelKey(sourcePhaseRow.phaseName)) || 0) : 0;
+  const stagedDestinationCapacityHours = round(Number(phaseRow.capacityHours || 0) + priorHours, 2);
+  const stagedDestinationDeltaHours = round(Number(phaseRow.capacityDeltaSignedHours || 0) + priorHours, 2);
   const pacePreview = {
     phaseLabel,
-    beforeCapacityHours: Number(phaseRow.capacityHours || 0),
-    afterCapacityHours: round(Number(phaseRow.capacityHours || 0) + planRecommendedHours, 2),
+    beforeCapacityHours: stagedDestinationCapacityHours,
+    afterCapacityHours: round(stagedDestinationCapacityHours + recommendedHours, 2),
     remainingHours: Number(phaseRow.remainingHours || 0),
-    beforeDeltaHours: Number(phaseRow.capacityDeltaSignedHours || 0),
-    afterDeltaHours: round(Number(phaseRow.capacityDeltaSignedHours || 0) + planRecommendedHours, 2),
+    beforeDeltaHours: stagedDestinationDeltaHours,
+    afterDeltaHours: round(stagedDestinationDeltaHours + recommendedHours, 2),
     sourcePhase: sourcePhaseRow ? {
       phaseLabel: sourcePhaseRow.phaseName,
       remainingHours: Number(sourcePhaseRow.remainingHours || 0),

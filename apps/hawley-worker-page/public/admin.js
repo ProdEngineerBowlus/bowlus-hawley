@@ -1167,7 +1167,7 @@
           ${preview ? `
             ${preview.selectionMode === "manager_selected" && !(preview.actions || []).some(action => Number(action.completionCount || 0) > 0) ? `<div class="notice risk"><strong>Manager override:</strong> ${escapeHtml(preview.targetWorker?.name || "Selected worker")} has no prior completion evidence for these tasks. Review the declared skill and task list before committing.</div>` : ""}
             ${renderCapacityFlowStory(preview)}
-            ${renderCapacityPreviewSparkline(pace, plh?.cycleStatus)}
+            ${renderCapacityPreviewSparkline(pace, plh?.cycleStatus, preview)}
             <div class="table-scroll"><table class="data-table capacity-task-table"><thead><tr><th>Keep</th><th>Task</th><th>Current</th><th>Proposed</th><th>Hours</th><th>Skill evidence</th></tr></thead><tbody>
               ${(preview.actions || []).map(action => `<tr><td><input type="checkbox" data-capacity-task-select data-action-id="${escapeAttr(action.actionId)}" ${state.capacitySelectedActionIds.includes(action.actionId) ? "checked" : ""} aria-label="Keep ${escapeAttr(action.taskName)} in plan" /></td><td><strong>${escapeHtml(action.taskName)}</strong></td><td>${escapeHtml(action.previousWorkerName || action.previousWorkerEmail || "Unassigned")}</td><td>${escapeHtml(action.targetWorkerName)}</td><td>${formatHours(action.estimatedHours)}</td><td><span class="skill-dot">${escapeHtml(action.requiredSkillLevel ?? "—")}</span> ${escapeHtml(action.capabilityReason)}</td></tr>`).join("")}
             </tbody></table></div>
@@ -1240,12 +1240,15 @@
       </div>`;
   }
 
-  function renderCapacityPreviewSparkline(pace, cycleStatus) {
+  function renderCapacityPreviewSparkline(pace, cycleStatus, preview = {}) {
     if (!pace) return "";
     const days = Math.max(1, Number(cycleStatus?.remainingWorkdays || 1));
     const load = Math.max(0, Number(pace.remainingHours || 0));
     const beforeCapacity = Math.max(0, Number(pace.beforeCapacityHours || 0));
     const afterCapacity = Math.max(0, Number(pace.afterCapacityHours || 0));
+    const stagedTaskCount = Number(preview.lockedTaskCount || 0);
+    const beforeLabel = stagedTaskCount ? "After staged work" : "Current";
+    const afterLabel = stagedTaskCount ? "After this preview" : "Projected";
     const scale = Math.max(load, beforeCapacity, afterCapacity, 1);
     const loadPct = clamp(load / scale * 100, 0, 100);
     const bar = (label, capacity, delta, tone) => {
@@ -1269,8 +1272,8 @@
       <div class="capacity-preview-spark" title="Compares required open load with capacity before and after the proposed reassignment.">
         <div class="capacity-spark-heading"><strong>${escapeHtml(pace.phaseLabel)} load versus capacity</strong><span>${formatHours(load)} open load · ${formatNumber(days)} workdays remaining</span></div>
         <div class="capacity-balance-scale"><span>0h</span><span class="load-key">Required load ${formatHours(load)}</span><span>${formatHours(scale)}</span></div>
-        ${bar("Current", beforeCapacity, Number(pace.beforeDeltaHours || 0), "current")}
-        ${bar("Projected", afterCapacity, Number(pace.afterDeltaHours || 0), "projected")}
+        ${bar(beforeLabel, beforeCapacity, Number(pace.beforeDeltaHours || 0), "current")}
+        ${bar(afterLabel, afterCapacity, Number(pace.afterDeltaHours || 0), "projected")}
         <div class="capacity-balance-legend"><span><i class="key capacity"></i>Covered by capacity</span><span><i class="key gap"></i>Uncovered gap</span><span><i class="key cushion"></i>Extra cushion</span></div>
         ${pace.sourcePhase ? `<div class="capacity-source-impact"><strong>Tradeoff</strong><span>${escapeHtml(pace.sourcePhase.phaseLabel)} moves from ${formatSignedHours(pace.sourcePhase.beforeDeltaHours)} to ${formatSignedHours(pace.sourcePhase.afterDeltaHours)} gap/cushion.</span></div>` : `<div class="capacity-source-impact"><strong>Internal rebalance</strong><span>Total phase capacity stays the same; the task load is redistributed between workers.</span></div>`}
       </div>`;
