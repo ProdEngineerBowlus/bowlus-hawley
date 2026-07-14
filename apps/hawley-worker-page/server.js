@@ -8237,9 +8237,19 @@ async function handleAdminCapacityRecommendationPreview(req) {
     }
     return null;
   };
+  const targetGapHours = Math.max(0, -Number(phaseRow.capacityDeltaSignedHours || 0));
+  if (targetGapHours <= 0.05) {
+    throw actionError(`${phaseLabel} does not currently have a phase-level capacity gap to ease.`, 409);
+  }
   const candidatePlans = workersResult.rows.map(worker => {
     const available = Math.max(0, Number(worker.remaining_hours || 0));
     if (available < 0.25) return { worker, selected: [], hours: 0, exactCount: 0, available };
+    const samePhase = adminPhaseLabelKey(adminPresentationPhaseName(worker.home_section_column)) === adminPhaseLabelKey(phaseLabel);
+    const sourcePhaseRow = samePhase ? null : (metrics.phasePacing || []).find(row => adminPhaseLabelKey(row.phaseName) === adminPhaseLabelKey(adminPresentationPhaseName(worker.home_section_column)));
+    const sourceCushion = Math.max(0, Number(sourcePhaseRow?.capacityDeltaSignedHours || 0));
+    if (samePhase || !sourcePhaseRow || sourceCushion < 0.25) {
+      return { worker, selected: [], hours: 0, exactCount: 0, available, samePhase, sourcePhaseRow, sourceCushion };
+    }
     const eligible = tasks.filter(task => {
       if (task.worker_record_id === worker.workforce_record_id || (task.worker_email && worker.worker_email && task.worker_email.toLowerCase() === worker.worker_email.toLowerCase())) return false;
       const capability = capabilityFor(worker, task);
@@ -8251,20 +8261,21 @@ async function handleAdminCapacityRecommendationPreview(req) {
     });
     const selected = [];
     let hours = 0;
-    const ceiling = Math.min(requestedHours, available);
+    const ceiling = Math.min(requestedHours, targetGapHours, available, sourceCushion);
+    const atomicCeiling = Math.min(ceiling * 1.2, available, sourceCushion);
     for (const task of eligible) {
       const taskHours = Number(task.estimated_hours || 0);
-      if (!taskHours || hours + taskHours > ceiling * 1.2) continue;
+      if (!taskHours || hours + taskHours > atomicCeiling) continue;
       selected.push(task);
       hours += taskHours;
       if (hours >= ceiling) break;
     }
     const exactCount = selected.filter(task => capabilityFor(worker, task)?.completion_count).length;
-    return { worker, selected, hours: round(hours, 2), exactCount, available };
+    return { worker, selected, hours: round(hours, 2), exactCount, available, samePhase, sourcePhaseRow, sourceCushion };
   }).filter(plan => plan.selected.length && plan.hours > 0)
     .sort((a, b) => b.exactCount - a.exactCount || b.hours - a.hours || b.available - a.available);
   const plan = candidatePlans[0];
-  if (!plan) throw actionError(`No qualified worker with available C${cycleNumber} capacity matched the open ${phaseLabel} tasks.`, 409);
+  if (!plan) throw actionError(`No qualified transfer can reduce the ${phaseLabel} gap without creating a gap in another phase.`, 409);
 
   const recommendationId = crypto.randomUUID();
   const actions = plan.selected.map(task => {
@@ -8280,8 +8291,8 @@ async function handleAdminCapacityRecommendationPreview(req) {
     };
   });
   const recommendedHours = round(actions.reduce((sum, action) => sum + action.estimatedHours, 0), 2);
-  const samePhase = adminPhaseLabelKey(adminPresentationPhaseName(plan.worker.home_section_column)) === adminPhaseLabelKey(phaseLabel);
-  const sourcePhaseRow = samePhase ? null : (metrics.phasePacing || []).find(row => adminPhaseLabelKey(row.phaseName) === adminPhaseLabelKey(adminPresentationPhaseName(plan.worker.home_section_column)));
+  const samePhase = plan.samePhase;
+  const sourcePhaseRow = plan.sourcePhaseRow;
   const pacePreview = {
     phaseLabel,
     beforeCapacityHours: Number(phaseRow.capacityHours || 0),
@@ -8320,6 +8331,20 @@ async function handleAdminCapacityRecommendationCommit(req, recommendationId) {
   const run = runResult.rows[0];
   if (!run) throw actionError("Recommendation preview was not found.", 404);
   if (run.status !== "preview" || new Date(run.expires_at) <= new Date()) throw actionError("This preview is stale or has already been committed. Generate a fresh preview.", 409);
+  const storedPreview = run.preview_json || {};
+  const storedPace = storedPreview.pacePreview || {};
+  if (storedPace.mode !== "capacity_float" || !storedPace.sourcePhase || Number(storedPace.sourcePhase.afterDeltaHours || 0) < -0.05) {
+    throw actionError("This preview does not produce a safe net schedule improvement. Generate a fresh preview.", 409);
+  }
+  const currentMetrics = await adminPlhMetricsPayload();
+  const currentSource = (currentMetrics.phasePacing || []).find(row => adminPhaseLabelKey(row.phaseName) === adminPhaseLabelKey(storedPace.sourcePhase.phaseLabel));
+  const currentTarget = (currentMetrics.phasePacing || []).find(row => adminPhaseLabelKey(row.phaseName) === adminPhaseLabelKey(storedPreview.phaseLabel));
+  if (!currentSource || Number(currentSource.capacityDeltaSignedHours || 0) + 0.05 < Number(storedPreview.recommendedHours || 0)) {
+    throw actionError("The source phase no longer has enough cushion for this transfer. Generate a fresh preview.", 409);
+  }
+  if (!currentTarget || Number(currentTarget.capacityDeltaSignedHours || 0) >= -0.05) {
+    throw actionError("The destination phase no longer has a capacity gap. Generate a fresh preview.", 409);
+  }
   const actionsResult = await pool.query(`select * from core.capacity_recommendation_actions where recommendation_id=$1 order by estimated_hours desc`, [recommendationId]);
   const userGids = await adminAsanaUserGidsByEmail(token);
   const targetGid = userGids.get(String(actionsResult.rows[0]?.target_worker_email || "").toLowerCase());
