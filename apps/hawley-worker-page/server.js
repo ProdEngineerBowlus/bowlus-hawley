@@ -8151,6 +8151,182 @@ async function adminAsanaUserGidsByEmail(token) {
   return new Map((users || []).filter(user => user.email).map(user => [String(user.email).toLowerCase(), user.gid]));
 }
 
+function adminPhaseSkillValue(worker, phaseLabel) {
+  const key = adminPhaseLabelKey(adminPresentationPhaseName(phaseLabel));
+  if (key.includes("fabrication") || key === "fab") return Number(worker.fab_skill_level || 0);
+  if (key.includes("cnc")) return Number(worker.cnc_skill_level || 0);
+  if (key.includes("frame")) return Number(worker.frames_skill_level || worker.phase_a_skill_level || 0);
+  const match = key.match(/phase([a-h])/);
+  return match ? Number(worker[`phase_${match[1]}_skill_level`] || 0) : 0;
+}
+
+async function handleAdminCapacityRecommendationPreview(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const metrics = await adminPlhMetricsPayload();
+  const cycleNumber = adminCycleNumber(body.cycleNumber || metrics.cycleStatus?.cycleNumber);
+  const phaseLabel = adminPresentationPhaseName(body.phaseLabel || body.phase || "");
+  const phaseRow = (metrics.phasePacing || []).find(row => adminPhaseLabelKey(row.phaseName) === adminPhaseLabelKey(phaseLabel));
+  if (!cycleNumber || !phaseRow) throw actionError("Choose a current-cycle phase.", 400);
+  const requestedHours = Math.max(0.25, Math.min(80, Number(body.hours || Math.max(0, -Number(phaseRow.capacityDeltaSignedHours || 0)) || 8)));
+
+  const [tasksResult, workersResult] = await Promise.all([
+    pool.query(`
+      select ti.rev1_task_instance_id, ti.asana_task_gid, ti.task_name, ti.tasks_record_id,
+        ti.phase_label, ti.section_column, ti.worker_record_id, ti.worker_name,
+        coalesce(ti.worker_email, ti.assignee_email) as worker_email,
+        greatest(coalesce(ti.allocated_hours, ti.estimated_batch_task_time_seconds / 3600.0,
+          ti.estimated_task_time_seconds / 3600.0, 0), 0)::numeric(12,2) as estimated_hours,
+        tt.required_skill_level
+      from hb.rev1_task_instances ti
+      left join hb.task_templates tt on tt.task_record_id = ti.tasks_record_id
+      left join hb.cycles c on c.cycle_record_id = ti.cycle_record_id
+      where c.cycle_number = $1
+        and not coalesce(ti.task_completed, false)
+        and lower(coalesce(ti.task_status, ti.status, '')) not in ('complete','completed','done','true','yes')
+        and ti.asana_task_gid is not null and ti.tasks_record_id is not null
+        and not exists (select 1 from core.time_sessions s where s.asana_task_gid = ti.asana_task_gid and s.stopped_at is null)
+      order by estimated_hours desc, ti.task_order nulls last
+    `, [cycleNumber]),
+    pool.query(`
+      select wf.*, coalesce(bank.remaining_hours, 0)::numeric(12,2) as remaining_hours
+      from hb.work_force wf
+      left join hb.worker_cycle_bank_rev1 bank
+        on bank.worker_record_id = wf.workforce_record_id
+       and bank.cycle_record_id in (select cycle_record_id from hb.cycles where cycle_number = $1)
+      where wf.actively_employed
+      order by wf.worker_name
+    `, [cycleNumber])
+  ]);
+  const tasks = tasksResult.rows.filter(row => adminPhaseLabelKey(adminPresentationPhaseName(row.phase_label || row.section_column)) === adminPhaseLabelKey(phaseLabel));
+  if (!tasks.length) throw actionError(`No open, assignable ${phaseLabel} tasks were found in C${cycleNumber}.`, 409);
+
+  const taskIds = [...new Set(tasks.map(row => row.tasks_record_id))];
+  const capabilityResult = await pool.query(`
+    select * from core.worker_task_capabilities where task_record_id = any($1::text[])
+  `, [taskIds]);
+  const capabilityByWorkerTask = new Map();
+  for (const row of capabilityResult.rows) {
+    const identities = [row.worker_record_id, row.worker_email, row.worker_identity].filter(Boolean);
+    for (const identity of identities) capabilityByWorkerTask.set(`${String(identity).toLowerCase()}::${row.task_record_id}`, row);
+  }
+  const capabilityFor = (worker, task) => {
+    for (const identity of [worker.workforce_record_id, worker.worker_email].filter(Boolean)) {
+      const found = capabilityByWorkerTask.get(`${String(identity).toLowerCase()}::${task.tasks_record_id}`);
+      if (found) return found;
+    }
+    return null;
+  };
+  const candidatePlans = workersResult.rows.map(worker => {
+    const available = Math.max(0, Number(worker.remaining_hours || 0));
+    if (available < 0.25) return { worker, selected: [], hours: 0, exactCount: 0, available };
+    const eligible = tasks.filter(task => {
+      if (task.worker_record_id === worker.workforce_record_id || (task.worker_email && worker.worker_email && task.worker_email.toLowerCase() === worker.worker_email.toLowerCase())) return false;
+      const capability = capabilityFor(worker, task);
+      return Boolean(capability?.completion_count) || adminPhaseSkillValue(worker, phaseLabel) >= Number(task.required_skill_level || 0);
+    }).sort((a, b) => {
+      const aCap = capabilityFor(worker, a);
+      const bCap = capabilityFor(worker, b);
+      return Number(Boolean(bCap?.completion_count)) - Number(Boolean(aCap?.completion_count)) || Number(bCap?.completion_count || 0) - Number(aCap?.completion_count || 0) || Number(b.estimated_hours) - Number(a.estimated_hours);
+    });
+    const selected = [];
+    let hours = 0;
+    const ceiling = Math.min(requestedHours, available);
+    for (const task of eligible) {
+      const taskHours = Number(task.estimated_hours || 0);
+      if (!taskHours || hours + taskHours > ceiling * 1.2) continue;
+      selected.push(task);
+      hours += taskHours;
+      if (hours >= ceiling) break;
+    }
+    const exactCount = selected.filter(task => capabilityFor(worker, task)?.completion_count).length;
+    return { worker, selected, hours: round(hours, 2), exactCount, available };
+  }).filter(plan => plan.selected.length && plan.hours > 0)
+    .sort((a, b) => b.exactCount - a.exactCount || b.hours - a.hours || b.available - a.available);
+  const plan = candidatePlans[0];
+  if (!plan) throw actionError(`No qualified worker with available C${cycleNumber} capacity matched the open ${phaseLabel} tasks.`, 409);
+
+  const recommendationId = crypto.randomUUID();
+  const actions = plan.selected.map(task => {
+    const capability = capabilityFor(plan.worker, task);
+    return {
+      actionId: crypto.randomUUID(), taskInstanceId: Number(task.rev1_task_instance_id), asanaTaskGid: task.asana_task_gid,
+      taskName: task.task_name, taskRecordId: task.tasks_record_id, phaseLabel,
+      estimatedHours: Number(task.estimated_hours || 0), requiredSkillLevel: task.required_skill_level === null ? null : Number(task.required_skill_level),
+      previousWorkerRecordId: task.worker_record_id, previousWorkerName: task.worker_name, previousWorkerEmail: task.worker_email,
+      targetWorkerRecordId: plan.worker.workforce_record_id, targetWorkerName: plan.worker.worker_name, targetWorkerEmail: plan.worker.worker_email,
+      capabilityReason: capability?.completion_count ? `Completed this task ${capability.completion_count} time${Number(capability.completion_count) === 1 ? "" : "s"}` : `Declared ${phaseLabel} skill ${adminPhaseSkillValue(plan.worker, phaseLabel)}`,
+      completionCount: Number(capability?.completion_count || 0)
+    };
+  });
+  const recommendedHours = round(actions.reduce((sum, action) => sum + action.estimatedHours, 0), 2);
+  const samePhase = adminPhaseLabelKey(adminPresentationPhaseName(plan.worker.home_section_column)) === adminPhaseLabelKey(phaseLabel);
+  const sourcePhaseRow = samePhase ? null : (metrics.phasePacing || []).find(row => adminPhaseLabelKey(row.phaseName) === adminPhaseLabelKey(adminPresentationPhaseName(plan.worker.home_section_column)));
+  const pacePreview = {
+    phaseLabel,
+    beforeCapacityHours: Number(phaseRow.capacityHours || 0),
+    afterCapacityHours: round(Number(phaseRow.capacityHours || 0) + (samePhase ? 0 : recommendedHours), 2),
+    remainingHours: Number(phaseRow.remainingHours || 0),
+    beforeDeltaHours: Number(phaseRow.capacityDeltaSignedHours || 0),
+    afterDeltaHours: round(Number(phaseRow.capacityDeltaSignedHours || 0) + (samePhase ? 0 : recommendedHours), 2),
+    sourcePhase: sourcePhaseRow ? {
+      phaseLabel: sourcePhaseRow.phaseName,
+      beforeDeltaHours: Number(sourcePhaseRow.capacityDeltaSignedHours || 0),
+      afterDeltaHours: round(Number(sourcePhaseRow.capacityDeltaSignedHours || 0) - recommendedHours, 2)
+    } : null,
+    mode: samePhase ? "workload_rebalance" : "capacity_float",
+    note: samePhase ? "This balances work inside the phase; total phase capacity does not change." : `Adds ${recommendedHours.toFixed(2)}h to ${phaseLabel}; the worker's home phase gives up the same scheduled time.`
+  };
+  const preview = { recommendationId, cycleNumber, cycleLabel: metrics.cycleStatus?.label || `C${cycleNumber}`, phaseLabel, requestedHours, recommendedHours, targetWorker: { name: plan.worker.worker_name, email: plan.worker.worker_email, homePhase: plan.worker.home_section_column, availableHours: plan.available }, pacePreview, actions, expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(), status: "preview" };
+  const client = await writePool.connect();
+  try {
+    await client.query("begin");
+    await client.query(`insert into core.capacity_recommendation_runs (recommendation_id, cycle_number, cycle_label, phase_label, requested_hours, recommended_hours, generated_by, preview_json) values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)`, [recommendationId, cycleNumber, preview.cycleLabel, phaseLabel, requestedHours, recommendedHours, actor?.email || "admin", JSON.stringify(preview)]);
+    for (const action of actions) await client.query(`insert into core.capacity_recommendation_actions (recommendation_action_id,recommendation_id,task_instance_id,asana_task_gid,task_name,task_record_id,phase_label,estimated_hours,required_skill_level,previous_worker_record_id,previous_worker_name,previous_worker_email,target_worker_record_id,target_worker_name,target_worker_email,capability_reason,completion_count) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`, [action.actionId,recommendationId,action.taskInstanceId,action.asanaTaskGid,action.taskName,action.taskRecordId,phaseLabel,action.estimatedHours,action.requiredSkillLevel,action.previousWorkerRecordId,action.previousWorkerName,action.previousWorkerEmail,action.targetWorkerRecordId,action.targetWorkerName,action.targetWorkerEmail,action.capabilityReason,action.completionCount]);
+    await client.query("commit");
+  } catch (error) { await client.query("rollback"); throw error; } finally { client.release(); }
+  return preview;
+}
+
+async function handleAdminCapacityRecommendationCommit(req, recommendationId) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const token = process.env.ASANA_PAT;
+  if (!token) throw actionError("ASANA_PAT is not configured for schedule writes.", 503);
+  const runResult = await pool.query(`select * from core.capacity_recommendation_runs where recommendation_id=$1`, [recommendationId]);
+  const run = runResult.rows[0];
+  if (!run) throw actionError("Recommendation preview was not found.", 404);
+  if (run.status !== "preview" || new Date(run.expires_at) <= new Date()) throw actionError("This preview is stale or has already been committed. Generate a fresh preview.", 409);
+  const actionsResult = await pool.query(`select * from core.capacity_recommendation_actions where recommendation_id=$1 order by estimated_hours desc`, [recommendationId]);
+  const userGids = await adminAsanaUserGidsByEmail(token);
+  const targetGid = userGids.get(String(actionsResult.rows[0]?.target_worker_email || "").toLowerCase());
+  if (!targetGid) throw actionError("The recommended worker could not be matched to an Asana user by email.", 409);
+  const verified = [];
+  for (const action of actionsResult.rows) {
+    const live = await adminAsanaRequest(token, `/tasks/${action.asana_task_gid}?opt_fields=gid,completed,assignee.gid,assignee.email,assignee.name`);
+    const expected = String(action.previous_worker_email || "").toLowerCase();
+    const actual = String(live?.assignee?.email || "").toLowerCase();
+    if (live?.completed || actual !== expected) throw actionError(`Schedule changed since preview for “${action.task_name}”. Generate a fresh preview.`, 409);
+    verified.push(action);
+  }
+  const results = [];
+  for (const action of verified) {
+    try {
+      await updateAsanaTask(token, action.asana_task_gid, { assignee: targetGid });
+      await writePool.query(`update core.capacity_recommendation_actions set status='committed', committed_at=now() where recommendation_action_id=$1`, [action.recommendation_action_id]);
+      results.push({ taskName: action.task_name, ok: true });
+    } catch (error) {
+      await writePool.query(`update core.capacity_recommendation_actions set status='failed', error_message=$2 where recommendation_action_id=$1`, [action.recommendation_action_id, error.message]);
+      results.push({ taskName: action.task_name, ok: false, error: error.message });
+    }
+  }
+  const failures = results.filter(row => !row.ok);
+  const status = failures.length ? (failures.length === results.length ? "failed" : "partial") : "committed";
+  await writePool.query(`update core.capacity_recommendation_runs set status=$2, committed_at=case when $2='committed' then now() else committed_at end, commit_result_json=$3::jsonb where recommendation_id=$1`, [recommendationId, status, JSON.stringify({ actor: actor?.email || "admin", results })]);
+  return { ok: !failures.length, status, recommendationId, changedTasks: results.length - failures.length, failures };
+}
+
 function adminAsanaCustomFields(task, preview, registry) {
   const schedule = task.schedule || preview.schedule || {};
   const payload = {};
@@ -9154,6 +9330,17 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/phase-cycle-pacing" && req.method === "POST") {
       sendJson(res, 200, await handleAdminPhaseCyclePaceOverride(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/capacity-recommendations/preview" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminCapacityRecommendationPreview(req));
+      return;
+    }
+
+    const capacityCommitMatch = url.pathname.match(/^\/api\/admin\/capacity-recommendations\/([0-9a-f-]+)\/commit$/i);
+    if (capacityCommitMatch && req.method === "POST") {
+      sendJson(res, 200, await handleAdminCapacityRecommendationCommit(req, capacityCommitMatch[1]));
       return;
     }
 

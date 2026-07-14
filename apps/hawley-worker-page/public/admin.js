@@ -19,7 +19,12 @@
     loginPending: false,
     loginError: "",
     createMessage: "",
-    dashboardMessage: ""
+    dashboardMessage: "",
+    capacityPhase: "",
+    capacityHours: "",
+    capacityPreview: null,
+    capacityLoading: false,
+    capacityMessage: ""
   };
 
   function escapeHtml(value) {
@@ -1099,6 +1104,7 @@
           <span class="section-tag">Open</span>
         </summary>
         <div class="config-drawer-body">
+          ${renderCapacityRecommendationControls(plh)}
           ${renderTruePaceControls(plh)}
           ${renderScheduleAlignment(plh)}
           <article class="panel config-inner-panel">
@@ -1110,6 +1116,40 @@
         </div>
       </details>
     `;
+  }
+
+  function renderCapacityRecommendationControls(plh) {
+    const phases = plh?.phasePacing || [];
+    const preview = state.capacityPreview;
+    const pace = preview?.pacePreview;
+    const selectedPhase = state.capacityPhase || phases[0]?.phaseName || "";
+    return `
+      <article class="panel config-inner-panel capacity-planner">
+        <div class="panel-header">
+          <div><h3 class="panel-title">Capacity Recommendation</h3><p class="muted">Preview qualified task moves before changing the live Asana schedule.</p></div>
+          ${preview ? pill(preview.status === "committed" ? "Committed" : "Read-only preview", preview.status === "committed" ? "good" : "warn") : ""}
+        </div>
+        <div class="panel-body">
+          <div class="capacity-controls">
+            <label class="field"><span>Phase</span><select data-capacity-phase>${phases.map(row => `<option value="${escapeAttr(row.phaseName)}" ${row.phaseName === selectedPhase ? "selected" : ""}>${escapeHtml(row.phaseName)} · ${escapeHtml(row.capacityLabel)} ${formatHours(row.capacityDeltaHours)}</option>`).join("")}</select></label>
+            <label class="field"><span>Hours to ease</span><input data-capacity-hours type="number" min="0.25" max="80" step="0.25" value="${escapeAttr(state.capacityHours)}" placeholder="Auto from gap" /></label>
+            <button class="btn primary" type="button" data-action="capacity-preview" ${state.capacityLoading || !phases.length ? "disabled" : ""}>${state.capacityLoading ? "Building preview…" : "Generate preview"}</button>
+          </div>
+          ${state.capacityMessage ? `<div class="notice ${state.capacityMessage.toLowerCase().includes("could") || state.capacityMessage.toLowerCase().includes("stale") ? "risk" : ""}">${escapeHtml(state.capacityMessage)}</div>` : ""}
+          ${preview ? `
+            <div class="capacity-preview-summary">
+              <div><span>Recommended worker</span><strong>${escapeHtml(preview.targetWorker?.name || "—")}</strong><small>${escapeHtml(preview.targetWorker?.homePhase || "No home phase")} · ${formatHours(preview.targetWorker?.availableHours)} bank available</small></div>
+              <div><span>Task load moved</span><strong>${formatHours(preview.recommendedHours)}</strong><small>${formatNumber(preview.actions?.length)} tasks · requested ${formatHours(preview.requestedHours)}</small></div>
+              <div><span>${escapeHtml(preview.phaseLabel)} capacity</span><strong>${formatHours(pace?.beforeCapacityHours)} → ${formatHours(pace?.afterCapacityHours)}</strong><small>${escapeHtml(pace?.note || "")}</small></div>
+              <div><span>Gap / cushion</span><strong>${formatSignedHours(pace?.beforeDeltaHours)} → ${formatSignedHours(pace?.afterDeltaHours)}</strong><small>${pace?.sourcePhase ? `${escapeHtml(pace.sourcePhase.phaseLabel)}: ${formatSignedHours(pace.sourcePhase.beforeDeltaHours)} → ${formatSignedHours(pace.sourcePhase.afterDeltaHours)}` : "Positive is cushion; negative is gap"}</small></div>
+            </div>
+            <div class="table-scroll"><table class="data-table capacity-task-table"><thead><tr><th>Task</th><th>Current</th><th>Proposed</th><th>Hours</th><th>Skill evidence</th></tr></thead><tbody>
+              ${(preview.actions || []).map(action => `<tr><td><strong>${escapeHtml(action.taskName)}</strong></td><td>${escapeHtml(action.previousWorkerName || action.previousWorkerEmail || "Unassigned")}</td><td>${escapeHtml(action.targetWorkerName)}</td><td>${formatHours(action.estimatedHours)}</td><td><span class="skill-dot">${escapeHtml(action.requiredSkillLevel ?? "—")}</span> ${escapeHtml(action.capabilityReason)}</td></tr>`).join("")}
+            </tbody></table></div>
+            <div class="capacity-commit-row"><small>Preview expires ${escapeHtml(new Date(preview.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}. Commit rechecks every live assignee first.</small><button class="btn primary" type="button" data-action="capacity-commit" ${state.capacityLoading || preview.status !== "preview" ? "disabled" : ""}>Commit changes to schedule</button></div>
+          ` : `<div class="notice">Choose a phase to generate a deterministic pace and task reassignment preview. Nothing changes until Commit is selected.</div>`}
+        </div>
+      </article>`;
   }
 
   function renderDashboard() {
@@ -1398,6 +1438,39 @@
       await loadAll();
     } else if (action === "logout") {
       await logout();
+    } else if (action === "capacity-preview") {
+      state.capacityLoading = true;
+      state.capacityMessage = "";
+      render();
+      try {
+        state.capacityPreview = await postJson("/api/admin/capacity-recommendations/preview", {
+          phaseLabel: state.capacityPhase || state.dashboard?.plh?.phasePacing?.[0]?.phaseName || "",
+          hours: state.capacityHours || undefined
+        });
+        state.capacityMessage = `Preview ready: ${state.capacityPreview.actions?.length || 0} task moves.`;
+      } catch (error) {
+        state.capacityPreview = null;
+        state.capacityMessage = error.message || "Could not build a recommendation preview.";
+      } finally {
+        state.capacityLoading = false;
+        render();
+      }
+    } else if (action === "capacity-commit") {
+      const preview = state.capacityPreview;
+      if (!preview || !window.confirm(`Commit ${preview.actions?.length || 0} task assignment changes to the live Asana schedule?`)) return;
+      state.capacityLoading = true;
+      render();
+      try {
+        const result = await postJson(`/api/admin/capacity-recommendations/${preview.recommendationId}/commit`, {});
+        state.capacityPreview = { ...preview, status: result.status };
+        state.capacityMessage = result.ok ? `Committed ${result.changedTasks} live schedule changes. Hawley will reflect them on the next one-minute refresh.` : `Committed ${result.changedTasks} changes with ${result.failures?.length || 0} failures.`;
+        await loadDashboard();
+      } catch (error) {
+        state.capacityMessage = error.message || "Could not commit the schedule changes.";
+      } finally {
+        state.capacityLoading = false;
+        render();
+      }
     } else if (action === "true-pace-save" || action === "true-pace-reset" || action === "true-pace-jit") {
       const row = event.target.closest("[data-true-pace-row]");
       if (!row) return;
@@ -1457,6 +1530,18 @@
   });
 
   root.addEventListener("input", event => {
+    const phaseInput = event.target.closest("[data-capacity-phase]");
+    if (phaseInput) {
+      state.capacityPhase = phaseInput.value;
+      state.capacityPreview = null;
+      return;
+    }
+    const hoursInput = event.target.closest("[data-capacity-hours]");
+    if (hoursInput) {
+      state.capacityHours = hoursInput.value;
+      state.capacityPreview = null;
+      return;
+    }
     const nameInput = event.target.closest("[data-project-name]");
     if (!nameInput) return;
     state.projectName = nameInput.value;
