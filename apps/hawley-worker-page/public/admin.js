@@ -1143,6 +1143,7 @@
               <div><span>${escapeHtml(preview.phaseLabel)} capacity</span><strong>${formatHours(pace?.beforeCapacityHours)} → ${formatHours(pace?.afterCapacityHours)}</strong><small>${escapeHtml(pace?.note || "")}</small></div>
               <div><span>Gap / cushion</span><strong>${formatSignedHours(pace?.beforeDeltaHours)} → ${formatSignedHours(pace?.afterDeltaHours)}</strong><small>${pace?.sourcePhase ? `${escapeHtml(pace.sourcePhase.phaseLabel)}: ${formatSignedHours(pace.sourcePhase.beforeDeltaHours)} → ${formatSignedHours(pace.sourcePhase.afterDeltaHours)}` : "Positive is cushion; negative is gap"}</small></div>
             </div>
+            ${renderCapacityPreviewSparkline(pace, plh?.cycleStatus)}
             <div class="table-scroll"><table class="data-table capacity-task-table"><thead><tr><th>Task</th><th>Current</th><th>Proposed</th><th>Hours</th><th>Skill evidence</th></tr></thead><tbody>
               ${(preview.actions || []).map(action => `<tr><td><strong>${escapeHtml(action.taskName)}</strong></td><td>${escapeHtml(action.previousWorkerName || action.previousWorkerEmail || "Unassigned")}</td><td>${escapeHtml(action.targetWorkerName)}</td><td>${formatHours(action.estimatedHours)}</td><td><span class="skill-dot">${escapeHtml(action.requiredSkillLevel ?? "—")}</span> ${escapeHtml(action.capabilityReason)}</td></tr>`).join("")}
             </tbody></table></div>
@@ -1150,6 +1151,39 @@
           ` : `<div class="notice">Choose a phase to generate a deterministic pace and task reassignment preview. Nothing changes until Commit is selected.</div>`}
         </div>
       </article>`;
+  }
+
+  function renderCapacityPreviewSparkline(pace, cycleStatus) {
+    if (!pace) return "";
+    const width = 520;
+    const height = 112;
+    const days = Math.max(1, Number(cycleStatus?.remainingWorkdays || 1));
+    const remaining = Math.max(0, Number(pace.remainingHours || 0));
+    const beforeCapacity = Math.max(0, Number(pace.beforeCapacityHours || 0));
+    const afterCapacity = Math.max(0, Number(pace.afterCapacityHours || 0));
+    const currentPoints = Array.from({ length: days + 1 }, (_, day) => Math.max(remaining - (beforeCapacity * day / days), 0));
+    const proposedPoints = Array.from({ length: days + 1 }, (_, day) => Math.max(remaining - (afterCapacity * day / days), 0));
+    const maxValue = Math.max(remaining, 1);
+    const zeroY = height;
+    const currentEnd = currentPoints[currentPoints.length - 1];
+    const proposedEnd = proposedPoints[proposedPoints.length - 1];
+    const proposedPath = sparklinePath(proposedPoints, width, height, maxValue);
+    const currentPath = sparklinePath(currentPoints, width, height, maxValue);
+    const gapTone = proposedEnd > 0 ? "var(--accent)" : "var(--primary)";
+    return `
+      <div class="capacity-preview-spark" title="Yellow projects the current assignment plan. Green projects the proposed task reassignment. Both show estimated open hours through the remaining cycle workdays.">
+        <div class="capacity-spark-heading"><strong>${escapeHtml(pace.phaseLabel)} projected open hours</strong><span>${formatNumber(days)} workdays remaining</span></div>
+        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Current and proposed remaining load projection">
+          <line x1="0" y1="0" x2="${width}" y2="0" stroke="rgba(240,245,233,0.08)"></line>
+          <line x1="0" y1="${(height / 2).toFixed(1)}" x2="${width}" y2="${(height / 2).toFixed(1)}" stroke="rgba(240,245,233,0.08)"></line>
+          <line x1="0" y1="${zeroY}" x2="${width}" y2="${zeroY}" stroke="rgba(240,245,233,0.22)"></line>
+          <path d="${currentPath}" fill="none" stroke="var(--warn)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"></path>
+          <path d="${proposedPath}" fill="none" stroke="var(--primary)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"></path>
+          <circle cx="${width}" cy="${(height - (currentEnd / maxValue) * height).toFixed(1)}" r="5" fill="var(--warn)"></circle>
+          <circle cx="${width}" cy="${(height - (proposedEnd / maxValue) * height).toFixed(1)}" r="5" fill="var(--primary)"></circle>
+        </svg>
+        <div class="capacity-spark-legend"><span class="current">Current: ${formatHours(currentEnd)} open</span><span class="proposed">Proposed: ${formatHours(proposedEnd)} open</span><strong style="color:${gapTone}">${proposedEnd > 0 ? `${formatHours(proposedEnd)} gap` : `${formatHours(Math.max(0, Number(pace.afterDeltaHours || 0)))} cushion`}</strong></div>
+      </div>`;
   }
 
   function renderDashboard() {
