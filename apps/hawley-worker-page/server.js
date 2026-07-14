@@ -8200,7 +8200,7 @@ async function handleAdminCapacityRecommendationPreview(req) {
       throw actionError("All workers in a plan must ease the same destination phase.", 409);
     }
   }
-  const requestedHours = Math.max(0.25, Math.min(80, Number(body.hours || Math.max(0, -Number(phaseRow.capacityDeltaSignedHours || 0)) || 8)));
+  const requestedHoursInput = Math.max(0.25, Math.min(80, Number(body.hours || Math.max(0, -Number(phaseRow.capacityDeltaSignedHours || 0)) || 8)));
 
   const [tasksResult, workersResult] = await Promise.all([
     pool.query(`
@@ -8274,6 +8274,7 @@ async function handleAdminCapacityRecommendationPreview(req) {
   if (targetGapHours <= 0.05 || remainingGapHours <= 0.05) {
     throw actionError(`${phaseLabel} does not currently have a phase-level capacity gap to ease.`, 409);
   }
+  const requestedHours = Math.min(requestedHoursInput, remainingGapHours);
   if (requestedWorkerRecordId && priorWorkerIds.has(requestedWorkerRecordId)) throw actionError("That worker is already staged in this plan. Choose another worker for the remaining gap.", 409);
   const candidateWorkers = requestedWorkerRecordId
     ? workersResult.rows.filter(worker => worker.workforce_record_id === requestedWorkerRecordId)
@@ -8301,7 +8302,7 @@ async function handleAdminCapacityRecommendationPreview(req) {
     const selected = [];
     let hours = 0;
     const ceiling = Math.min(requestedHours, remainingGapHours, available, sourceCushion);
-    const atomicCeiling = Math.min(ceiling * 1.2, available, sourceCushion);
+    const atomicCeiling = ceiling;
     for (const task of eligible) {
       const taskHours = Number(task.estimated_hours || 0);
       if (!taskHours || hours + taskHours > atomicCeiling) continue;
@@ -8358,7 +8359,7 @@ async function handleAdminCapacityRecommendationPreview(req) {
     mode: samePhase ? "workload_rebalance" : "capacity_float",
     note: samePhase ? "This balances work inside the phase; total phase capacity does not change." : `Adds ${recommendedHours.toFixed(2)}h to ${phaseLabel}; the worker's home phase gives up the same scheduled time.`
   };
-  const preview = { recommendationId, cycleNumber, cycleLabel: metrics.cycleStatus?.label || `C${cycleNumber}`, phaseLabel, requestedHours, recommendedHours, planRecommendedHours, priorRecommendationIds, lockedTaskCount: priorActions.length, selectionMode: requestedWorkerRecordId ? "manager_selected" : "automatic", targetWorker: { recordId: plan.worker.workforce_record_id, name: plan.worker.worker_name, email: plan.worker.worker_email, homePhase: plan.worker.home_section_column, availableHours: plan.available, declaredSkill: adminPhaseSkillValue(plan.worker, phaseLabel) || null }, pacePreview, actions, expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(), status: "preview" };
+  const preview = { recommendationId, cycleNumber, cycleLabel: metrics.cycleStatus?.label || `C${cycleNumber}`, phaseLabel, requestedHours, targetGapHours, remainingGapHours, recommendedHours, projectedRemainingGapHours: round(Math.max(0, remainingGapHours - recommendedHours), 2), planRecommendedHours, priorRecommendationIds, lockedTaskCount: priorActions.length, selectionMode: requestedWorkerRecordId ? "manager_selected" : "automatic", targetWorker: { recordId: plan.worker.workforce_record_id, name: plan.worker.worker_name, email: plan.worker.worker_email, homePhase: plan.worker.home_section_column, availableHours: plan.available, declaredSkill: adminPhaseSkillValue(plan.worker, phaseLabel) || null }, pacePreview, actions, expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(), status: "preview" };
   const client = await writePool.connect();
   try {
     await client.query("begin");

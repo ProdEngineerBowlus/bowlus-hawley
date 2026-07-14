@@ -26,6 +26,7 @@
     capacityPreview: null,
     capacityPlanIds: [],
     capacityStagedPlans: [],
+    capacityPlanRemainingGapHours: null,
     capacitySelectedActionIds: [],
     capacityLoading: false,
     capacityMessage: "",
@@ -1157,10 +1158,10 @@
           <div class="capacity-controls">
             <label class="field"><span>Phase</span><select data-capacity-phase>${phases.map(row => `<option value="${escapeAttr(row.phaseName)}" ${row.phaseName === selectedPhase ? "selected" : ""}>${escapeHtml(row.phaseName)} · ${escapeHtml(row.capacityLabel)} ${formatHours(row.capacityDeltaHours)}</option>`).join("")}</select></label>
             <label class="field"><span>Worker</span><select data-capacity-worker><option value="">Automatic recommendation</option>${eligibleWorkers.map(worker => `<option value="${escapeAttr(worker.workforce_record_id)}" ${state.capacityWorker === worker.workforce_record_id ? "selected" : ""}>${escapeHtml(worker.worker_name)} · ${escapeHtml(worker.home_section_column || "No home phase")} · ${formatHours(worker.transferableHours)} safe</option>`).join("")}</select><small>${eligibleWorkers.length ? `${formatNumber(eligibleWorkers.length)} workers have bank and source-phase cushion.` : "No workers currently have safe transferable capacity."}</small></label>
-            <label class="field"><span>Hours to ease</span><input data-capacity-hours type="number" min="0.25" max="80" step="0.25" value="${escapeAttr(state.capacityHours)}" placeholder="Auto from gap" /><small>Approximate task hours to move. Blank uses the current gap.</small></label>
+            <label class="field"><span>Hours to ease</span><input data-capacity-hours type="number" min="0.25" max="80" step="0.25" value="${escapeAttr(state.capacityHours)}" placeholder="Auto from remaining gap" /><small>Approximate task hours to move. Blank uses the current unstaged gap.</small></label>
             <button class="btn primary" type="button" data-action="capacity-preview" ${state.capacityLoading || !phases.length || !eligibleWorkers.length ? "disabled" : ""}>${state.capacityLoading ? "Building preview…" : "Generate preview"}</button>
           </div>
-          ${stagedWorkers ? `<div class="notice good"><strong>Plan in progress:</strong> ${formatNumber(stagedWorkers)} worker${stagedWorkers === 1 ? "" : "s"} staged. Keep the task checkboxes you want, then add another worker or commit the combined plan. <button class="btn ghost" type="button" data-action="capacity-clear-plan">Clear staged plan</button></div>` : ""}
+          ${stagedWorkers ? `<div class="notice good"><strong>Plan in progress:</strong> ${formatNumber(stagedWorkers)} worker${stagedWorkers === 1 ? "" : "s"} staged${state.capacityPlanRemainingGapHours !== null ? ` · ${formatHours(state.capacityPlanRemainingGapHours)} still to ease` : ""}. The next worker is capped at that remainder. <button class="btn ghost" type="button" data-action="capacity-clear-plan">Clear staged plan</button></div>` : ""}
           ${renderStagedCapacitySchedule()}
           ${state.capacityMessage ? `<div class="notice ${state.capacityMessage.toLowerCase().includes("could") || state.capacityMessage.toLowerCase().includes("stale") ? "risk" : ""}">${escapeHtml(state.capacityMessage)}</div>` : ""}
           ${preview ? `
@@ -1573,7 +1574,8 @@
           priorRecommendationIds: state.capacityPlanIds
         });
         state.capacitySelectedActionIds = (state.capacityPreview.actions || []).map(action => action.actionId);
-        state.capacityMessage = `Preview ready: ${state.capacityPreview.actions?.length || 0} task moves.`;
+        const previewRemainder = Number(state.capacityPreview.projectedRemainingGapHours || 0);
+        state.capacityMessage = `Preview ready: ${state.capacityPreview.actions?.length || 0} task moves${state.capacityPlanIds.length ? ` · ${formatHours(previewRemainder)} would remain after these moves` : ""}.`;
       } catch (error) {
         state.capacityPreview = null;
         state.capacitySelectedActionIds = [];
@@ -1590,6 +1592,7 @@
         await Promise.all(planIds.map(id => postJson(`/api/admin/capacity-recommendations/${id}/selection`, { actionIds: [] })));
         state.capacityPlanIds = [];
         state.capacityStagedPlans = [];
+        state.capacityPlanRemainingGapHours = null;
         state.capacityPreview = null;
         state.capacitySelectedActionIds = [];
         state.capacityMessage = "Staged plan cleared. No schedule changes were made.";
@@ -1623,6 +1626,7 @@
       try {
         await postJson(`/api/admin/capacity-recommendations/${preview.recommendationId}/selection`, { actionIds: state.capacitySelectedActionIds });
         const selectedActions = (preview.actions || []).filter(action => state.capacitySelectedActionIds.includes(action.actionId));
+        const selectedHours = selectedActions.reduce((sum, action) => sum + Number(action.estimatedHours || 0), 0);
         state.capacityPlanIds = [...new Set([...state.capacityPlanIds, preview.recommendationId])];
         state.capacityStagedPlans = [...state.capacityStagedPlans, {
           recommendationId: preview.recommendationId,
@@ -1634,7 +1638,9 @@
         state.capacityPreview = null;
         state.capacitySelectedActionIds = [];
         state.capacityWorker = "";
-        state.capacityMessage = "Selected tasks are staged. Choose another worker and generate their task list for the remaining gap.";
+        state.capacityHours = "";
+        state.capacityPlanRemainingGapHours = Math.max(0, Number(preview.remainingGapHours || 0) - selectedHours);
+        state.capacityMessage = `Selected tasks are staged. ${formatHours(state.capacityPlanRemainingGapHours)} remains to ease; the next preview will use only that remainder.`;
       } catch (error) {
         state.capacityMessage = error.message || "Could not stage the selected tasks.";
       } finally {
@@ -1654,6 +1660,7 @@
         state.capacityPreview = { ...preview, status: result.status };
         state.capacityPlanIds = [];
         state.capacityStagedPlans = [];
+        state.capacityPlanRemainingGapHours = null;
         state.capacitySelectedActionIds = [];
         state.capacityMessage = result.ok ? `Committed ${result.changedTasks} live schedule changes. Hawley will reflect them on the next one-minute refresh.` : `Committed ${result.changedTasks} changes with ${result.failures?.length || 0} failures.`;
         await loadDashboard();
