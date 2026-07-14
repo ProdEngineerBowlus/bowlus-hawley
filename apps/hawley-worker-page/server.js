@@ -1489,6 +1489,9 @@ function taskFromRow(row) {
     targetHours: round(estimatedHours),
     estimatedHours: round(estimatedHours),
     estimatedMinutes: minutesFromHours(estimatedHours),
+    requiredSkillLevel: row.required_skill_level === null || row.required_skill_level === undefined
+      ? null
+      : Number(row.required_skill_level),
     actualTimeMinutes: Number(row.actual_time_minutes || 0),
     actualTimeOnDateMinutes: 0,
     sourceUrl: publicLink(row.asana_permalink_url),

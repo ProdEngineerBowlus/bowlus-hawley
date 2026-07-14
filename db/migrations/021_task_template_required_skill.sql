@@ -1,3 +1,16 @@
+alter table hb.task_templates
+  add column if not exists required_skill_level numeric(12, 4);
+
+update hb.task_templates
+set required_skill_level = case
+  when nullif(regexp_replace(coalesce(fields_json->>'Required Skill Level', ''), '[^0-9.\-]+', '', 'g'), '') is null then null
+  else nullif(regexp_replace(coalesce(fields_json->>'Required Skill Level', ''), '[^0-9.\-]+', '', 'g'), '')::numeric
+end
+where required_skill_level is distinct from case
+  when nullif(regexp_replace(coalesce(fields_json->>'Required Skill Level', ''), '[^0-9.\-]+', '', 'g'), '') is null then null
+  else nullif(regexp_replace(coalesce(fields_json->>'Required Skill Level', ''), '[^0-9.\-]+', '', 'g'), '')::numeric
+end;
+
 create or replace view reporting.hawley_worker_page_assignments as
 select
   dwa.task_instance_id,
@@ -34,3 +47,5 @@ left join raw.asana_tasks asana_task on asana_task.gid = dwa.asana_task_gid
 left join hb.rev1_task_instances hb_task on hb_task.rev1_task_instance_id = dwa.task_instance_id
 left join hb.task_templates task_template on task_template.task_record_id = hb_task.tasks_record_id
 left join reporting.task_work_area_inference work_area on work_area.task_instance_id = dwa.task_instance_id;
+
+grant select on reporting.hawley_worker_page_assignments to bowlus_app, bowlus_readonly;

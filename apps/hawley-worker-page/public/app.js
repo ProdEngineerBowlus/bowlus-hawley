@@ -1457,12 +1457,17 @@
     const estimateChip = renderEstimateChip(task);
     const taskLoggedMinutes = taskActualLoggedMinutes(task);
     const taskWipMinutes = taskActualWipMinutes(task);
+    const requiredSkillLevel = Number(task.requiredSkillLevel);
+    const skillMarker = Number.isFinite(requiredSkillLevel) && requiredSkillLevel > 0
+      ? `<span class="task-skill-marker skill-level-${escapeAttr(Math.min(3, Math.max(1, Math.round(requiredSkillLevel))))}" title="Task skill requirement" aria-label="Task skill requirement ${escapeAttr(requiredSkillLevel)}">${escapeHtml(requiredSkillLevel)}</span>`
+      : "";
     const wipLabel = timerHasTime
       ? `${formatMinutes(taskWipMinutes || timerMinutes)} WIP ${timerStartedAt ? "running" : "paused"}`
       : `${formatMinutes(taskWipMinutes)} WIP`;
 
     return `
       <article class="task-card${task.completed ? " done" : ""}">
+        ${skillMarker}
         ${locked ? "" : `<input class="task-check" type="checkbox" aria-label="${escapeAttr(task.title)} complete" ${task.completed ? "checked" : ""} disabled />`}
         <div>
           <h3 class="task-title">${escapeHtml(task.title)}</h3>

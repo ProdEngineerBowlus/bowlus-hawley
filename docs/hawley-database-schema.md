@@ -82,7 +82,7 @@ Purpose: Hawley Brain. This is the preferred normalized shop model for schedulin
 | `hb.phase_cycle_load_rev1` | one phase/cycle load bucket | `pg:build:hb` | Remaining, completed, and total load by phase/cycle. Supports PLH-style debt and pacing. |
 | `hb.worker_phase_allocation_rev1` | one worker/cycle/phase allocation | `pg:build:hb` | Assigned, imported, exported, and cross-phase support hours. |
 | `hb.worker_cycle_bank_rev1` | one worker/cycle capacity bank | `pg:build:hb` | Worker cycle capacity, assigned hours, remaining hours, and effective bank. |
-| `hb.task_templates` | one task template | `pg:build:hb` | Postgres task-template model sourced from Airtable `Tasks`. |
+| `hb.task_templates` | one task template | `pg:build:hb` | Postgres task-template model sourced from Airtable `Tasks`, including the normalized `Required Skill Level`. |
 | `hb.production_schedule` | one production schedule row | `pg:build:hb` | Postgres production schedule sourced from Airtable `Production`. |
 | `hb.vins` | one VIN | `pg:build:hb` | Normalized VIN model and frame-class context for project creation. |
 | `hb.models` | one model/frame row | `pg:build:hb` | Normalized model/frame reference table for template filtering. |
@@ -190,6 +190,10 @@ Purpose: migration, import, run-state, and future writeback bookkeeping.
 - `hb.production_schedule` is the schedule source for Project Creator.
 - `hb.task_templates`, `hb.vins`, and `hb.models` supply the task/template/model
   context needed to preview and create VIN or Fabrication projects.
+- Worker-page task rows join `hb.rev1_task_instances.tasks_record_id` to
+  `hb.task_templates.task_record_id` and expose the template's required skill
+  level as a subtle numbered task-card marker. Missing template links remain
+  unmarked rather than implying a requirement.
 - Airtable remains a human planning interface for editable planning tables
   during migration; Hawley/Postgres should be refreshed after those edits before
   project creation.
