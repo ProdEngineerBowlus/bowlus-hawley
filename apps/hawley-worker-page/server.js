@@ -2354,7 +2354,9 @@ function applyWorkerDailyActualRows(workers, actualRows) {
       existingTask.ledgerBackfilled = true;
       existingTask.ledgerSource = row.source || "Worker Daily Task Actuals";
       existingTask.ledgerSyncedAt = row.syncedAt || "";
-      if (row.completed) existingTask.completed = true;
+      // Asana is the source of truth for current completion and assignment.
+      // A Hawley ledger row records work history, and must not re-complete a
+      // task that a manager reopened or re-add a task after reassignment.
       if (!existingTask.title && row.taskName) existingTask.title = row.taskName;
       if (!existingTask.vin && row.vin) existingTask.vin = row.vin;
       if (!existingTask.cycle && row.cycle) existingTask.cycle = row.cycle;
@@ -2362,31 +2364,10 @@ function applyWorkerDailyActualRows(workers, actualRows) {
       continue;
     }
 
-    worker.tasks.push({
-      id: taskIdValue,
-      title: row.taskName || `Source task ${taskIdValue}`,
-      sourceUrl: row.taskUrl || (taskIdValue ? sourceTaskUrl(taskIdValue) : ""),
-      trackerUrl: "",
-      assignedHours: row.assignedHours,
-      targetHours: row.allocatedHours || row.assignedHours,
-      actualTimeMinutes: row.asanaPostedMinutes,
-      actualTimeOnDateMinutes: row.loggedMinutes,
-      timerStartedAt: row.timerStartedAt || "",
-      timerAccumulatedMinutes: row.timerMinutes,
-      timerElapsedMinutes: 0,
-      estimatedMinutes: minutesFromHours(row.allocatedHours || row.assignedHours),
-      sopUrl: "",
-      completed: row.completed,
-      cycle: row.cycle,
-      phase: row.phase,
-      phaseBucket: "",
-      vin: row.vin,
-      workedTimeRecovered: true,
-      ledgerBackfilled: true,
-      recoveredSource: row.source || "Worker Daily Task Actuals",
-      ledgerSource: row.source || "Worker Daily Task Actuals",
-      ledgerSyncedAt: row.syncedAt || ""
-    });
+    // Do not synthesize an assignment from a historical ledger row. If the
+    // task is absent from the current Asana assignment payload, it has been
+    // unassigned or reassigned and should no longer appear on this worker's
+    // active page. The ledger remains available for reporting and audit.
   }
 
   for (const worker of workers || []) {
