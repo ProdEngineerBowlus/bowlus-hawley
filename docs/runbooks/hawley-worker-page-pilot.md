@@ -38,6 +38,13 @@ After the first admin can sign in, remove the bootstrap password env value and
 redeploy. Runtime sessions use the HTTP-only `hawley_session` cookie; browser
 JavaScript does not store session tokens.
 
+Sessions are persistent by default. Each app load renews the browser cookie and
+the matching server-side session for 400 days. A session ends when the user
+chooses Logout, an administrator revokes the account/session, or the account is
+deactivated. Set `HAWLEY_AUTH_PERSISTENT_SESSIONS=false` to restore fixed-hour
+expiry through `HAWLEY_AUTH_SESSION_TTL_HOURS`; the renewal period can be
+changed with `HAWLEY_AUTH_PERSISTENT_SESSION_DAYS`.
+
 To activate a specific employee for testing after auth is enabled, set a
 temporary password in the shell and run the admin CLI:
 

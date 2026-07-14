@@ -104,6 +104,8 @@ const APP_AUTH_BOOTSTRAP_EMAIL = String(process.env.HAWLEY_AUTH_BOOTSTRAP_EMAIL 
 const APP_AUTH_BOOTSTRAP_PASSWORD = String(process.env.HAWLEY_AUTH_BOOTSTRAP_PASSWORD || "");
 const APP_AUTH_COOKIE_NAME = process.env.HAWLEY_AUTH_COOKIE_NAME || "hawley_session";
 const APP_AUTH_SESSION_TTL_HOURS = Number(process.env.HAWLEY_AUTH_SESSION_TTL_HOURS || 12);
+const APP_AUTH_PERSISTENT_SESSIONS = booleanEnv("HAWLEY_AUTH_PERSISTENT_SESSIONS", true);
+const APP_AUTH_PERSISTENT_SESSION_DAYS = Math.max(1, Number(process.env.HAWLEY_AUTH_PERSISTENT_SESSION_DAYS || 400));
 const APP_AUTH_MANAGER_EMAILS = new Set(envList(process.env.HAWLEY_AUTH_MANAGER_EMAILS).map(normalizeEmail).filter(Boolean));
 const APP_AUTH_ADMIN_EMAILS = new Set(envList(process.env.HAWLEY_AUTH_ADMIN_EMAILS).map(normalizeEmail).filter(Boolean));
 const SHOP_TIME_ZONE = "America/Los_Angeles";
@@ -3095,7 +3097,8 @@ function appAuthBaseStatus(user = null) {
     authenticated: Boolean(user),
     user,
     cookieName: APP_AUTH_COOKIE_NAME,
-    sessionTtlHours: Number.isFinite(APP_AUTH_SESSION_TTL_HOURS) ? APP_AUTH_SESSION_TTL_HOURS : 12,
+    persistentSessions: APP_AUTH_PERSISTENT_SESSIONS,
+    sessionTtlHours: authSessionTtlSeconds() / 3600,
     rosterSeedOnStart: APP_AUTH_SEED_ROSTER_ON_START,
     bootstrapEnabled: APP_AUTH_BOOTSTRAP_ENABLED,
     managerEmailsConfigured: APP_AUTH_MANAGER_EMAILS.size,
@@ -3122,10 +3125,20 @@ function authStatusPayload(user = null) {
 }
 
 function authSessionTtlSeconds() {
+  if (APP_AUTH_PERSISTENT_SESSIONS) return Math.round(APP_AUTH_PERSISTENT_SESSION_DAYS * 24 * 60 * 60);
   const hours = Number.isFinite(APP_AUTH_SESSION_TTL_HOURS) && APP_AUTH_SESSION_TTL_HOURS > 0
     ? APP_AUTH_SESSION_TTL_HOURS
     : 12;
   return Math.round(hours * 60 * 60);
+}
+
+function refreshedAuthCookieHeaders(req, user) {
+  if (!APP_AUTH_PERSISTENT_SESSIONS || !user) return {};
+  const token = parseCookies(req)[APP_AUTH_COOKIE_NAME];
+  if (!token) return {};
+  return {
+    "Set-Cookie": cookieHeader(APP_AUTH_COOKIE_NAME, token, { maxAge: authSessionTtlSeconds() })
+  };
 }
 
 function sessionTokenHash(token) {
@@ -3401,8 +3414,16 @@ async function authActorFromRequest(req) {
     if (!result.rows[0]) return null;
     authRuntimeState.lastSessionCheckStep = "touch_session";
     await client.query(
-      "update core.app_sessions set last_seen_at = now() where session_token_hash = $1",
-      [tokenHash]
+      `
+        update core.app_sessions
+        set last_seen_at = now(),
+            expires_at = case
+              when $2::boolean then now() + ($3::int * interval '1 second')
+              else expires_at
+            end
+        where session_token_hash = $1
+      `,
+      [tokenHash, APP_AUTH_PERSISTENT_SESSIONS, authSessionTtlSeconds()]
     );
     authRuntimeState.lastSessionCheckStep = "ok";
     return authUserPayload(result.rows[0]);
@@ -9060,12 +9081,14 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/auth-status" && req.method === "GET") {
-      sendJson(res, 200, authStatusPayload(await authActorFromRequest(req)));
+      const actor = await authActorFromRequest(req);
+      sendJson(res, 200, authStatusPayload(actor), refreshedAuthCookieHeaders(req, actor));
       return;
     }
 
     if (url.pathname === "/api/auth/me" && req.method === "GET") {
-      sendJson(res, 200, await authMePayload(req));
+      const payload = await authMePayload(req);
+      sendJson(res, 200, payload, refreshedAuthCookieHeaders(req, payload.user));
       return;
     }
 
