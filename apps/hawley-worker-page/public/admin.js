@@ -1155,34 +1155,37 @@
 
   function renderCapacityPreviewSparkline(pace, cycleStatus) {
     if (!pace) return "";
-    const width = 520;
-    const height = 112;
     const days = Math.max(1, Number(cycleStatus?.remainingWorkdays || 1));
-    const remaining = Math.max(0, Number(pace.remainingHours || 0));
+    const load = Math.max(0, Number(pace.remainingHours || 0));
     const beforeCapacity = Math.max(0, Number(pace.beforeCapacityHours || 0));
     const afterCapacity = Math.max(0, Number(pace.afterCapacityHours || 0));
-    const currentPoints = Array.from({ length: days + 1 }, (_, day) => Math.max(remaining - (beforeCapacity * day / days), 0));
-    const proposedPoints = Array.from({ length: days + 1 }, (_, day) => Math.max(remaining - (afterCapacity * day / days), 0));
-    const maxValue = Math.max(remaining, 1);
-    const zeroY = height;
-    const currentEnd = currentPoints[currentPoints.length - 1];
-    const proposedEnd = proposedPoints[proposedPoints.length - 1];
-    const proposedPath = sparklinePath(proposedPoints, width, height, maxValue);
-    const currentPath = sparklinePath(currentPoints, width, height, maxValue);
-    const gapTone = proposedEnd > 0 ? "var(--accent)" : "var(--primary)";
+    const scale = Math.max(load, beforeCapacity, afterCapacity, 1);
+    const loadPct = clamp(load / scale * 100, 0, 100);
+    const bar = (label, capacity, delta, tone) => {
+      const capacityPct = clamp(Math.min(capacity, load) / scale * 100, 0, 100);
+      const cushionPct = clamp(Math.max(capacity - load, 0) / scale * 100, 0, 100);
+      const gapPct = clamp(Math.max(load - capacity, 0) / scale * 100, 0, 100);
+      const result = delta >= 0 ? `${formatHours(delta)} cushion` : `${formatHours(Math.abs(delta))} gap`;
+      return `<div class="capacity-balance-row ${tone}">
+        <div class="capacity-balance-label"><strong>${escapeHtml(label)}</strong><span>${formatHours(capacity)} capacity</span></div>
+        <div class="capacity-balance-track">
+          <div class="capacity-balance-load" style="width:${loadPct.toFixed(2)}%"></div>
+          <div class="capacity-balance-fill" style="width:${capacityPct.toFixed(2)}%"></div>
+          ${gapPct ? `<div class="capacity-balance-gap" style="left:${capacityPct.toFixed(2)}%;width:${gapPct.toFixed(2)}%"></div>` : ""}
+          ${cushionPct ? `<div class="capacity-balance-cushion" style="left:${loadPct.toFixed(2)}%;width:${cushionPct.toFixed(2)}%"></div>` : ""}
+          <i class="capacity-load-marker" style="left:${loadPct.toFixed(2)}%"></i>
+        </div>
+        <div class="capacity-balance-result ${delta >= 0 ? "good" : "risk-text"}">${escapeHtml(result)}</div>
+      </div>`;
+    };
     return `
-      <div class="capacity-preview-spark" title="Yellow projects the current assignment plan. Green projects the proposed task reassignment. Both show estimated open hours through the remaining cycle workdays.">
-        <div class="capacity-spark-heading"><strong>${escapeHtml(pace.phaseLabel)} projected open hours</strong><span>${formatNumber(days)} workdays remaining</span></div>
-        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Current and proposed remaining load projection">
-          <line x1="0" y1="0" x2="${width}" y2="0" stroke="rgba(240,245,233,0.08)"></line>
-          <line x1="0" y1="${(height / 2).toFixed(1)}" x2="${width}" y2="${(height / 2).toFixed(1)}" stroke="rgba(240,245,233,0.08)"></line>
-          <line x1="0" y1="${zeroY}" x2="${width}" y2="${zeroY}" stroke="rgba(240,245,233,0.22)"></line>
-          <path d="${currentPath}" fill="none" stroke="var(--warn)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"></path>
-          <path d="${proposedPath}" fill="none" stroke="var(--primary)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"></path>
-          <circle cx="${width}" cy="${(height - (currentEnd / maxValue) * height).toFixed(1)}" r="5" fill="var(--warn)"></circle>
-          <circle cx="${width}" cy="${(height - (proposedEnd / maxValue) * height).toFixed(1)}" r="5" fill="var(--primary)"></circle>
-        </svg>
-        <div class="capacity-spark-legend"><span class="current">Current: ${formatHours(currentEnd)} open</span><span class="proposed">Proposed: ${formatHours(proposedEnd)} open</span><strong style="color:${gapTone}">${proposedEnd > 0 ? `${formatHours(proposedEnd)} gap` : `${formatHours(Math.max(0, Number(pace.afterDeltaHours || 0)))} cushion`}</strong></div>
+      <div class="capacity-preview-spark" title="Compares required open load with capacity before and after the proposed reassignment.">
+        <div class="capacity-spark-heading"><strong>${escapeHtml(pace.phaseLabel)} load versus capacity</strong><span>${formatHours(load)} open load · ${formatNumber(days)} workdays remaining</span></div>
+        <div class="capacity-balance-scale"><span>0h</span><span class="load-key">Required load ${formatHours(load)}</span><span>${formatHours(scale)}</span></div>
+        ${bar("Current", beforeCapacity, Number(pace.beforeDeltaHours || 0), "current")}
+        ${bar("Projected", afterCapacity, Number(pace.afterDeltaHours || 0), "projected")}
+        <div class="capacity-balance-legend"><span><i class="key capacity"></i>Covered by capacity</span><span><i class="key gap"></i>Uncovered gap</span><span><i class="key cushion"></i>Extra cushion</span></div>
+        ${pace.sourcePhase ? `<div class="capacity-source-impact"><strong>Tradeoff</strong><span>${escapeHtml(pace.sourcePhase.phaseLabel)} moves from ${formatSignedHours(pace.sourcePhase.beforeDeltaHours)} to ${formatSignedHours(pace.sourcePhase.afterDeltaHours)} gap/cushion.</span></div>` : `<div class="capacity-source-impact"><strong>Internal rebalance</strong><span>Total phase capacity stays the same; the task load is redistributed between workers.</span></div>`}
       </div>`;
   }
 
