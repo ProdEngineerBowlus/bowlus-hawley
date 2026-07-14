@@ -3583,6 +3583,100 @@ async function blockingLiveTimerForWorker(client, workerId, date, exceptTaskId =
   return liveTimerFromRow(result.rows[0]);
 }
 
+async function releaseResidualWorkerTimerBlockers(client, worker, date, excludedLedgerKey, eventAt, authActor = null) {
+  const result = await client.query(
+    `
+      select
+        ledger_key,
+        asana_task_gid,
+        task_name,
+        phase_label,
+        assigned_hours,
+        actual_minutes,
+        timer_minutes,
+        asana_posted_minutes,
+        fields_json
+      from hb.worker_daily_task_actuals
+      where worker_key = $1
+        and work_date = $2::date
+        and source_system = $3
+        and coalesce(completed, false) = false
+        and ledger_key <> $4
+        and (
+          coalesce(fields_json ->> 'Timer Started At', '') <> ''
+          or coalesce(timer_minutes, 0) > 0
+        )
+      for update
+    `,
+    [worker.id, date, LIVE_WORKER_SOURCE, excludedLedgerKey]
+  );
+
+  const released = [];
+  const eventIso = eventAt.toISOString();
+  const authAudit = actorAuditPayload(authActor, worker.id);
+
+  for (const row of result.rows) {
+    const timer = liveTimerFromRow(row);
+    const elapsedMinutes = liveTimerElapsedMinutes(timer, eventAt, date);
+    const actualMinutes = liveTimerTotalActualMinutes(timer, eventAt, date);
+    const segmentMinutes = runningSegmentMinutes(timer, eventAt, date);
+    const task = {
+      id: timer.taskId,
+      title: timer.taskName,
+      phase: row.phase_label || "",
+      assignedHours: Number(row.assigned_hours || 0),
+      estimatedHours: Number(row.assigned_hours || 0)
+    };
+
+    await client.query(
+      `
+        update hb.worker_daily_task_actuals
+        set
+          actual_minutes = $2,
+          timer_minutes = 0,
+          source_label = 'Hawley manager session cleanup',
+          last_seen_at = $3::timestamptz,
+          source_synced_at = $3::timestamptz,
+          fields_json = coalesce(fields_json, '{}'::jsonb)
+            || jsonb_build_object(
+              'Actual Minutes', $2,
+              'Timer Minutes', 0,
+              'Timer Started At', '',
+              'Last Seen At', $3::text,
+              'Session Released At', $3::text,
+              'Session Released By', $4::text,
+              'Session Release Reason', 'manager_end_session_cleanup'
+            ),
+          normalized_at = now()
+        where ledger_key = $1
+      `,
+      [row.ledger_key, actualMinutes, eventIso, authActor?.email || "manager"]
+    );
+
+    await closeTimeSession(client, worker, task, date, timer.startedAt, eventIso, "manager_release_cleanup", segmentMinutes, {
+      action: "manager-release-cleanup",
+      ...authAudit,
+      ledgerKey: row.ledger_key,
+      elapsedMinutes,
+      actualMinutes
+    });
+    await recordWorkerTaskEvent(client, worker, task, date, "release", eventIso, {
+      authActor,
+      durationMinutes: segmentMinutes || elapsedMinutes,
+      payload: {
+        ...authAudit,
+        cleanup: true,
+        elapsedMinutes,
+        actualMinutes,
+        ledgerKey: row.ledger_key
+      }
+    });
+    released.push({ taskId: timer.taskId, taskName: timer.taskName });
+  }
+
+  return released;
+}
+
 async function acquireWorkerDayTimerLock(client, workerId, date) {
   const key = `hawley-worker-timer::${workerId}::${date}`;
   await client.query("select pg_advisory_lock(hashtext($1))", [key]);
@@ -4851,6 +4945,9 @@ async function handleWorkerTaskAction(req) {
           }
         });
       });
+      const releasedResidualTimers = actorIsManager(authActor)
+        ? await releaseResidualWorkerTimerBlockers(client, worker, date, ledgerKey, eventAt, authActor)
+        : [];
 
       return {
         ok: true,
@@ -4861,7 +4958,8 @@ async function handleWorkerTaskAction(req) {
         elapsedMinutes,
         actualMinutes: saved.actualMinutes || actualMinutes,
         completed: false,
-        released: true
+        released: true,
+        releasedResidualTimerCount: releasedResidualTimers.length
       };
     }
 

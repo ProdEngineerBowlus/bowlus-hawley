@@ -1954,7 +1954,13 @@
         throw new Error(payload.error || `Save failed with ${response.status}`);
       }
 
-      showToast("Timer session ended");
+      const payload = await response.json().catch(() => ({}));
+      const releasedResidualTimerCount = Number(payload.releasedResidualTimerCount || 0);
+      showToast(
+        releasedResidualTimerCount
+          ? `Timer session ended and ${releasedResidualTimerCount} stale session${releasedResidualTimerCount === 1 ? " was" : "s were"} cleared`
+          : "Timer session ended"
+      );
       await loadAssignments();
     } catch (error) {
       state.actionTaskId = "";
