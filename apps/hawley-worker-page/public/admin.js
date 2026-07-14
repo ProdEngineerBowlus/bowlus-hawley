@@ -1132,7 +1132,7 @@
         <div class="panel-body">
           <div class="capacity-controls">
             <label class="field"><span>Phase</span><select data-capacity-phase>${phases.map(row => `<option value="${escapeAttr(row.phaseName)}" ${row.phaseName === selectedPhase ? "selected" : ""}>${escapeHtml(row.phaseName)} · ${escapeHtml(row.capacityLabel)} ${formatHours(row.capacityDeltaHours)}</option>`).join("")}</select></label>
-            <label class="field"><span>Hours to ease</span><input data-capacity-hours type="number" min="0.25" max="80" step="0.25" value="${escapeAttr(state.capacityHours)}" placeholder="Auto from gap" /></label>
+            <label class="field"><span>Hours to ease</span><input data-capacity-hours type="number" min="0.25" max="80" step="0.25" value="${escapeAttr(state.capacityHours)}" placeholder="Auto from gap" /><small>Approximate task hours to move. Blank uses the current gap.</small></label>
             <button class="btn primary" type="button" data-action="capacity-preview" ${state.capacityLoading || !phases.length ? "disabled" : ""}>${state.capacityLoading ? "Building preview…" : "Generate preview"}</button>
           </div>
           ${state.capacityMessage ? `<div class="notice ${state.capacityMessage.toLowerCase().includes("could") || state.capacityMessage.toLowerCase().includes("stale") ? "risk" : ""}">${escapeHtml(state.capacityMessage)}</div>` : ""}
@@ -1147,7 +1147,7 @@
             <div class="table-scroll"><table class="data-table capacity-task-table"><thead><tr><th>Task</th><th>Current</th><th>Proposed</th><th>Hours</th><th>Skill evidence</th></tr></thead><tbody>
               ${(preview.actions || []).map(action => `<tr><td><strong>${escapeHtml(action.taskName)}</strong></td><td>${escapeHtml(action.previousWorkerName || action.previousWorkerEmail || "Unassigned")}</td><td>${escapeHtml(action.targetWorkerName)}</td><td>${formatHours(action.estimatedHours)}</td><td><span class="skill-dot">${escapeHtml(action.requiredSkillLevel ?? "—")}</span> ${escapeHtml(action.capabilityReason)}</td></tr>`).join("")}
             </tbody></table></div>
-            <div class="capacity-commit-row"><small>Preview expires ${escapeHtml(new Date(preview.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}. Commit rechecks every live assignee first.</small><button class="btn primary" type="button" data-action="capacity-commit" ${state.capacityLoading || preview.status !== "preview" ? "disabled" : ""}>Commit changes to schedule</button></div>
+            <div class="capacity-commit-row"><small>Preview expires ${escapeHtml(new Date(preview.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}. Commit rechecks every live assignee first.</small><div class="inline-actions"><button class="btn ghost" type="button" data-action="capacity-discard">Discard preview</button><button class="btn primary" type="button" data-action="capacity-commit" ${state.capacityLoading || preview.status !== "preview" ? "disabled" : ""}>Commit changes to schedule</button></div></div>
           ` : `<div class="notice">Choose a phase to generate a deterministic pace and task reassignment preview. Nothing changes until Commit is selected.</div>`}
         </div>
       </article>`;
@@ -1489,6 +1489,10 @@
         state.capacityLoading = false;
         render();
       }
+    } else if (action === "capacity-discard") {
+      state.capacityPreview = null;
+      state.capacityMessage = "Preview discarded. No schedule changes were made.";
+      render();
     } else if (action === "capacity-commit") {
       const preview = state.capacityPreview;
       if (!preview || !window.confirm(`Commit ${preview.actions?.length || 0} task assignment changes to the live Asana schedule?`)) return;
