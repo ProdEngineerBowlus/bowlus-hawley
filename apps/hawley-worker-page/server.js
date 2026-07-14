@@ -8276,7 +8276,7 @@ async function handleAdminCapacityRecommendationPreview(req) {
     const eligible = tasks.filter(task => {
       if (task.worker_record_id === worker.workforce_record_id || (task.worker_email && worker.worker_email && task.worker_email.toLowerCase() === worker.worker_email.toLowerCase())) return false;
       const capability = capabilityFor(worker, task);
-      return Boolean(requestedWorkerRecordId) || Boolean(capability?.completion_count) || adminPhaseSkillValue(worker, phaseLabel) >= Number(task.required_skill_level || 0);
+      return Boolean(capability?.completion_count) || adminPhaseSkillValue(worker, phaseLabel) >= Number(task.required_skill_level || 0);
     }).sort((a, b) => {
       const aCap = capabilityFor(worker, a);
       const bCap = capabilityFor(worker, b);
