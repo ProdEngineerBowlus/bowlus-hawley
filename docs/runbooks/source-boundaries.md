@@ -45,11 +45,21 @@ Postgres becomes the local authority for:
 - admin project-creation run logs
 - sync logs and failure diagnosis
 
-## Worker App Direction
+## Worker App (Current)
 
-The future worker app should read current assignments from Postgres and write
-local timer/session events to Postgres first. A separate verified sync should
-then push final time/completion records to Asana.
+The current worker app reads assignments from Postgres and writes local
+timer/session events to Postgres first. Completing a task posts the verified
+time entry and completion to Asana. The one-minute Asana event watcher then
+returns the Hawley mirror to current execution state.
+
+The manager-facing **End Session** control stops a session without completing
+the task. A manager release also clears residual same-day timer blockers while
+preserving recorded actual minutes and the event/session audit trail.
+
+Current boundary debt is tracked in
+`docs/runbooks/hawley-code-audit-2026-07-15.md`. In particular, GET reporting
+routes still perform scheduled timer enforcement, and the completion writeback
+path has not yet moved to the durable queue described below.
 
 ## Admin Direction
 

@@ -27,6 +27,8 @@ Run command: npm run worker:hawley
 
 ## Runtime Environment
 
+Last verified: 2026-07-15.
+
 Required App Platform runtime variables:
 
 ```text
@@ -86,6 +88,19 @@ should point at a database user that can create schemas/tables and write mirror
 data during bootstrap, such as the DigitalOcean admin user or a properly granted
 `bowlus_sync` user. Store it as an encrypted App Platform variable. Do not paste
 the value into chat or commit it.
+
+> Current implementation note: the Hawley web server presently constructs both
+> its read and write pools with `getDatabaseConfig({ useSyncUrl: true })`.
+> Therefore the running service uses the sync-capable URL whenever it is set;
+> `DATABASE_URL` alone is not the effective production privilege boundary yet.
+> Do not change or remove the sync URL until a separate app-role/write-path
+> migration has been planned and tested. This is tracked in
+> `hawley-code-audit-2026-07-15.md`.
+
+> Startup note: production currently applies migrations/views by default unless
+> `HAWLEY_APPLY_MIGRATIONS_ON_START=false` is set. The service logs and
+> continues after a startup-migration failure. Keep schema changes deliberate,
+> and use `npm run pg:migrate` for controlled migration work.
 
 `HAWLEY_AUTH_ACTIVE=false` keeps the installed employee login system inactive.
 When ready to test account login, set `HAWLEY_AUTH_ACTIVE=true`, configure

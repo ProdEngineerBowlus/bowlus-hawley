@@ -1,5 +1,9 @@
 # SW_Machine Postgres Setup
 
+> Status: legacy setup guide. Hawley's current production runtime is DigitalOcean
+> App Platform with managed Postgres. Do not use this guide to deploy or modify
+> the current production service; see `digitalocean-app-platform.md` instead.
+
 This runbook prepares `SW_Machine` as the first H.A.W.L.E. ("Hawley") host.
 
 ## Boundaries

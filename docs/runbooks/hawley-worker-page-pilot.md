@@ -1,20 +1,19 @@
 # Hawley Worker Page Pilot
 
+Last updated: 2026-07-15
+
 The Hawley worker page is a pilot clone of the Daily Worker App. It uses
 Hawley/Postgres instead of live Airtable and live Asana reads.
 
 ## Boundary
 
-By default this pilot does not start timers, complete tasks, create Asana time
-tracking entries, or rebuild Daily Assignment Tracker. It reads local Hawley
-tables and reporting views only.
-
-Exception: worker pages are approved for live timer testing on real tasks. A
+The production worker app has live task controls for approved worker writes. A
 worker page writes timer state into Hawley's `hb.worker_daily_task_actuals`
 ledger. On Complete, Hawley creates the Asana time tracking entry, marks the
 source Asana task complete, and adds an Asana story. The live write scope is
 reported by `/api/auth-status`; `writeWorkerIds: ["*"]` means all assigned
-worker pages use server-backed live writes.
+worker pages use server-backed live writes. Daily Assignment Tracker rebuilds
+remain disabled on this app.
 
 Account login support is installed but inactive by default. Keep
 `HAWLEY_AUTH_ACTIVE=false` until a manager approves login testing. The auth
@@ -80,10 +79,11 @@ state, temporary-password flag, and password verification status.
 Manager control mode uses the same live endpoint. From the manager dashboard,
 selecting a worker opens the manager detail view with Start, Stop, End Session,
 SOP, and Complete controls for that worker's assigned tasks. These controls
-write to Hawley first and only push to Asana on Complete. End Session is
-manager-only: it clears a running/paused timer session, keeps the logged actual
-minutes on today's Hawley row, and leaves the task open. The legacy `Refresh
-tracker` and `Adopt new tasks` buttons remain disabled server-side because
+write to Hawley first and only push to Asana on Complete. End Session clears a
+running/paused timer session, keeps the logged actual minutes on today's Hawley
+row, and leaves the task open. The control is manager-only in the UI; a
+server-side manager/admin restriction remains tracked in the July 15 audit.
+The legacy `Refresh tracker` and `Adopt new tasks` buttons remain disabled server-side because
 those belong to the old Daily Assignment Tracker/Airtable write path.
 
 The live Hawley worker app does not read Airtable for worker actuals and does
@@ -330,8 +330,9 @@ POST /api/worker-task-action
 ```
 
 `POST /api/worker-task-action` supports `start`, `stop`, `release`, and
-`complete` when live worker writes are enabled. `release` is the manager-only
-End Session path. `POST /api/refresh-daily-tracker` intentionally remains a
+`complete` when live worker writes are enabled. `release` powers End Session;
+it is manager-only in the current UI, with server-side enforcement tracked in
+the July 15 audit. `POST /api/refresh-daily-tracker` intentionally remains a
 read-only pilot error because tracker rebuild/adoption belongs to the old Daily
 Assignment Tracker/Airtable write path.
 

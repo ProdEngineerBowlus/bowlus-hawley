@@ -5,8 +5,9 @@ Historical Analytics & Workflow Logic Engine.
 Hawley is the local production engineering brain for Bowlus shop operations. It
 is named after Hawley Bowlus, the aircraft designer and original Bowlus inventor.
 
-The first version is a Postgres-backed mirror, calculation, and reporting layer
-between Asana, Airtable, the Daily Worker App, dashboards, and Codex/agent tools.
+Hawley is a Postgres-backed mirror, calculation, reporting, and shop-floor
+execution layer between Asana, Airtable, the Worker App, dashboards, and
+Codex/agent tools.
 
 ## System Boundaries
 
@@ -14,25 +15,36 @@ between Asana, Airtable, the Daily Worker App, dashboards, and Codex/agent tools
 - Airtable remains the legacy/human-readable planning mirror during migration.
 - Postgres becomes the fast local mirror, calculation layer, historical memory,
   and app-readable reporting model.
-- Hawley reads source systems first, calculates locally, and only pushes selected
-  summaries or verified time/completion data back after explicit implementation.
+- Hawley owns live worker timer/session events in Postgres. A completed worker
+  task posts its verified elapsed time and completion to Asana.
+- Airtable worker actuals are an overnight archive/export target, not the live
+  execution source.
 
-Phase 1 is mirror/read-model only. It does not perform live Asana or Airtable
-writes.
+The worker app is live for approved worker writes. Planning and project-creation
+writes remain separately gated.
 
 ## Target Host
 
-The intended production host is `SW_Machine`.
+The production host is DigitalOcean App Platform:
 
-Recommended first deployment:
+```text
+https://bowlus-hawley-9s6iw.ondigitalocean.app
+```
 
-- Native PostgreSQL Windows service on `SW_Machine`
-- Node.js sync scripts from this repo
-- scheduled dry-run/import jobs only after Postgres health checks pass
-- regular `pg_dump` backups
+`SW_Machine` is no longer the Hawley runtime dependency. It may still host
+legacy shop tooling, but Hawley freshness, worker pages, admin pages, and the
+managed Postgres database run in DigitalOcean.
 
-Docker may be useful later for development, but the shop host should start with
-native Postgres for simpler service startup and backups.
+Current deployment:
+
+- App Platform web service runs `npm run worker:hawley`.
+- Managed Postgres cluster is `hawley-pg-prod` in `SFO3`.
+- Asana events and the Worker Daily Actuals mirror refresh every minute.
+- The full HB refresh runs nightly at 1:00 a.m. Pacific, followed by the
+  Airtable worker-actuals archive export.
+
+See `docs/runbooks/digitalocean-app-platform.md` for the current deployment
+configuration and health checks.
 
 ## Repo Layout
 
@@ -63,9 +75,10 @@ from Asana and mirrors portfolios, portfolio-project membership, projects,
 tasks, subtasks, custom fields, and task project/section memberships into the
 local Postgres `raw` schema.
 
-`pg:refresh-worker-read-model` is the fast worker-page path. It pulls Asana,
-rebuilds HB tables, then pulls Daily Assignment Tracker snapshots read-only for
-comparison/fallback. It does not pull or write Airtable.
+`pg:refresh-worker-read-model` is the fast worker-page path. It pulls Asana and
+rebuilds HB tables. It does not pull or write Airtable. The broader
+`pg:refresh-hawley-read-model` command also pulls Airtable and normalizes the
+legacy planning mirror.
 
 `pg:watch:asana-events` is the one-minute pilot updater. It reads Asana project
 events for the VINs/Fabrication portfolio projects, fetches changed task rows,
@@ -92,8 +105,8 @@ The Rev1 Airtable field and calculation migration audit is documented in
 The Hawley Brain Rev1 build path and HB-owned tables are documented in
 `docs/runbooks/hawley-brain-rev1-build.md`.
 
-The Hawley worker-page pilot runs beside the current Daily Worker App and reads
-Postgres only. By default it uses the HB read model; set
+The Hawley worker app is served from DigitalOcean and reads Postgres only. By
+default it uses the HB read model; set
 `HAWLEY_WORKER_USE_DAT_SNAPSHOTS=true` only when intentionally comparing against
 the legacy Daily Assignment Tracker snapshot shape:
 
@@ -112,6 +125,9 @@ and Asana writeback-queue design is documented in
 `docs/runbooks/worker-utilization-transition-ledger.md`. The first database
 foundation lives in `db/migrations/012_worker_utilization_ledger.sql` and
 `db/views/005_worker_utilization_reporting.sql`.
+
+The verified July 15 production audit status and deferred architecture work are
+documented in `docs/runbooks/hawley-code-audit-2026-07-15.md`.
 
 ## Secret Rules
 

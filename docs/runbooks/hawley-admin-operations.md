@@ -1,6 +1,6 @@
 # Hawley Admin Operations
 
-Last updated: 2026-07-13
+Last updated: 2026-07-15
 
 The Hawley Admin page is the operations control layer for shop-floor execution.
 It lives in the Hawley worker web app at:
@@ -58,15 +58,24 @@ Primary data sources:
 - `raw.asana_tasks`
 - `reporting.worker_daily_utilization`
 
-The dashboard may still read raw Airtable mirrors as fallback/proof tables, but
-the admin app should not depend on the legacy Daily Assignment Tracker to know
-whether the shop is on pace.
+The dashboard does not depend on the legacy Daily Assignment Tracker to know
+whether the shop is on pace. The debt matrix currently prefers a parsed
+`raw.airtable_phase_cycle_load` snapshot when one exists, with
+`hb.phase_cycle_load_rev1` as fallback; this legacy-source preference is tracked
+as boundary debt in `hawley-code-audit-2026-07-15.md`.
 
 The Admin Dashboard automatically requests fresh dashboard data every 60
 seconds while the page is visible. Returning to a backgrounded tab triggers an
 immediate catch-up request. The refresh updates only dashboard state, so it does
 not reset unsaved Project Creator input. Worker and manager assignment views use
 the same 60-second refresh cadence.
+
+The Capacity Recommendation workflow is staged and preview-first. When one or
+more workers have already been staged, the next preview uses the remaining
+unstaged gap. Its balance graphic labels the first bar **After staged work** and
+the second bar **After this preview**; both cards and bars use the same staged
+capacity values. Nothing is reassigned in Asana until **Commit combined plan**
+is selected.
 
 Phase pace sparklines use the green line for ideal productive burn-down at 7
 hours 40 minutes per assigned worker per workday. This comes from the 7:00 a.m.
