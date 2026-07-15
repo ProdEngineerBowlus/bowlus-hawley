@@ -273,7 +273,7 @@ function publicErrorMessage(error) {
     };
   }
 
-  if (error.code === "28P01") {
+  if (error.code === "28P01" || /\b(?:SCRAM|SASL)\b|password must be a string|password authentication failed/i.test(message)) {
     return {
       status: 503,
       message: "Hawley Postgres credentials were rejected."
@@ -9480,7 +9480,8 @@ async function serveStatic(req, res, url) {
     url.pathname === "/admin" || url.pathname === "/admin/" ? "admin.html" :
     url.pathname.replace(/^\/+/, "");
   const resolved = path.resolve(staticDir, requested);
-  if (!resolved.startsWith(staticDir)) {
+  const relativePath = path.relative(staticDir, resolved);
+  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
     sendError(res, 403, "Forbidden.");
     return;
   }
