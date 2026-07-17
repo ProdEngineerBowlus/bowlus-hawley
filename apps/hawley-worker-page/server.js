@@ -2360,6 +2360,13 @@ function applyWorkerDailyActualRows(workers, actualRows) {
       // Asana is the source of truth for current completion and assignment.
       // A Hawley ledger row records work history, and must not re-complete a
       // task that a manager reopened or re-add a task after reassignment.
+      // The manager override is the narrow exception: it is written only
+      // after Hawley successfully reopens the source Asana task, and bridges
+      // the short delay before the Asana mirror refreshes PostgreSQL.
+      if (row.source === "Hawley manager completion override") {
+        existingTask.completed = false;
+        existingTask.status = "Open";
+      }
       if (!existingTask.title && row.taskName) existingTask.title = row.taskName;
       if (!existingTask.vin && row.vin) existingTask.vin = row.vin;
       if (!existingTask.cycle && row.cycle) existingTask.cycle = row.cycle;
@@ -4762,10 +4769,13 @@ async function handleWorkerTaskAction(req) {
   const date = String(body.date || todayIso()).trim();
   const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
 
-  if (!["start", "stop", "release", "complete"].includes(action)) {
-    throw actionError("Action must be start, stop, release, or complete.", 400);
+  if (!["start", "stop", "release", "complete", "reopen"].includes(action)) {
+    throw actionError("Action must be start, stop, release, complete, or reopen.", 400);
   }
   requireWorkerAccess(authActor, employee);
+  if (action === "reopen") {
+    requireManagerActor(authActor);
+  }
   if (!employee || !workerWritesAllowed(employee)) {
     throw actionError("Live worker writes are not enabled for this employee.", 403, {
       mode: authStatusPayload().mode,
@@ -4791,11 +4801,11 @@ async function handleWorkerTaskAction(req) {
     let task;
     let currentRecord = null;
 
-    if (action === "release") {
-      // A manager must be able to release a timer even when the underlying task
-      // has been reassigned or reopened and is therefore no longer in today's
-      // assignment payload. The live timer ledger is the authoritative record
-      // for this narrowly scoped cleanup action.
+    if (action === "release" || action === "reopen") {
+      // A manager must be able to release a timer or reopen a completed task
+      // even when the underlying task is no longer in today's assignment
+      // payload. The live timer ledger is the authoritative record for these
+      // narrowly scoped corrections.
       currentRecord = await readLiveActualRecord(client, ledgerKey);
       if (currentRecord) {
         worker = workerFromActualRow(currentRecord);
@@ -4809,6 +4819,60 @@ async function handleWorkerTaskAction(req) {
 
     const authAudit = actorAuditPayload(authActor, worker.id);
     const current = liveTimerFromRow(currentRecord) || await readLiveActualRow(client, ledgerKey);
+
+    if (action === "reopen") {
+      if (!current || !current.completed) {
+        throw actionError("This task is not recorded as completed in the Hawley timer ledger.", 409);
+      }
+
+      const token = process.env.ASANA_PAT;
+      if (!token) {
+        throw actionError("ASANA_PAT is not configured for manager completion overrides.", 503);
+      }
+
+      // Asana remains the completion source of truth. Keep all recorded time
+      // and the posted-minute watermark intact, so a later re-completion only
+      // posts newly worked time rather than duplicating Cesar's original time.
+      await updateAsanaTask(token, task.id, { completed: false });
+      await createAsanaStory(token, task.id, `Hawley manager reopened this task. Existing logged time remains recorded.`);
+      const saved = await upsertLiveWorkerActual(client, worker, task, date, {
+        ...current,
+        startedAt: "",
+        accumulatedMinutes: current.accumulatedMinutes,
+        actualMinutes: current.actualMinutes,
+        asanaPostedMinutes: current.asanaPostedMinutes
+      }, {
+        actualMinutes: current.actualMinutes,
+        timerMinutes: current.accumulatedMinutes,
+        asanaPostedMinutes: current.asanaPostedMinutes,
+        completed: false,
+        completionPending: false,
+        timeEntryCreated: current.timeEntryCreated,
+        sourceLabel: "Hawley manager completion override",
+        seenAt: nowIso,
+        authActor
+      });
+      await tryWorkerTransitionLedger("reopen", async () => {
+        await recordWorkerTaskEvent(client, worker, task, date, "reopen", nowIso, {
+          authActor,
+          payload: {
+            ...authAudit,
+            ledgerKey,
+            preservedActualMinutes: saved.actualMinutes,
+            preservedAsanaPostedMinutes: saved.asanaPostedMinutes
+          }
+        });
+      });
+
+      return {
+        ok: true,
+        action,
+        taskId,
+        elapsedMinutes: saved.actualMinutes || 0,
+        completed: false,
+        reopened: true
+      };
+    }
 
     if (action === "start") {
       if (current?.completed) {

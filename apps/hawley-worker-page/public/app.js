@@ -1488,9 +1488,11 @@
             canControl
               ? `<div class="work-actions" data-task-id="${escapeAttr(task.id)}">
                   <a class="btn ${hasSop ? "ghost" : "disabled"}" ${hasSop ? `href="${escapeAttr(sopUrl)}" target="_blank" rel="noreferrer"` : ""} aria-disabled="${hasSop ? "false" : "true"}">${icons.open}<span>SOP</span></a>
-                  <button class="btn ghost" type="button" data-action="start-timer" data-task-id="${escapeAttr(task.id)}" ${task.completed || timerRunning || busy ? "disabled" : ""}>${timerRunning ? "Running" : startLabel}</button>
-                  ${timerRunning ? `<button class="btn ghost" type="button" data-action="stop-timer" data-task-id="${escapeAttr(task.id)}" ${task.completed || busy ? "disabled" : ""}>Stop</button>` : ""}
-                  <button class="btn primary" type="button" data-action="complete-task" data-task-id="${escapeAttr(task.id)}" ${task.completed || !timerHasTime || busy ? "disabled" : ""}>${busy ? "Saving..." : "Complete"}</button>
+                  ${task.completed
+                    ? `<button class="btn ghost" type="button" data-action="reopen-task" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>${busy ? "Saving..." : "Mark incomplete"}</button>`
+                    : `<button class="btn ghost" type="button" data-action="start-timer" data-task-id="${escapeAttr(task.id)}" ${timerRunning || busy ? "disabled" : ""}>${timerRunning ? "Running" : startLabel}</button>
+                      ${timerRunning ? `<button class="btn ghost" type="button" data-action="stop-timer" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>Stop</button>` : ""}
+                      <button class="btn primary" type="button" data-action="complete-task" data-task-id="${escapeAttr(task.id)}" ${!timerHasTime || busy ? "disabled" : ""}>${busy ? "Saving..." : "Complete"}</button>`}
                 </div>`
               : ""
           }
@@ -1631,6 +1633,14 @@
         const worker = getSelectedWorker();
         if (!worker) return;
         await completeWorkerTask(worker.id, button.dataset.taskId);
+      });
+    });
+
+    document.querySelectorAll("[data-action='reopen-task']").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const worker = getSelectedWorker();
+        if (!worker) return;
+        await reopenWorkerTask(worker.id, button.dataset.taskId);
       });
     });
 
@@ -1928,6 +1938,37 @@
       state.actionTaskId = "";
       render();
       showToast(error.message || "Could not save task");
+    }
+  }
+
+  async function reopenWorkerTask(employee, taskId) {
+    const task = findTaskById(taskId);
+    const name = task && task.title ? `"${task.title}"` : "this task";
+    if (!window.confirm(`Mark ${name} incomplete? Existing logged time will remain recorded, and only newly worked time will be added if the task is completed again.`)) {
+      return;
+    }
+
+    state.actionTaskId = taskId;
+    render();
+
+    try {
+      const response = await postJsonWithPin("/api/worker-task-action", {
+        employee,
+        taskId,
+        date: state.date,
+        action: "reopen",
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error || `Save failed with ${response.status}`);
+      }
+
+      showToast("Task marked incomplete; logged time was preserved");
+      await loadAssignments();
+    } catch (error) {
+      state.actionTaskId = "";
+      render();
+      showToast(error.message || "Could not mark the task incomplete");
     }
   }
 
