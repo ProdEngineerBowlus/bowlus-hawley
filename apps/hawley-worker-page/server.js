@@ -3530,12 +3530,27 @@ async function assignedWorkerTaskForWrite(employee, date, taskId, authActor = nu
 }
 
 async function readLiveActualRow(client, ledgerKey) {
+  const row = await readLiveActualRecord(client, ledgerKey);
+  return liveTimerFromRow(row);
+}
+
+async function readLiveActualRecord(client, ledgerKey) {
   const result = await client.query(
     `
       select
         ledger_key,
+        work_date,
+        worker_key,
+        worker_name,
+        worker_email,
         asana_task_gid,
         task_name,
+        task_url,
+        vin,
+        cycle_label,
+        phase_label,
+        assigned_hours,
+        allocated_hours,
         actual_minutes,
         timer_minutes,
         asana_posted_minutes,
@@ -3547,7 +3562,7 @@ async function readLiveActualRow(client, ledgerKey) {
     `,
     [ledgerKey]
   );
-  return liveTimerFromRow(result.rows[0]);
+  return result.rows[0] || null;
 }
 
 async function blockingLiveTimerForWorker(client, workerId, date, exceptTaskId = "") {
@@ -4764,17 +4779,36 @@ async function handleWorkerTaskAction(req) {
     await autoCloseScheduledTimersForDate(date);
   }
 
-  const { worker, task } = await assignedWorkerTaskForWrite(employee, date, taskId, authActor);
-  const authAudit = actorAuditPayload(authActor, worker.id);
   const now = new Date();
   const nowIso = now.toISOString();
-  const ledgerKey = ledgerKeyForWorkerTask(worker.id, date, task.id);
+  const ledgerKey = ledgerKeyForWorkerTask(employee, date, taskId);
   const client = await writePool.connect();
   let workerTimerLockKey = "";
 
   try {
-    workerTimerLockKey = await acquireWorkerDayTimerLock(client, worker.id, date);
-    const current = await readLiveActualRow(client, ledgerKey);
+    workerTimerLockKey = await acquireWorkerDayTimerLock(client, employee, date);
+    let worker;
+    let task;
+    let currentRecord = null;
+
+    if (action === "release") {
+      // A manager must be able to release a timer even when the underlying task
+      // has been reassigned or reopened and is therefore no longer in today's
+      // assignment payload. The live timer ledger is the authoritative record
+      // for this narrowly scoped cleanup action.
+      currentRecord = await readLiveActualRecord(client, ledgerKey);
+      if (currentRecord) {
+        worker = workerFromActualRow(currentRecord);
+        task = taskFromActualRow(currentRecord);
+      }
+    }
+
+    if (!worker || !task) {
+      ({ worker, task } = await assignedWorkerTaskForWrite(employee, date, taskId, authActor));
+    }
+
+    const authAudit = actorAuditPayload(authActor, worker.id);
+    const current = liveTimerFromRow(currentRecord) || await readLiveActualRow(client, ledgerKey);
 
     if (action === "start") {
       if (current?.completed) {
@@ -4906,9 +4940,6 @@ async function handleWorkerTaskAction(req) {
     }
 
     if (action === "release") {
-      if (current.completionPending) {
-        throw actionError("This timer is already being completed and cannot be ended as an open session.", 409);
-      }
       if (current.completed) {
         throw actionError("This task is already completed in the Hawley timer ledger.", 409);
       }
