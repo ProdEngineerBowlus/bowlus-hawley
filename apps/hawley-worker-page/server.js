@@ -9385,6 +9385,51 @@ function runAdminProjectAsanaMirrorSync(projectType, projectGid) {
   });
 }
 
+async function registerUnmirroredAdminProjects() {
+  const result = await writePool.query(`
+    select run.project_creation_run_id, run.project_type, run.project_name, run.asana_project_gid
+    from hb.project_creation_runs run
+    where run.status = 'success'
+      and nullif(run.asana_project_gid, '') is not null
+      and not exists (
+        select 1
+        from raw.asana_projects project
+        where project.gid = run.asana_project_gid
+      )
+    order by run.completed_at nulls last, run.created_at
+    limit 25
+  `);
+  if (!result.rows.length) return { registered: 0 };
+
+  const registered = [];
+  for (const run of result.rows) {
+    try {
+      await runAdminProjectAsanaMirrorSync(run.project_type, run.asana_project_gid);
+      await writePool.query(`
+        update hb.project_creation_runs
+        set result_json = coalesce(result_json, '{}'::jsonb) || jsonb_build_object(
+          'asanaMirrorRegisteredAt', now()::text
+        )
+        where project_creation_run_id = $1
+      `, [run.project_creation_run_id]);
+      registered.push(run.project_name || run.asana_project_gid);
+    } catch (error) {
+      console.error("[hawley-project-creator]", JSON.stringify({
+        action: "asana_mirror_registration_failed",
+        projectGid: run.asana_project_gid,
+        error: error.message || String(error)
+      }));
+    }
+  }
+
+  if (registered.length) await runAdminProjectDownstreamRebuild();
+  console.log("[hawley-project-creator]", JSON.stringify({
+    action: "asana_mirror_registration",
+    registered
+  }));
+  return { registered: registered.length };
+}
+
 function runAdminProjectDownstreamRebuild() {
   return new Promise((resolve, reject) => {
     const child = spawn(npmCommand(), ["run", "pg:build:hb"], {
@@ -9850,7 +9895,8 @@ async function startServer() {
       Promise.all([
         repairAuthorizedVin327CycleFields(),
         repairAuthorizedVin327PhaseASections(),
-        clearAuthorizedVin327AssignedOnDates()
+        clearAuthorizedVin327AssignedOnDates(),
+        registerUnmirroredAdminProjects()
       ]).catch(error => {
         console.error("[hawley-project-creator]", JSON.stringify({
           action: "authorized_vin_327_repair",
