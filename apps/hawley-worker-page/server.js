@@ -5844,6 +5844,59 @@ async function healthPayload() {
   };
 }
 
+// Deliberately narrow, read-only feed for the legacy Shop Operations dashboard.
+// Keeping this behind Hawley's API lets the dashboard consume the live Postgres
+// read model without carrying database credentials or depending on an Airtable
+// snapshot that can lag behind project/task creation.
+async function shopPhaseLoadPayload() {
+  const result = await pool.query(`
+    select
+      coalesce(nullif(pcl.phase_name, ''), 'Unassigned') as phase_name,
+      coalesce(
+        cycles.cycle_number,
+        nullif(substring(coalesce(pcl.cycle_label, '') from 'C[[:space:]]*([0-9]{1,3})'), '')::int,
+        nullif(substring(coalesce(pcl.cycle_label, '') from '([0-9]{1,3})'), '')::int
+      ) as cycle_number,
+      coalesce(cycles.cycle_label, pcl.cycle_label) as cycle_label,
+      sum(coalesce(pcl.remaining_task_hours, 0))::numeric(12, 2) as remaining_hours,
+      sum(coalesce(pcl.total_load_hours, 0))::numeric(12, 2) as total_load_hours,
+      sum(coalesce(pcl.completed_task_hours, 0))::numeric(12, 2) as completed_hours,
+      max(pcl.rebuilt_at)::text as rebuilt_at
+    from hb.phase_cycle_load_rev1 pcl
+    left join hb.cycles cycles on cycles.cycle_record_id = pcl.cycle_record_id
+    where coalesce(pcl.remaining_task_hours, 0) > 0
+       or coalesce(pcl.total_load_hours, 0) > 0
+       or coalesce(pcl.completed_task_hours, 0) > 0
+    group by
+      coalesce(nullif(pcl.phase_name, ''), 'Unassigned'),
+      coalesce(
+        cycles.cycle_number,
+        nullif(substring(coalesce(pcl.cycle_label, '') from 'C[[:space:]]*([0-9]{1,3})'), '')::int,
+        nullif(substring(coalesce(pcl.cycle_label, '') from '([0-9]{1,3})'), '')::int
+      ),
+      coalesce(cycles.cycle_label, pcl.cycle_label)
+    order by cycle_number nulls last, phase_name
+  `);
+
+  const rows = result.rows.map((row) => ({
+    cycleNumber: row.cycle_number === null || row.cycle_number === undefined ? null : Number(row.cycle_number),
+    cycleLabel: row.cycle_label || "",
+    phaseName: row.phase_name || "Unassigned",
+    remainingHours: Number(row.remaining_hours || 0),
+    totalLoadHours: Number(row.total_load_hours || 0),
+    completedHours: Number(row.completed_hours || 0),
+    rebuiltAt: row.rebuilt_at || ""
+  }));
+
+  return {
+    ok: true,
+    source: "hawley_postgres_phase_cycle_load_rev1",
+    generatedAt: new Date().toISOString(),
+    rebuiltAt: rows.reduce((latest, row) => (!latest || row.rebuiltAt > latest ? row.rebuiltAt : latest), ""),
+    rows
+  };
+}
+
 async function syncStatusPayload() {
   return {
     ok: true,
@@ -9757,6 +9810,11 @@ const server = http.createServer(async (req, res) => {
   try {
     if (url.pathname === "/api/health") {
       sendJson(res, 200, await healthPayload());
+      return;
+    }
+
+    if (url.pathname === "/api/shop-phase-load" && req.method === "GET") {
+      sendJson(res, 200, await shopPhaseLoadPayload());
       return;
     }
 
