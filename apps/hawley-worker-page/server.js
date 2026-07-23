@@ -8375,6 +8375,12 @@ function adminPutEnumCustomField(payload, registry, name, value) {
   if (optionGid) payload[meta.gid] = meta.type === "multi_enum" ? [optionGid] : optionGid;
 }
 
+function adminClearCustomField(payload, registry, name) {
+  const meta = registry[projectCreatorNormalizeKey(name)];
+  if (!meta || meta.isFormula) return;
+  payload[meta.gid] = null;
+}
+
 async function adminAsanaUserGidsByEmail(token) {
   if (!ADMIN_ASANA_WORKSPACE_GID) return new Map();
   const users = await adminAsanaRequest(
@@ -8692,6 +8698,9 @@ function adminAsanaCustomFields(task, preview, registry) {
     : (task.asanaSection || task.phaseLabel);
   adminPutEnumCustomField(payload, registry, "Phase / Section", phaseOption);
   adminPutEnumCustomField(payload, registry, "Model", projectCreatorArray(task.vinModelTypes)[0]);
+  // The line lead owns the operational assignment date. Explicitly clear this
+  // field so an Asana default cannot make a newly created task appear assigned.
+  adminClearCustomField(payload, registry, "Assigned On");
   return payload;
 }
 
@@ -9661,6 +9670,61 @@ async function clearAuthorizedVin327AssignedOnDates() {
   }));
 }
 
+async function clearAuthorizedF13AssignedOnDates() {
+  const token = process.env.ASANA_PAT;
+  if (!token) return;
+  const runResult = await writePool.query(`
+    select project_creation_run_id, asana_project_gid
+    from hb.project_creation_runs
+    where status = 'success'
+      and project_name = 'F13.26'
+      and asana_project_gid is not null
+      and coalesce(result_json ->> 'assignedOnDefaultRepairAt', '') = ''
+    order by completed_at desc nulls last, created_at desc
+    limit 1
+  `);
+  const run = runResult.rows[0];
+  if (!run) return;
+  const taskResult = await writePool.query(`
+    select asana_task_gid
+    from hb.rev1_task_instances
+    where asana_project_gid = $1
+      and asana_task_gid is not null
+      and assigned_on is not null
+    order by task_order nulls last, task_name
+  `, [run.asana_project_gid]);
+  const actions = taskResult.rows.map(row => ({
+    method: "put",
+    relative_path: `/tasks/${row.asana_task_gid}`,
+    data: { custom_fields: { "1215603865689876": null } }
+  }));
+  for (let index = 0; index < actions.length; index += 10) {
+    const results = await adminAsanaRequest(token, "/batch", "POST", { actions: actions.slice(index, index + 10) });
+    const failed = (results || []).find(result => Number(result.status_code || 500) >= 400);
+    if (failed) throw new Error(`F13 Assigned On clear batch failed with ${failed.status_code}.`);
+  }
+  await writePool.query(`
+    update hb.rev1_task_instances
+    set assigned_on = null,
+        normalized_at = now()
+    where asana_project_gid = $1
+      and assigned_on is not null
+  `, [run.asana_project_gid]);
+  await writePool.query(`
+    update hb.project_creation_runs
+    set result_json = coalesce(result_json, '{}'::jsonb) || jsonb_build_object(
+      'assignedOnDefaultRepairAt', now()::text,
+      'assignedOnDefaultRepairTasks', $2::int
+    )
+    where project_creation_run_id = $1
+  `, [run.project_creation_run_id, actions.length]);
+  console.log("[hawley-project-creator]", JSON.stringify({
+    action: "f13_assigned_on_default_repair",
+    projectGid: run.asana_project_gid,
+    clearedTasks: actions.length
+  }));
+}
+
 async function serveStatic(req, res, url) {
   const requested =
     url.pathname === "/" ? "index.html" :
@@ -9896,6 +9960,7 @@ async function startServer() {
         repairAuthorizedVin327CycleFields(),
         repairAuthorizedVin327PhaseASections(),
         clearAuthorizedVin327AssignedOnDates(),
+        clearAuthorizedF13AssignedOnDates(),
         registerUnmirroredAdminProjects()
       ]).catch(error => {
         console.error("[hawley-project-creator]", JSON.stringify({
