@@ -9228,13 +9228,19 @@ async function handleAdminProjectCreate(req) {
   try {
     const result = await createAdminAsanaProjectFromPreview(token, preview, projectName, runId);
     await updateAdminProjectTaskAsanaLinks(result.createdTasks, result.asanaProjectGid, projectName);
+    let asanaMirror = { ok: true };
+    try {
+      asanaMirror = await runAdminProjectAsanaMirrorSync(projectType, result.asanaProjectGid);
+    } catch (error) {
+      asanaMirror = { ok: false, error: error.message || String(error) };
+    }
     let downstreamRebuild = { ok: true };
     try {
       downstreamRebuild = await runAdminProjectDownstreamRebuild();
     } catch (error) {
       downstreamRebuild = { ok: false, error: error.message || String(error) };
     }
-    const completedResult = { ...result, downstreamRebuild };
+    const completedResult = { ...result, asanaMirror, downstreamRebuild };
     await updateAdminProjectCreationResult(runId, "success", completedResult);
     return {
       ok: true,
@@ -9355,6 +9361,28 @@ async function handleAdminProjectCreationCleanup(req) {
 
 async function updateAdminProjectTaskAsanaLink(createdTask, projectGid, projectName) {
   await updateAdminProjectTaskAsanaLinks([createdTask], projectGid, projectName);
+}
+
+function runAdminProjectAsanaMirrorSync(projectType, projectGid) {
+  const portfolio = projectType === "Fabrication" ? "fabrication" : "vin";
+  return new Promise((resolve, reject) => {
+    const child = spawn(npmCommand(), ["run", "pg:pull:asana", "--", "--portfolio", portfolio, "--project", projectGid], {
+      cwd: repoRoot,
+      env: process.env,
+      windowsHide: true
+    });
+    let output = "";
+    const capture = chunk => {
+      output = `${output}${String(chunk || "")}`.slice(-12000);
+    };
+    child.stdout?.on("data", capture);
+    child.stderr?.on("data", capture);
+    child.once("error", reject);
+    child.once("exit", code => {
+      if (code === 0) resolve({ ok: true, outputTail: output.trim().slice(-2000) });
+      else reject(new Error(`Hawley project Asana mirror sync exited ${code}: ${output.trim().slice(-2000)}`));
+    });
+  });
 }
 
 function runAdminProjectDownstreamRebuild() {

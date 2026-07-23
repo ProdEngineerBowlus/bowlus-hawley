@@ -1293,6 +1293,100 @@ function asanaTaskRow(asana, lookups) {
   return applyAsanaOverlay(row, asana, lookups);
 }
 
+// Projects created by Hawley's admin creator begin life in hb.rev1_task_instances
+// before their first normal Asana portfolio pull. When that pull arrives, retain
+// the creator row (and its native/schedule linkage) and apply Asana's live state
+// to it instead of manufacturing a second "asana:<gid>" task instance.
+const PROJECT_CREATOR_ASANA_OVERLAY_COLUMNS = Object.freeze([
+  "asana_task_gid",
+  "asana_project_gid",
+  "asana_project_name",
+  "asana_portfolio_gid",
+  "asana_portfolio_name",
+  "asana_section",
+  "parent_asana_task_gid",
+  "parent_task_name",
+  "is_subtask",
+  "task_name",
+  "task_description",
+  "task_type",
+  "task_order",
+  "status",
+  "task_status",
+  "task_completed",
+  "completed_on",
+  "asana_due_date",
+  "assigned_on",
+  "worker_record_id",
+  "worker_name",
+  "worker_email",
+  "assignee_name",
+  "assignee_email",
+  "phase_record_id",
+  "phase_label",
+  "section_column",
+  "phase_cycle_bucket_key",
+  "phase_cycle_key",
+  "cycle_record_id",
+  "cycle_label",
+  "vin",
+  "vin_text",
+  "quantity",
+  "estimated_task_time_seconds",
+  "estimated_batch_task_time_seconds",
+  "actual_time_seconds",
+  "actual_time_minutes",
+  "allocated_hours",
+  "completed_est_hours",
+  "open_est_hours",
+  "actual_efficiency",
+  "start_date",
+  "end_date",
+  "document_link",
+  "active_in_production",
+  "last_synced_at",
+  "fields_json",
+  "source_synced_at"
+]);
+
+async function overlayProjectCreatorRowsFromAsana(client, asanaRows, lookups) {
+  if (!asanaRows.length) return new Set();
+
+  const result = await client.query(`
+    select *
+    from hb.rev1_task_instances
+    where source_system = 'hawley_project_creator'
+      and nullif(asana_task_gid, '') is not null
+  `);
+  const creatorByAsanaGid = new Map(result.rows.map(row => [row.asana_task_gid, row]));
+  const matchedGids = new Set();
+
+  for (const asana of asanaRows) {
+    const creatorRow = creatorByAsanaGid.get(asana.gid);
+    if (!creatorRow) continue;
+
+    const merged = applyAsanaOverlay({ ...creatorRow }, asana, lookups);
+    const values = PROJECT_CREATOR_ASANA_OVERLAY_COLUMNS.map(column => merged[column]);
+    const updates = PROJECT_CREATOR_ASANA_OVERLAY_COLUMNS
+      .map((column, index) => `${quoteIdent(column)} = $${index + 2}`)
+      .join(",\n          ");
+
+    await client.query(
+      `
+        update hb.rev1_task_instances
+        set ${updates},
+            normalized_at = now()
+        where rev1_task_instance_id = $1
+          and source_system = 'hawley_project_creator'
+      `,
+      [creatorRow.rev1_task_instance_id, ...values]
+    );
+    matchedGids.add(asana.gid);
+  }
+
+  return matchedGids;
+}
+
 function taskRow(raw, lookups, asana = null) {
   const fields = raw.fields_json || {};
   const workerId = firstLinkedId(fields["Assigned Worker"]);
@@ -1521,13 +1615,14 @@ async function normalizeBaseTables(client) {
   const taskRaw = await rawRows(client, "raw.airtable_task_instances");
   const asanaRaw = await rawAsanaPortfolioTaskRows(client);
   const asanaByGid = new Map(asanaRaw.map(row => [row.gid, row]));
+  const creatorAsanaGids = await overlayProjectCreatorRowsFromAsana(client, asanaRaw, lookups);
   const taskRows = taskRaw.map(row => {
     const asanaTaskGid = text((row.fields_json || {})["Asana Task GID"]);
     return taskRow(row, lookups, asanaTaskGid ? asanaByGid.get(asanaTaskGid) : null);
   });
   const taskAsanaGids = new Set(taskRows.map(row => row.asana_task_gid).filter(Boolean));
   const asanaOnlyRows = asanaRaw
-    .filter(row => row.gid && !taskAsanaGids.has(row.gid))
+    .filter(row => row.gid && !taskAsanaGids.has(row.gid) && !creatorAsanaGids.has(row.gid))
     .map(row => asanaTaskRow(row, lookups));
   const allTaskRows = taskRows.concat(asanaOnlyRows);
 
