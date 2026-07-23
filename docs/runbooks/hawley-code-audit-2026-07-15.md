@@ -30,9 +30,7 @@ permissions.
 - The utilization view can combine Hawley live actuals and Airtable/bootstrap
   rows. The productive-day denominator also needs one explicit gross/net-break
   definition.
-- The Admin debt matrix prefers parsed raw Airtable Phase Cycle Load data when
-  available. Current phase pace uses the production-schedule-linked mirror when
-  available.
+- Current phase pace uses the production-schedule-linked mirror when available.
 
 These require intentional behavior, schema, credential, or scheduling changes
 and were not changed in the non-disruptive pass.
@@ -48,6 +46,9 @@ The original audit described earlier code for the following items:
 - Project Creator blocks scopes with pending/failed native Hawley runs.
 - Project Creator normalizes real en/em dashes before key matching.
 - `db/views/003_hawley_worker_page.sql` has no large blank tail.
+- On 2026-07-23, the Admin debt matrix was changed to prefer the live
+  `hb.phase_cycle_load_rev1` model. The Airtable Phase Cycle Load mirror is now
+  used only as a recovery fallback.
 
 ## Current Production Shape
 

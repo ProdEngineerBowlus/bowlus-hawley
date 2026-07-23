@@ -1,6 +1,6 @@
 # Hawley Admin Operations
 
-Last updated: 2026-07-15
+Last updated: 2026-07-23
 
 The Hawley Admin page is the operations control layer for shop-floor execution.
 It lives in the Hawley worker web app at:
@@ -59,10 +59,11 @@ Primary data sources:
 - `reporting.worker_daily_utilization`
 
 The dashboard does not depend on the legacy Daily Assignment Tracker to know
-whether the shop is on pace. The debt matrix currently prefers a parsed
-`raw.airtable_phase_cycle_load` snapshot when one exists, with
-`hb.phase_cycle_load_rev1` as fallback; this legacy-source preference is tracked
-as boundary debt in `hawley-code-audit-2026-07-15.md`.
+whether the shop is on pace. The Phase-Cycle Burn-Down prefers
+`hb.phase_cycle_load_rev1`, which is rebuilt after changed Asana task events,
+so its remaining, completed, and total hours follow the live Hawley task
+mirror. `raw.airtable_phase_cycle_load` remains a recovery fallback only when
+the HB phase-cycle model has not been initialized.
 
 The Admin Dashboard automatically requests fresh dashboard data every 60
 seconds while the page is visible. Returning to a backgrounded tab triggers an

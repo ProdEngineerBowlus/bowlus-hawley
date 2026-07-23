@@ -7452,10 +7452,13 @@ async function adminPlhMetricsPayload() {
   const matrix = new Map();
   let currentRows = [];
   const rawPhaseCycleLoad = adminRawPhaseCycleLoadSnapshot(rawPhaseCycleLoadResult.rows);
-  const debtRows = rawPhaseCycleLoad.rows.length ? rawPhaseCycleLoad.rows : debtResult.rows;
-  const phaseCycleLoadSource = rawPhaseCycleLoad.rows.length
-    ? "raw.airtable_phase_cycle_load"
-    : "hb.phase_cycle_load_rev1";
+  // HB is rebuilt after each changed Asana task event. Prefer it for operational
+  // burn-down; the Airtable PCL mirror is only a recovery fallback when HB has
+  // not yet been initialized.
+  const debtRows = debtResult.rows.length ? debtResult.rows : rawPhaseCycleLoad.rows;
+  const phaseCycleLoadSource = debtResult.rows.length
+    ? "hb.phase_cycle_load_rev1"
+    : "raw.airtable_phase_cycle_load";
   const scheduleAlignment = await adminScheduleAlignmentPayload(currentCycleNumber);
   const capacityResult = currentCycleNumber
     ? await pool.query(`

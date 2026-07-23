@@ -79,7 +79,7 @@ Purpose: Hawley Brain. This is the preferred normalized shop model for schedulin
 | `hb.phases` | one phase/section | `pg:build:hb` | Phase names, section columns, process order, parity, grouping, and model metadata. |
 | `hb.rev1_task_instances` | one Rev1/Asana task instance | `pg:build:hb` | Main production task ledger. Airtable bootstraps it; Asana overlays live truth. |
 | `hb.worker_daily_task_actuals` | one worker/task/day actual or summary | worker app, backfill, HB build | Actual logged minutes, WIP timer minutes, daily summaries, and capacity flags. |
-| `hb.phase_cycle_load_rev1` | one phase/cycle load bucket | `pg:build:hb` | Remaining, completed, and total load by phase/cycle. Supports PLH-style debt and pacing. |
+| `hb.phase_cycle_load_rev1` | one phase/cycle load bucket | `pg:build:hb` | Remaining, completed, and total load by phase/cycle. The Admin Phase-Cycle Burn-Down prefers this live HB model; it is rebuilt after changed Asana task events. |
 | `hb.worker_phase_allocation_rev1` | one worker/cycle/phase allocation | `pg:build:hb` | Assigned, imported, exported, and cross-phase support hours. |
 | `hb.worker_cycle_bank_rev1` | one worker/cycle capacity bank | `pg:build:hb` | Worker cycle capacity, assigned hours, remaining hours, and effective bank. |
 | `hb.task_templates` | one task template | `pg:build:hb` | Postgres task-template model sourced from Airtable `Tasks`, including the normalized `Required Skill Level`. |
