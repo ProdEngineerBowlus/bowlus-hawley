@@ -59,11 +59,11 @@ Primary data sources:
 - `reporting.worker_daily_utilization`
 
 The dashboard does not depend on the legacy Daily Assignment Tracker to know
-whether the shop is on pace. The Phase-Cycle Burn-Down prefers
-`hb.phase_cycle_load_rev1`, which is rebuilt after changed Asana task events,
-so its remaining, completed, and total hours follow the live Hawley task
-mirror. `raw.airtable_phase_cycle_load` remains a recovery fallback only when
-the HB phase-cycle model has not been initialized.
+whether the shop is on pace. The Phase-Cycle Burn-Down selects the freshest
+complete phase-cycle source: it uses `hb.phase_cycle_load_rev1` when its HB
+rebuild is at least as recent as the Airtable snapshot, and otherwise uses
+`raw.airtable_phase_cycle_load`. This avoids displaying an incomplete or stale
+HB rebuild while preserving event-driven HB freshness when it is current.
 
 The Admin Dashboard automatically requests fresh dashboard data every 60
 seconds while the page is visible. Returning to a backgrounded tab triggers an

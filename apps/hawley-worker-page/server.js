@@ -7333,7 +7333,8 @@ async function adminPlhMetricsPayload() {
         sum(coalesce(pcl.remaining_task_hours, 0))::numeric(12, 2) as remaining_hours,
         sum(coalesce(pcl.total_load_hours, 0))::numeric(12, 2) as total_load_hours,
         sum(coalesce(pcl.completed_task_hours, 0))::numeric(12, 2) as completed_hours,
-        max(pcl.status) as status
+        max(pcl.status) as status,
+        max(pcl.rebuilt_at)::text as rebuilt_at
       from hb.phase_cycle_load_rev1 pcl
       left join hb.cycles cycles on cycles.cycle_record_id = pcl.cycle_record_id
       where coalesce(pcl.remaining_task_hours, 0) > 0
@@ -7452,11 +7453,24 @@ async function adminPlhMetricsPayload() {
   const matrix = new Map();
   let currentRows = [];
   const rawPhaseCycleLoad = adminRawPhaseCycleLoadSnapshot(rawPhaseCycleLoadResult.rows);
-  // HB is rebuilt after each changed Asana task event. Prefer it for operational
-  // burn-down; the Airtable PCL mirror is only a recovery fallback when HB has
-  // not yet been initialized.
-  const debtRows = debtResult.rows.length ? debtResult.rows : rawPhaseCycleLoad.rows;
-  const phaseCycleLoadSource = debtResult.rows.length
+  const sourceTimestampMs = (value) => {
+    const timestamp = Date.parse(value || "");
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  };
+  const hbPhaseCycleLoadRebuiltAt = debtResult.rows.reduce((latest, row) => {
+    const timestamp = String(row.rebuilt_at || "");
+    return sourceTimestampMs(timestamp) > sourceTimestampMs(latest) ? timestamp : latest;
+  }, "");
+  const rawPhaseCycleLoadSyncedAt = rawPhaseCycleLoad.stats.latestSyncedAt;
+  // Use the freshest complete phase-cycle model. HB is normally rebuilt after
+  // changed Asana task events, but the Airtable PCL snapshot remains safer when
+  // it is newer or HB has not initialized yet.
+  const useHbPhaseCycleLoad = Boolean(debtResult.rows.length) && (
+    !rawPhaseCycleLoad.rows.length ||
+    sourceTimestampMs(hbPhaseCycleLoadRebuiltAt) >= sourceTimestampMs(rawPhaseCycleLoadSyncedAt)
+  );
+  const debtRows = useHbPhaseCycleLoad ? debtResult.rows : rawPhaseCycleLoad.rows;
+  const phaseCycleLoadSource = useHbPhaseCycleLoad
     ? "hb.phase_cycle_load_rev1"
     : "raw.airtable_phase_cycle_load";
   const scheduleAlignment = await adminScheduleAlignmentPayload(currentCycleNumber);
@@ -7804,6 +7818,8 @@ async function adminPlhMetricsPayload() {
       latestLineOverviewDate: "",
       latestLineOverviewPhaseCount: 0,
       phaseCycleLoadSource,
+      hbPhaseCycleLoadRebuiltAt,
+      rawPhaseCycleLoadSyncedAt,
       currentCyclePacingSource: scheduleCurrentRows.length ? "production_schedule_linked_mirror" : phaseCycleLoadSource,
       phaseCycleLoadGroupCount: debtRows.length,
       hbPhaseCycleLoadGroupCount: debtResult.rows.length,

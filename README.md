@@ -99,9 +99,9 @@ PLH pacing visuals from Postgres/HB data, supports non-destructive true phase
 pacing overlays, and has a preview-first project creator for VIN and
 Fabrication Asana projects.
 
-The Admin Phase-Cycle Burn-Down uses `hb.phase_cycle_load_rev1` as its primary
-source. This HB model is rebuilt after changed Asana task events; the legacy
-Airtable Phase Cycle Load mirror is retained only as a recovery fallback.
+The Admin Phase-Cycle Burn-Down selects the freshest complete phase-cycle
+source. It uses `hb.phase_cycle_load_rev1` after a current HB rebuild and falls
+back to the Airtable Phase Cycle Load snapshot when that snapshot is newer.
 
 The Rev1 Airtable field and calculation migration audit is documented in
 `docs/runbooks/rev1-airtable-calculation-audit.md`.
