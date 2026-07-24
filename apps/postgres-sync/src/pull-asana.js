@@ -608,7 +608,7 @@ async function inheritSubtaskMembershipSections(client, projectGid) {
   const removed = await client.query(
     `
       delete from raw.asana_task_project_memberships child
-      from raw.asana_tasks child_task
+      using raw.asana_tasks child_task
       join raw.asana_task_project_memberships parent
         on parent.task_gid = child_task.parent_gid
       where child.task_gid = child_task.gid
