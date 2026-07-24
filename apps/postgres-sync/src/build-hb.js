@@ -551,6 +551,17 @@ function asanaSourceSection(asana) {
   return asanaSourceContext(asana).sectionName;
 }
 
+function c12C13FabSkillFallbackSection(asana, sourceContext) {
+  if (normalizeKey(sourceContext.sectionName) !== "fab skill required") return "";
+  const cycle = String(sourceContext.projectName || "").match(/^F(\d+)\.\d+$/i);
+  const cycleNumber = Number(cycle?.[1] || 0);
+  if (![12, 13].includes(cycleNumber)) return "";
+  const assignee = normalizeKey(asana.assignee_name || "");
+  const level = assignee.includes("leno") ? 3 : assignee.includes("andrew") ? 2 : 1;
+  const parity = cycleNumber % 2 === 0 ? "A" : "B";
+  return `FAB ${level} - ${parity}`;
+}
+
 function maxTimestamp(left, right) {
   if (!left) return right || null;
   if (!right) return left;
@@ -1099,6 +1110,7 @@ function applyAsanaOverlay(row, asana, lookups) {
   const asanaFields = asanaFieldDisplayMap(fieldsByName);
   const sourceContext = asanaSourceContext(asana);
   const sourceSection = sourceContext.sectionName;
+  const displaySourceSection = c12C13FabSkillFallbackSection(asana, sourceContext) || sourceSection;
   const completed = Boolean(asana.completed);
   const actualMinutes =
     asana.actual_time_minutes === null || asana.actual_time_minutes === undefined
@@ -1108,7 +1120,7 @@ function applyAsanaOverlay(row, asana, lookups) {
   const assignedOnNames = ["Assigned On", "Assigned Date", "Assigned On Date"];
   const originalPhaseText =
     asanaText(fieldsByName, ["Primary Phase", "Phase", "Phase Label", "Section/Column", "Section / Column"]) ||
-    sourceSection ||
+    displaySourceSection ||
     row.phase_label ||
     row.section_column;
   const cycleText =
@@ -1150,7 +1162,7 @@ function applyAsanaOverlay(row, asana, lookups) {
   row.asana_project_name = sourceContext.projectName || row.asana_project_name;
   row.asana_portfolio_gid = asana.portfolio_gid || row.asana_portfolio_gid;
   row.asana_portfolio_name = asana.portfolio_name || row.asana_portfolio_name;
-  row.asana_section = sourceSection || row.asana_section;
+  row.asana_section = displaySourceSection || row.asana_section;
   row.parent_asana_task_gid = asana.parent_gid || row.parent_asana_task_gid;
   row.parent_task_name = asana.raw_json?.parent?.name || row.parent_task_name;
   row.is_subtask = Boolean(row.parent_asana_task_gid);
@@ -1178,13 +1190,13 @@ function applyAsanaOverlay(row, asana, lookups) {
 
   if (phase) {
     row.phase_record_id = phase.phase_record_id;
-    row.phase_label = sourceContext.isFramesOne ? sourceSection : phase.phase_name;
+    row.phase_label = sourceContext.isFramesOne ? displaySourceSection : phase.phase_name;
     row.section_column = (sourceContext.isFramesOne || sourceContext.framesTwoVariant)
       ? "Frames"
       : (phase.section_column || row.section_column);
   } else if (phaseText) {
     row.phase_label = phaseText;
-    row.section_column = sourceSection || row.section_column;
+    row.section_column = displaySourceSection || row.section_column;
   }
 
   if (cycle) {
@@ -1225,7 +1237,7 @@ function applyAsanaOverlay(row, asana, lookups) {
       canonical_project_name: sourceContext.projectName,
       portfolio_gid: asana.portfolio_gid,
       portfolio_name: asana.portfolio_name,
-      section_name: sourceSection,
+      section_name: displaySourceSection,
       original_phase: originalPhaseText,
       frames_one: sourceContext.isFramesOne,
       frames_two_variant: sourceContext.framesTwoVariant || null,

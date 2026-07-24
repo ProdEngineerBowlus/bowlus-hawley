@@ -87,6 +87,11 @@ const ADMIN_PROJECT_PORTFOLIO_NAMES = Object.freeze({
 const ADMIN_AIRTABLE_API_BASE = "https://api.airtable.com/v0";
 const ADMIN_AIRTABLE_TASKS_TABLE = process.env.HAWLEY_AIRTABLE_TASKS_TABLE || "Tasks";
 const ADMIN_FABRICATION_PHASES = new Set(["FAB-A", "FAB-B", "FRAME-A", "FRAME-B", "CNC-A", "CNC-B"]);
+// One-time fallback cleanup for C12/C13 legacy FAB tasks with no template skill.
+const AUTHORIZED_FAB_ASSIGNEE_FALLBACK_PROJECT_GIDS = Object.freeze([
+  "1216440005982579", // F12.26
+  "1216825531220679" // F13.26
+]);
 const ADMIN_PLH_BASELINE_CYCLE = process.env.HAWLEY_ADMIN_PLH_BASELINE_CYCLE || "C5";
 const ADMIN_PLH_PHASES = new Set(
   envList(process.env.HAWLEY_ADMIN_PLH_PHASES || "")
@@ -8444,20 +8449,26 @@ async function adminFabSkillMigrationPlan(projectGid, projectName) {
       ti.asana_task_gid,
       ti.parent_asana_task_gid,
       ti.task_name,
+      ti.assignee_name,
       tt.required_skill_level
     from hb.rev1_task_instances ti
     left join hb.task_templates tt on tt.task_record_id = ti.tasks_record_id
     where ti.asana_project_gid = $1
-      and ti.asana_section = 'FAB'
+      and ti.asana_section in ('FAB', 'FAB - Skill Required')
       and ti.asana_task_gid is not null
   `, [projectGid]);
   const rows = taskResult.rows;
   const byGid = new Map(rows.map(row => [row.asana_task_gid, row]));
   const childrenByParent = new Map();
   const roots = [];
+  const detachedSubtasks = [];
   for (const row of rows) {
     const parent = row.parent_asana_task_gid ? byGid.get(row.parent_asana_task_gid) : null;
     if (!parent) {
+      if (row.parent_asana_task_gid) {
+        detachedSubtasks.push(row);
+        continue;
+      }
       roots.push(row);
       continue;
     }
@@ -8473,9 +8484,13 @@ async function adminFabSkillMigrationPlan(projectGid, projectName) {
       for (const child of childrenByParent.get(row.asana_task_gid) || []) visit(child);
     };
     visit(root);
+    if (highestSkill === null) {
+      const assignee = projectCreatorNormalizeKey(root.assignee_name);
+      highestSkill = assignee.includes("leno") ? 3 : assignee.includes("andrew") ? 2 : 1;
+    }
     groups.get(highestSkill || "unclassified").push(root);
   }
-  return { parity, rows, groups };
+  return { parity, rows, groups, detachedSubtasks };
 }
 
 async function runAdminFabSkillSectionMigration(projectGids) {
@@ -8536,6 +8551,7 @@ async function runAdminFabSkillSectionMigration(projectGids) {
       taskRowsConsidered: plan.rows.length,
       movedParentTrees: movedByTier,
       unclassifiedParentTrees: unclassified.length,
+      detachedSubtasksHeld: plan.detachedSubtasks.length,
       asanaMirror,
       downstreamRebuild
     });
@@ -10216,6 +10232,11 @@ async function startServer() {
         }));
       });
     }, 1000).unref?.();
+    setTimeout(() => {
+      runAdminFabSkillSectionMigration(AUTHORIZED_FAB_ASSIGNEE_FALLBACK_PROJECT_GIDS)
+        .then(result => console.log("[hawley-fab-assignee-fallback]", JSON.stringify(result)))
+        .catch(error => console.error("[hawley-fab-assignee-fallback]", error.message || String(error)));
+    }, 3000).unref?.();
   });
 }
 
