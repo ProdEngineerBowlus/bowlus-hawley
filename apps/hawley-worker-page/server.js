@@ -6049,7 +6049,20 @@ function projectCreatorDisplayPhase(value) {
   return String(value || "").trim();
 }
 
-function projectCreatorSectionFields(projectType, schedule) {
+function projectCreatorFabSkillLevel(value) {
+  const level = Math.round(Number(value));
+  return [1, 2, 3].includes(level) ? level : null;
+}
+
+function projectCreatorFabSectionName(schedule, requiredSkillLevel) {
+  const phaseKey = projectCreatorSupportPhaseKey(projectCreatorPhaseName(schedule));
+  const parity = phaseKey.match(/^FAB-([AB])$/)?.[1] || "";
+  if (!parity) return "";
+  const level = projectCreatorFabSkillLevel(requiredSkillLevel);
+  return level ? `FAB ${level} - ${parity}` : "FAB - Skill Required";
+}
+
+function projectCreatorSectionFields(projectType, schedule, task = null) {
   const phase = projectCreatorDisplayPhase(projectCreatorPhaseName(schedule)) || projectCreatorPhaseName(schedule);
   const section = projectCreatorDisplayPhase(schedule.section_column) || schedule.section_column || phase;
   const phaseASource = projectCreatorNormalizeKey([
@@ -6064,9 +6077,53 @@ function projectCreatorSectionFields(projectType, schedule) {
         ? "Phase A - Upper"
         : "")
     : "";
+  if (projectType === "Fabrication") {
+    const fabSection = projectCreatorFabSectionName(schedule, task?.required_skill_level);
+    if (fabSection) return { phaseLabel: section, sectionColumn: phase, asanaSection: fabSection };
+  }
   return projectType === "VIN"
     ? { phaseLabel: section, sectionColumn: section, asanaSection: phaseASubsection || phase }
     : { phaseLabel: section, sectionColumn: phase, asanaSection: phase };
+}
+
+function projectCreatorApplyFabSkillSections(tasks) {
+  const scopedName = task => `${task.schedule?.production_record_id || ""}::${projectCreatorNormalizeKey(task.task_name)}`;
+  const byScopedName = new Map();
+  for (const task of tasks) {
+    const key = scopedName(task);
+    if (key && !byScopedName.has(key)) byScopedName.set(key, task);
+  }
+  const childrenByTask = new Map();
+  const roots = [];
+  for (const task of tasks) {
+    const parentKey = projectCreatorNormalizeKey(task.parent_task_name);
+    const parent = parentKey
+      ? byScopedName.get(`${task.schedule?.production_record_id || ""}::${parentKey}`)
+      : null;
+    if (!parent || parent.nativeKey === task.nativeKey) {
+      roots.push(task);
+      continue;
+    }
+    if (!childrenByTask.has(parent.nativeKey)) childrenByTask.set(parent.nativeKey, []);
+    childrenByTask.get(parent.nativeKey).push(task);
+  }
+
+  const applyTree = root => {
+    const tree = [];
+    let highestSkill = projectCreatorFabSkillLevel(root.required_skill_level);
+    const visit = task => {
+      tree.push(task);
+      const level = projectCreatorFabSkillLevel(task.required_skill_level);
+      if (level !== null) highestSkill = Math.max(highestSkill || 0, level);
+      for (const child of childrenByTask.get(task.nativeKey) || []) visit(child);
+    };
+    visit(root);
+    const section = projectCreatorFabSectionName(root.schedule, highestSkill);
+    if (section) {
+      for (const task of tree) task.asanaSection = section;
+    }
+  };
+  for (const root of roots) applyTree(root);
 }
 
 function projectCreatorOrderedTasks(tasks) {
@@ -6212,7 +6269,8 @@ async function adminProjectCreatorPreview(options) {
         document_link,
         attachment_summary,
         attachment_files_json,
-        task_description
+        task_description,
+        required_skill_level
       from hb.task_templates
       where coalesce(active, true)
       order by task_order nulls last, parent_task_name nulls first, task_name
@@ -6301,7 +6359,7 @@ async function adminProjectCreatorPreview(options) {
       const existing = existingByKey.get(instanceKey) || null;
       if (existing?.asana_task_gid || existing?.asana_project_gid) skipped.existingSynced += 1;
       const estimatedSeconds = Number(task.estimated_batch_task_time_seconds || task.estimated_task_time_seconds || 0);
-      const sectionFields = projectCreatorSectionFields(projectType, schedule);
+      const sectionFields = projectCreatorSectionFields(projectType, schedule, task);
       projectScheduleIds.add(schedule.production_record_id);
 
       tasks.push({
@@ -6325,6 +6383,8 @@ async function adminProjectCreatorPreview(options) {
       });
     }
   }
+
+  if (projectType === "Fabrication") projectCreatorApplyFabSkillSections(tasks);
 
   tasks.sort((left, right) => {
     const leftSchedule = left.schedule || {};
@@ -8367,6 +8427,125 @@ async function adminProjectSections(token, projectGid) {
   return adminAsanaRequest(token, `/projects/${projectGid}/sections?limit=100`);
 }
 
+function adminFabSkillLevel(value) {
+  return projectCreatorFabSkillLevel(value);
+}
+
+function adminFabSkillSectionName(level, parity) {
+  return level ? `FAB ${level} - ${parity}` : "FAB - Skill Required";
+}
+
+async function adminFabSkillMigrationPlan(projectGid, projectName) {
+  const cycle = String(projectName || "").match(/^F(\d+)\.\d+$/i);
+  if (!cycle) throw actionError("Select a Fabrication project named F<cycle>.YY.", 400);
+  const parity = Number(cycle[1]) % 2 === 0 ? "A" : "B";
+  const taskResult = await pool.query(`
+    select
+      ti.asana_task_gid,
+      ti.parent_asana_task_gid,
+      ti.task_name,
+      tt.required_skill_level
+    from hb.rev1_task_instances ti
+    left join hb.task_templates tt on tt.task_record_id = ti.tasks_record_id
+    where ti.asana_project_gid = $1
+      and ti.asana_section = 'FAB'
+      and ti.asana_task_gid is not null
+  `, [projectGid]);
+  const rows = taskResult.rows;
+  const byGid = new Map(rows.map(row => [row.asana_task_gid, row]));
+  const childrenByParent = new Map();
+  const roots = [];
+  for (const row of rows) {
+    const parent = row.parent_asana_task_gid ? byGid.get(row.parent_asana_task_gid) : null;
+    if (!parent) {
+      roots.push(row);
+      continue;
+    }
+    if (!childrenByParent.has(parent.asana_task_gid)) childrenByParent.set(parent.asana_task_gid, []);
+    childrenByParent.get(parent.asana_task_gid).push(row);
+  }
+  const groups = new Map([[1, []], [2, []], [3, []], ["unclassified", []]]);
+  for (const root of roots) {
+    let highestSkill = adminFabSkillLevel(root.required_skill_level);
+    const visit = row => {
+      const level = adminFabSkillLevel(row.required_skill_level);
+      if (level !== null) highestSkill = Math.max(highestSkill || 0, level);
+      for (const child of childrenByParent.get(row.asana_task_gid) || []) visit(child);
+    };
+    visit(root);
+    groups.get(highestSkill || "unclassified").push(root);
+  }
+  return { parity, rows, groups };
+}
+
+async function handleAdminFabSkillSectionMigration(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const requestedProjectGids = [...new Set((Array.isArray(body.projectGids) ? body.projectGids : [body.projectGid])
+    .map(value => String(value || "").trim())
+    .filter(value => /^\d+$/.test(value)))];
+  if (!requestedProjectGids.length) throw actionError("Choose at least one Fabrication project.", 400);
+  const token = process.env.ASANA_PAT;
+  if (!token) throw actionError("ASANA_PAT is not configured for this admin action.", 503);
+
+  const results = [];
+  for (const projectGid of requestedProjectGids) {
+    const project = await adminAsanaRequest(token, `/projects/${projectGid}?opt_fields=gid,name`);
+    const plan = await adminFabSkillMigrationPlan(projectGid, project?.name || "");
+    const sections = await adminProjectSections(token, projectGid);
+    const sectionByName = new Map((sections || []).map(section => [String(section.name || "").trim().toLowerCase(), section]));
+    const legacyFab = sectionByName.get("fab");
+    const unclassified = plan.groups.get("unclassified") || [];
+    if (legacyFab && unclassified.length) {
+      await adminAsanaRequest(token, `/sections/${legacyFab.gid}`, "PUT", { name: "FAB - Skill Required" });
+      sectionByName.delete("fab");
+      sectionByName.set("fab - skill required", { ...legacyFab, name: "FAB - Skill Required" });
+    }
+
+    const targetSections = new Map();
+    for (const level of [1, 2, 3]) {
+      const name = adminFabSkillSectionName(level, plan.parity);
+      let section = sectionByName.get(name.toLowerCase());
+      if (!section) {
+        section = await adminCreateAsanaSection(token, projectGid, name);
+        sectionByName.set(name.toLowerCase(), section);
+      }
+      targetSections.set(level, section.gid);
+    }
+
+    const movedByTier = { 1: 0, 2: 0, 3: 0 };
+    for (const level of [1, 2, 3]) {
+      const roots = plan.groups.get(level) || [];
+      for (let index = 0; index < roots.length; index += 4) {
+        const batch = roots.slice(index, index + 4);
+        await Promise.all(batch.map(root => adminAsanaRequest(token, `/sections/${targetSections.get(level)}/addTask`, "POST", {
+          task: root.asana_task_gid
+        })));
+        movedByTier[level] += batch.length;
+      }
+    }
+
+    let asanaMirror = { ok: true };
+    let downstreamRebuild = { ok: true };
+    try { asanaMirror = await runAdminProjectAsanaMirrorSync("Fabrication", projectGid); }
+    catch (error) { asanaMirror = { ok: false, error: error.message || String(error) }; }
+    try { downstreamRebuild = await runAdminProjectDownstreamRebuild(); }
+    catch (error) { downstreamRebuild = { ok: false, error: error.message || String(error) }; }
+    results.push({
+      projectGid,
+      projectName: project?.name || projectGid,
+      parity: plan.parity,
+      taskRowsConsidered: plan.rows.length,
+      movedParentTrees: movedByTier,
+      unclassifiedParentTrees: unclassified.length,
+      asanaMirror,
+      downstreamRebuild
+    });
+  }
+  return { ok: true, results };
+}
+
 async function adminCustomFieldRegistry(token, projectGid) {
   const project = await adminAsanaRequest(
     token,
@@ -9868,6 +10047,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/project-creator/cleanup" && req.method === "POST") {
       sendJson(res, 200, await handleAdminProjectCreationCleanup(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/fabrication/fab-skill-sections" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminFabSkillSectionMigration(req));
       return;
     }
 

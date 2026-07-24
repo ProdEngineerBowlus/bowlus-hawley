@@ -71,13 +71,20 @@ Section GIDs are project-specific and must always be created for a new direct
 project. The established sets are:
 
 - VIN: `Phase A` through `Phase H`.
-- Fabrication: `Frames`, `CNC`, and `FAB`.
+- Fabrication: Frames 1/2, `CNC`, and skill-tiered `FAB` sections.
 
 Transition convention from C12 onward: Fabrication projects retain the Frames
 component section as `Frames 2 - A` or `Frames 2 - B`. VIN-tracked trailer-frame
 tasks remain in their VIN project's Phase A Lower/Upper section and are also
 added to `Frames 1 - VIN Lower` or `Frames 1 - VIN Upper` in the matching
 Fabrication project. This is dual project membership, not task duplication.
+
+Fabrication FAB work is organized by both its template Required Skill Level and
+the cycle's parity: `FAB 1 - A/B`, `FAB 2 - A/B`, and `FAB 3 - A/B`. The Project
+Creator places a parent task tree in the highest skill tier required by that
+tree, so a lower-skill parent with a level-3 subtask remains visible as FAB 3.
+Templates without a valid 1/2/3 skill level go to `FAB - Skill Required` for
+data cleanup rather than being assigned to a misleading tier.
 
 The `Untitled section` seen on template-instantiated projects is not required.
 
