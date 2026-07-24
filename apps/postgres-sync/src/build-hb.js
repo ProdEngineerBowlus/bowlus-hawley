@@ -517,6 +517,8 @@ function asanaSourceContext(asana) {
     memberships.find(membership => membership.project?.gid === asana.project_gid && membership.section?.name) ||
     memberships.find(membership => membership.section?.name);
   const selectedMembership = framesOneMembership || sourceMembership;
+  const framesTwoVariant = String(selectedMembership?.section?.name || "")
+    .match(/^Frames 2\s*-\s*([AB])$/i)?.[1]?.toUpperCase() || "";
   const vinMembership = memberships.find(membership =>
     /^\d+\s+-/.test(String(membership.project?.name || "").trim()) &&
     /^Phase A\s*-\s*(Lower|Upper)$/i.test(String(membership.section?.name || "").trim())
@@ -524,6 +526,7 @@ function asanaSourceContext(asana) {
   const fabricationCycle = String(framesOneMembership?.project?.name || "").match(/^F(\d+)\.\d+$/i);
   return {
     isFramesOne: Boolean(framesOneMembership),
+    framesTwoVariant,
     projectGid: selectedMembership?.project?.gid || asana.project_gid || null,
     projectName: selectedMembership?.project?.name || asana.project_name || null,
     sectionName: selectedMembership?.section?.name || null,
@@ -1107,7 +1110,9 @@ function applyAsanaOverlay(row, asana, lookups) {
   // record for capacity and pacing so a dual-homed task is counted once.
   const phaseText = sourceContext.isFramesOne && cycle?.cycle_number !== null && cycle?.cycle_number !== undefined
     ? parityPhaseName("Frames", cycle.cycle_number)
-    : originalPhaseText;
+    : sourceContext.framesTwoVariant
+      ? `Frame-${sourceContext.framesTwoVariant}`
+      : originalPhaseText;
   const phase = findPhase(lookups, phaseText);
   const assigneeName = asana.assignee_name || null;
   const assigneeEmail = asana.assignee_email || null;
@@ -1162,7 +1167,9 @@ function applyAsanaOverlay(row, asana, lookups) {
   if (phase) {
     row.phase_record_id = phase.phase_record_id;
     row.phase_label = sourceContext.isFramesOne ? sourceSection : phase.phase_name;
-    row.section_column = sourceContext.isFramesOne ? "Frames" : (phase.section_column || row.section_column);
+    row.section_column = (sourceContext.isFramesOne || sourceContext.framesTwoVariant)
+      ? "Frames"
+      : (phase.section_column || row.section_column);
   } else if (phaseText) {
     row.phase_label = phaseText;
     row.section_column = sourceSection || row.section_column;
@@ -1209,6 +1216,7 @@ function applyAsanaOverlay(row, asana, lookups) {
       section_name: sourceSection,
       original_phase: originalPhaseText,
       frames_one: sourceContext.isFramesOne,
+      frames_two_variant: sourceContext.framesTwoVariant || null,
       permalink_url: asana.permalink_url,
       synced_at: asana.synced_at,
       fields: asanaFields

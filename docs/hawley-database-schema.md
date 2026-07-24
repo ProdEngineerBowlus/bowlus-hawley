@@ -101,6 +101,10 @@ and maps it to the matching Frames A/B capacity record. The original VIN,
 cycle, task GID, time, comments, and VIN-project membership are retained; the
 task is not duplicated in `hb.rev1_task_instances` or pacing totals.
 
+`Frames 2 - A` and `Frames 2 - B` are likewise authoritative for their A/B
+capacity bucket, even if an older task custom field still says `Frame-A` or
+`Phase A`.
+
 ### `core`
 
 Purpose: Hawley-owned runtime data. These are the tables Hawley can own directly without waiting for Airtable or Asana.
