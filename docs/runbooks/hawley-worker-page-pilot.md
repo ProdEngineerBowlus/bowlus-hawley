@@ -1,6 +1,6 @@
 # Hawley Worker Page Pilot
 
-Last updated: 2026-07-15
+Last updated: 2026-07-24
 
 The Hawley worker page is a pilot clone of the Daily Worker App. It uses
 Hawley/Postgres instead of live Airtable and live Asana reads.
@@ -213,6 +213,36 @@ present. The production web service now chains this export after the 1:00 a.m.
 HB refresh when `HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_ENABLED=true`. The scheduler
 injects the write gates only for the child backfill process, so normal web
 requests remain DB-only.
+
+## Parallel CNC machine runs (David A)
+
+David A's CNC page exposes a separate **Run sheet** control for CNC program
+tasks with a historical D&E estimate. It can track up to three concurrent
+machine runs. David can use the normal Hawley timer for the work he personally
+does (setup, deburr, assembly, and so on) while sheet runs remain active.
+
+Machine runs write only to `core.cnc_machine_runs`; they do not write a normal
+worker timer, `core.time_sessions`, or a `hb.worker_daily_task_actuals` row.
+This intentionally prevents a single operator from being credited with two or
+three full days of labor when two or three machines are running at the same
+time. The run record retains the linked Asana task, expected runtime, actual
+machine duration, and start/stop audit metadata.
+
+The initial runtime profiles live in `hb.cnc_program_runtime_profiles`. The
+profile importer matches `JobHistory-*.csv` records marked `Job Ended Normally`
+to the `.nc` file catalog in `C - Endless Highways`, and uses the median of the
+normal runs (single observation when only one exists). A running machine alerts
+in the Hawley worker/manager UI after the larger of **10 minutes over** or
+**35% over** its historical estimate. The UI refreshes with the normal
+one-minute Hawley cadence, so the alert is an in-app operational callout rather
+than an automated stop command.
+
+To refresh profiles after new D&E Job History exports are available, run this
+with the production migration database connection configured:
+
+```powershell
+node apps/postgres-sync/src/import-cnc-runtime-profiles.js "C:\path\to\CNC LOGS"
+```
 
 The manager `C# day` gauge is intentionally a task-completion gauge. Its percent
 must be `completedTaskCount / taskCount`, matching the adjacent `X/Y tasks

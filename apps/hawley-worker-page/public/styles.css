@@ -1733,6 +1733,53 @@ button {
   font-size: 17px;
 }
 
+.work-actions.cnc-actions {
+  grid-template-columns: auto minmax(130px, 1fr) auto auto;
+  max-width: 760px;
+}
+
+.cnc-chip {
+  background: #e9f0fb;
+  color: #2f5e95;
+}
+
+.cnc-chip.risk {
+  background: #fff0e9;
+  color: #a74624;
+}
+
+.cnc-machine-panel.risk {
+  border-color: #e38b68;
+}
+
+.cnc-machine-run-list {
+  display: grid;
+  gap: 8px;
+}
+
+.cnc-machine-run {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  gap: 3px 16px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.cnc-machine-run:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.cnc-machine-run small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+}
+
+.cnc-machine-run.overrun strong,
+.cnc-machine-run.overrun small {
+  color: #a74624;
+}
+
 .status-pill {
   background: var(--green-soft);
   color: var(--primary-strong);

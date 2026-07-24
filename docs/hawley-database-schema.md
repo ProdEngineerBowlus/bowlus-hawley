@@ -88,6 +88,7 @@ Purpose: Hawley Brain. This is the preferred normalized shop model for schedulin
 | `hb.models` | one model/frame row | `pg:build:hb` | Normalized model/frame reference table for template filtering. |
 | `hb.project_creation_runs` | one admin create run | admin Project Creator | Audit/result table for Postgres-first Asana project creation. |
 | `hb.phase_cycle_pace_overrides` | one cycle/phase pace overlay | admin Dashboard | Non-destructive true start date overlay for phase pacing. |
+| `hb.cnc_program_runtime_profiles` | one D&E CNC program | CNC runtime importer | Historical runtime profile from Job History CSV files matched to the `C - Endless Highways` G-code catalog. The median completed-normal run is the app estimate. |
 
 ### Dual-project Frames 1 placement
 
@@ -130,6 +131,7 @@ Purpose: Hawley-owned runtime data. These are the tables Hawley can own directly
 | `core.app_auth_events` | one auth event | Login/audit event trail. |
 | `core.task_completion_evidence` | one worker contribution to one completed task instance | Historical task completion, timing, confidence, assistance, quality, and verification evidence. |
 | `core.worker_task_capabilities` | one worker/task-template pair | Refreshable capability rollup with completion counts, median/recent timing, consistency, and verification state. |
+| `core.cnc_machine_runs` | one physical CNC sheet run | Hawley worker app | Parallel D&E machine run tied to an Asana task/program. Machine time is deliberately excluded from operator labor/utilization. |
 
 ### Admin-Owned Overlays
 

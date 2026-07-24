@@ -17,6 +17,10 @@ Codex/agent tools.
   and app-readable reporting model.
 - Hawley owns live worker timer/session events in Postgres. A completed worker
   task posts its verified elapsed time and completion to Asana.
+- David's parallel CNC sheet runs are stored separately from labor sessions.
+  Machine runtime is visible to the worker and manager, but it is excluded from
+  the CNC operator's daily utilization so simultaneous sheets cannot multiply
+  his productive hours.
 - Airtable worker actuals are an overnight archive/export target, not the live
   execution source.
 
@@ -116,6 +120,15 @@ the legacy Daily Assignment Tracker snapshot shape:
 
 ```powershell
 npm run worker:hawley
+```
+
+The D&E CNC runtime key is loaded from the local `CNC LOGS` folder only when
+new Job History files are available. It uses completed-normal Job History runs
+matched to `C - Endless Highways` programs and stores the median runtime as the
+operational estimate. To refresh it after applying migrations:
+
+```powershell
+node apps/postgres-sync/src/import-cnc-runtime-profiles.js "C:\path\to\CNC LOGS"
 ```
 
 The worker web app also includes a read-only beta/debug page at `/beta.html`.

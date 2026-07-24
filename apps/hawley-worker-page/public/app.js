@@ -76,6 +76,12 @@
     latestRuns: {},
     refreshedAt: "",
     cycleDays: null,
+    cncMachine: {
+      enabled: false,
+      maxActiveRuns: 3,
+      activeRuns: [],
+      alerts: [],
+    },
     workers: [],
     lineOverview: null,
     error: "",
@@ -454,6 +460,7 @@
     state.latestRuns = payload.latestRuns || {};
     state.refreshedAt = payload.refreshedAt || "";
     state.cycleDays = payload.cycleDays || null;
+    state.cncMachine = payload.cncMachine || state.cncMachine;
     const workers = Array.isArray(payload.workers) ? payload.workers : [];
     const lockedWorkerId = lockedWorkerIdForPage();
     state.workers = lockedWorkerId ? workers.filter((worker) => worker.id === lockedWorkerId) : workers;
@@ -846,6 +853,7 @@
       <section class="manager-dashboard">
         ${renderCycleDayBar()}
         ${freshnessPanel}
+        ${renderCncMachinePanel()}
         ${renderEfficiencyPanel()}
         ${renderAlertAttentionPanel()}
       </section>
@@ -1350,6 +1358,7 @@
       return `
         <section class="worker-focus">
           ${renderDailyProgress(worker)}
+          ${renderCncMachinePanel(worker)}
           <div class="task-list">
             ${renderTaskCards(worker.tasks, true, true)}
           </div>
@@ -1360,6 +1369,7 @@
     return `
       <div class="grid assignment-grid">
         <section class="task-list">
+          ${renderCncMachinePanel(worker)}
           ${renderTaskCards(worker.tasks, false, managerControlEnabled())}
         </section>
         <aside class="panel">
@@ -1464,6 +1474,11 @@
     const wipLabel = timerHasTime
       ? `${formatMinutes(taskWipMinutes || timerMinutes)} WIP ${timerStartedAt ? "running" : "paused"}`
       : `${formatMinutes(taskWipMinutes)} WIP`;
+    const cncMachine = task.cncMachine || null;
+    const cncRun = cncMachine?.activeRuns?.[0] || null;
+    const cncChip = cncMachine
+      ? `<span class="chip cnc-chip${cncRun?.overrun ? " risk" : ""}">${cncRun ? `${formatMinutes(cncRun.elapsedMinutes)} machine${cncRun.overrun ? " — check" : ""}` : `D&E ${formatMinutes(cncMachine.expectedMinutes)} median`}</span>`
+      : "";
 
     return `
       <article class="task-card${task.completed ? " done" : ""}">
@@ -1479,6 +1494,7 @@
             ${!locked && task.ledgerBackfilled ? `<span class="chip yellow">Ledger</span>` : ""}
             ${taskLoggedMinutes ? `<span class="chip green">${formatMinutes(taskLoggedMinutes)} logged</span>` : ""}
             ${taskWipMinutes ? `<span class="chip wip">${escapeHtml(wipLabel)}</span>` : ""}
+            ${cncChip}
             ${canEndSession ? `<button class="chip action-chip" type="button" data-action="release-timer" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>End session</button>` : ""}
             ${task.phase ? `<span class="chip yellow">${escapeHtml(task.phase)}</span>` : ""}
             ${task.vin ? `<span class="chip">VIN ${escapeHtml(task.vin)}</span>` : ""}
@@ -1486,12 +1502,13 @@
           </div>
           ${
             canControl
-              ? `<div class="work-actions" data-task-id="${escapeAttr(task.id)}">
+              ? `<div class="work-actions${cncMachine ? " cnc-actions" : ""}" data-task-id="${escapeAttr(task.id)}">
                   <a class="btn ${hasSop ? "ghost" : "disabled"}" ${hasSop ? `href="${escapeAttr(sopUrl)}" target="_blank" rel="noreferrer"` : ""} aria-disabled="${hasSop ? "false" : "true"}">${icons.open}<span>SOP</span></a>
                   ${task.completed
                     ? `<button class="btn ghost" type="button" data-action="reopen-task" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>${busy ? "Saving..." : "Mark incomplete"}</button>`
                     : `<button class="btn ghost" type="button" data-action="start-timer" data-task-id="${escapeAttr(task.id)}" ${timerRunning || busy ? "disabled" : ""}>${timerRunning ? "Running" : startLabel}</button>
                       ${timerRunning ? `<button class="btn ghost" type="button" data-action="stop-timer" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>Stop</button>` : ""}
+                      ${cncMachine ? `<button class="btn ${cncRun?.overrun ? "danger" : "ghost"}" type="button" data-action="${cncRun ? "stop-cnc-run" : "start-cnc-run"}" data-task-id="${escapeAttr(task.id)}" ${cncRun ? `data-machine-run-id="${escapeAttr(cncRun.id)}"` : ""} ${busy ? "disabled" : ""}>${cncRun ? "Stop machine" : "Run sheet"}</button>` : ""}
                       <button class="btn primary" type="button" data-action="complete-task" data-task-id="${escapeAttr(task.id)}" ${!timerHasTime || busy ? "disabled" : ""}>${busy ? "Saving..." : "Complete"}</button>`}
                 </div>`
               : ""
@@ -1633,6 +1650,14 @@
         const worker = getSelectedWorker();
         if (!worker) return;
         await completeWorkerTask(worker.id, button.dataset.taskId);
+      });
+    });
+
+    document.querySelectorAll("[data-action='start-cnc-run'], [data-action='stop-cnc-run']").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const worker = getSelectedWorker();
+        if (!worker) return;
+        await updateCncMachineRun(worker.id, button.dataset.taskId, button.dataset.machineRunId || "", button.dataset.action === "start-cnc-run" ? "start" : "stop");
       });
     });
 
@@ -1816,6 +1841,34 @@
     return Boolean(lockedWorkerIdForPage());
   }
 
+  async function updateCncMachineRun(employee, taskId, machineRunId, action) {
+    if (!serverWritesEnabledFor(employee)) {
+      showToast("CNC machine-run tracking requires the live Hawley service.");
+      return;
+    }
+    state.actionTaskId = taskId;
+    render();
+    try {
+      const response = await postJsonWithPin("/api/cnc-machine-run", {
+        employee,
+        taskId,
+        machineRunId,
+        date: state.date,
+        action,
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error || `CNC machine run failed with ${response.status}`);
+      }
+      showToast(action === "start" ? "CNC machine run started; it will not count as additional operator time." : "CNC machine run stopped");
+      await loadAssignments();
+    } catch (error) {
+      state.actionTaskId = "";
+      render();
+      showToast(error.message || "Could not update CNC machine run");
+    }
+  }
+
   async function startWorkerTimer(employee, taskId) {
     const activeTask = findActiveTimerTask(taskId);
     if (activeTask) {
@@ -1939,6 +1992,39 @@
       render();
       showToast(error.message || "Could not save task");
     }
+  }
+
+  function renderCncMachinePanel(worker = null) {
+    const cnc = state.cncMachine || {};
+    const allRuns = Array.isArray(cnc.activeRuns) ? cnc.activeRuns : [];
+    const runs = worker ? allRuns.filter((run) => run.workerId === worker.id) : allRuns;
+    const alerts = runs.filter((run) => run.overrun);
+    if (!runs.length && (!worker || !cnc.enabled)) return "";
+    if (worker && !runs.length && !cnc.enabled) return "";
+    const heading = worker ? "CNC machine runs" : "CNC machine watch";
+    const detail = alerts.length
+      ? `${alerts.length} run${alerts.length === 1 ? " is" : "s are"} past its alert limit.`
+      : runs.length
+        ? `${runs.length} active run${runs.length === 1 ? "" : "s"}; machine minutes are excluded from operator utilization.`
+        : `Start up to ${Number(cnc.maxActiveRuns || 3)} sheet runs in parallel. Machine minutes stay separate from operator time.`;
+    return `
+      <section class="panel cnc-machine-panel${alerts.length ? " risk" : ""}">
+        <div class="panel-header dashboard-header">
+          <div>
+            <h2 class="panel-title">${escapeHtml(heading)}</h2>
+            <p class="summary-line">${escapeHtml(detail)}</p>
+          </div>
+          <span class="status-pill ${alerts.length ? "risk" : "good"}">${alerts.length ? `${alerts.length} alert${alerts.length === 1 ? "" : "s"}` : `${runs.length} running`}</span>
+        </div>
+        ${runs.length ? `<div class="panel-body cnc-machine-run-list">${runs.map((run) => `
+          <div class="cnc-machine-run${run.overrun ? " overrun" : ""}">
+            <strong>${escapeHtml(run.programName || run.taskName)}</strong>
+            <span>${escapeHtml(run.workerName || "CNC operator")} - ${escapeHtml(formatMinutes(run.elapsedMinutes))} running</span>
+            <small>${run.overrun ? `Over alert limit ${formatMinutes(run.alertAfterMinutes)} - check machine / stop if complete.` : `Historical median ${formatMinutes(run.expectedMinutes)} - alert at ${formatMinutes(run.alertAfterMinutes)}`}</small>
+          </div>
+        `).join("")}</div>` : ""}
+      </section>
+    `;
   }
 
   async function reopenWorkerTask(employee, taskId) {
