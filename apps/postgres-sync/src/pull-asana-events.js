@@ -457,6 +457,55 @@ async function syncTaskMemberships(client, task, sourceProject) {
   return memberships.length;
 }
 
+// Subtasks inherit the section of their parent. Normalize that inherited
+// placement after event updates so a parent move cannot leave child rows in an
+// obsolete section in the Postgres mirror.
+async function inheritSubtaskMembershipSections(client, projectGid) {
+  const removed = await client.query(
+    `
+      delete from raw.asana_task_project_memberships child
+      from raw.asana_tasks child_task
+      join raw.asana_task_project_memberships parent
+        on parent.task_gid = child_task.parent_gid
+      where child.task_gid = child_task.gid
+        and child.project_gid = $1
+        and parent.project_gid = child.project_gid
+        and child_task.parent_gid is not null
+        and (
+          child.section_gid is distinct from parent.section_gid
+          or child.section_name is distinct from parent.section_name
+        )
+    `,
+    [projectGid]
+  );
+  await client.query(
+    `
+      insert into raw.asana_task_project_memberships
+        (task_gid, project_gid, section_gid, section_name, is_source_project, raw_json, synced_at)
+      select
+        child_task.gid,
+        parent.project_gid,
+        parent.section_gid,
+        parent.section_name,
+        parent.is_source_project,
+        parent.raw_json,
+        now()
+      from raw.asana_tasks child_task
+      join raw.asana_task_project_memberships parent
+        on parent.task_gid = child_task.parent_gid
+      where parent.project_gid = $1
+        and child_task.parent_gid is not null
+      on conflict (task_gid, project_gid, section_gid) do update set
+        section_name = excluded.section_name,
+        is_source_project = excluded.is_source_project,
+        raw_json = excluded.raw_json,
+        synced_at = now()
+    `,
+    [projectGid]
+  );
+  return removed.rowCount || 0;
+}
+
 function taskGidsFromEvents(events) {
   return Array.from(new Set(
     events
@@ -490,6 +539,12 @@ async function processChangedTasks(client, asana, project, taskGids, summary) {
       }
       throw error;
     }
+  }
+
+  if (changed) {
+    const inheritedSections = await inheritSubtaskMembershipSections(client, project.project_gid);
+    summary.inheritedSubtaskSections = (summary.inheritedSubtaskSections || 0) + inheritedSections;
+    summary.recordsWritten += inheritedSections;
   }
 
   return changed;

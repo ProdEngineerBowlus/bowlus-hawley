@@ -267,10 +267,22 @@ async function rawAsanaPortfolioTaskRows(client) {
       project.name as project_name,
       portfolio_project.portfolio_gid,
       portfolio_project.portfolio_name,
-      portfolio_project.task_type as portfolio_task_type
+      portfolio_project.task_type as portfolio_task_type,
+      membership_data.memberships_json
     from raw.asana_tasks task
     join raw.asana_portfolio_projects portfolio_project on portfolio_project.project_gid = task.project_gid
     left join raw.asana_projects project on project.gid = task.project_gid
+    left join lateral (
+      select jsonb_agg(
+        jsonb_build_object(
+          'project', jsonb_build_object('gid', membership.project_gid, 'name', membership_project.name),
+          'section', jsonb_build_object('gid', membership.section_gid, 'name', membership.section_name)
+        )
+      ) as memberships_json
+      from raw.asana_task_project_memberships membership
+      left join raw.asana_projects membership_project on membership_project.gid = membership.project_gid
+      where membership.task_gid = task.gid
+    ) membership_data on true
     order by task.gid, portfolio_project.portfolio_gid
   `);
   return result.rows;
@@ -508,7 +520,7 @@ function asanaFieldDisplayMap(fieldsByName) {
 }
 
 function asanaSourceContext(asana) {
-  const memberships = toArray(asana.raw_json?.memberships);
+  const memberships = toArray(asana.memberships_json || asana.raw_json?.memberships);
   const framesOneMembership = memberships.find(membership =>
     /^F\d+\.\d+$/i.test(String(membership.project?.name || "").trim()) &&
     /^Frames 1 - VIN (Lower|Upper)$/i.test(String(membership.section?.name || "").trim())

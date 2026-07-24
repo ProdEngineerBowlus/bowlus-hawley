@@ -105,6 +105,10 @@ task is not duplicated in `hb.rev1_task_instances` or pacing totals.
 capacity bucket, even if an older task custom field still says `Frame-A` or
 `Phase A`.
 
+Asana subtasks inherit their parent task's section placement in the raw mirror.
+This prevents a parent move from leaving its child rows in an obsolete section
+for dashboard, worker-rail, or project-creation reporting.
+
 ### `core`
 
 Purpose: Hawley-owned runtime data. These are the tables Hawley can own directly without waiting for Airtable or Asana.
