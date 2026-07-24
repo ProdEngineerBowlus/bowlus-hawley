@@ -87,11 +87,6 @@ const ADMIN_PROJECT_PORTFOLIO_NAMES = Object.freeze({
 const ADMIN_AIRTABLE_API_BASE = "https://api.airtable.com/v0";
 const ADMIN_AIRTABLE_TASKS_TABLE = process.env.HAWLEY_AIRTABLE_TASKS_TABLE || "Tasks";
 const ADMIN_FABRICATION_PHASES = new Set(["FAB-A", "FAB-B", "FRAME-A", "FRAME-B", "CNC-A", "CNC-B"]);
-// One-time fallback cleanup for C12/C13 legacy FAB tasks with no template skill.
-const AUTHORIZED_FAB_ASSIGNEE_FALLBACK_PROJECT_GIDS = Object.freeze([
-  "1216440005982579", // F12.26
-  "1216825531220679" // F13.26
-]);
 const ADMIN_PLH_BASELINE_CYCLE = process.env.HAWLEY_ADMIN_PLH_BASELINE_CYCLE || "C5";
 const ADMIN_PLH_PHASES = new Set(
   envList(process.env.HAWLEY_ADMIN_PLH_PHASES || "")
@@ -10232,11 +10227,6 @@ async function startServer() {
         }));
       });
     }, 1000).unref?.();
-    setTimeout(() => {
-      runAdminFabSkillSectionMigration(AUTHORIZED_FAB_ASSIGNEE_FALLBACK_PROJECT_GIDS)
-        .then(result => console.log("[hawley-fab-assignee-fallback]", JSON.stringify(result)))
-        .catch(error => console.error("[hawley-fab-assignee-fallback]", error.message || String(error)));
-    }, 3000).unref?.();
   });
 }
 
