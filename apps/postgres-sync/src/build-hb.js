@@ -507,12 +507,33 @@ function asanaFieldDisplayMap(fieldsByName) {
   );
 }
 
-function asanaSourceSection(asana) {
+function asanaSourceContext(asana) {
   const memberships = toArray(asana.raw_json?.memberships);
+  const framesOneMembership = memberships.find(membership =>
+    /^F\d+\.\d+$/i.test(String(membership.project?.name || "").trim()) &&
+    /^Frames 1 - VIN (Lower|Upper)$/i.test(String(membership.section?.name || "").trim())
+  );
   const sourceMembership =
     memberships.find(membership => membership.project?.gid === asana.project_gid && membership.section?.name) ||
     memberships.find(membership => membership.section?.name);
-  return sourceMembership?.section?.name || null;
+  const selectedMembership = framesOneMembership || sourceMembership;
+  const vinMembership = memberships.find(membership =>
+    /^\d+\s+-/.test(String(membership.project?.name || "").trim()) &&
+    /^Phase A\s*-\s*(Lower|Upper)$/i.test(String(membership.section?.name || "").trim())
+  );
+  const fabricationCycle = String(framesOneMembership?.project?.name || "").match(/^F(\d+)\.\d+$/i);
+  return {
+    isFramesOne: Boolean(framesOneMembership),
+    projectGid: selectedMembership?.project?.gid || asana.project_gid || null,
+    projectName: selectedMembership?.project?.name || asana.project_name || null,
+    sectionName: selectedMembership?.section?.name || null,
+    vin: Number(String(vinMembership?.project?.name || "").match(/^(\d+)\s+-/)?.[1] || "") || null,
+    cycleLabel: fabricationCycle ? `C${fabricationCycle[1]}` : ""
+  };
+}
+
+function asanaSourceSection(asana) {
+  return asanaSourceContext(asana).sectionName;
 }
 
 function maxTimestamp(left, right) {
@@ -1061,7 +1082,8 @@ function recomputeTaskHours(row) {
 function applyAsanaOverlay(row, asana, lookups) {
   const fieldsByName = asanaFieldsByName(asana.custom_fields_json || asana.raw_json?.custom_fields || []);
   const asanaFields = asanaFieldDisplayMap(fieldsByName);
-  const sourceSection = asanaSourceSection(asana);
+  const sourceContext = asanaSourceContext(asana);
+  const sourceSection = sourceContext.sectionName;
   const completed = Boolean(asana.completed);
   const actualMinutes =
     asana.actual_time_minutes === null || asana.actual_time_minutes === undefined
@@ -1069,7 +1091,7 @@ function applyAsanaOverlay(row, asana, lookups) {
       : Math.round(Number(asana.actual_time_minutes || 0));
 
   const assignedOnNames = ["Assigned On", "Assigned Date", "Assigned On Date"];
-  const phaseText =
+  const originalPhaseText =
     asanaText(fieldsByName, ["Primary Phase", "Phase", "Phase Label", "Section/Column", "Section / Column"]) ||
     sourceSection ||
     row.phase_label ||
@@ -1077,9 +1099,16 @@ function applyAsanaOverlay(row, asana, lookups) {
   const cycleText =
     asanaText(fieldsByName, ["Cycle Label", "Cycle", "Cycle Number"]) ||
     row.cycle_label ||
+    sourceContext.cycleLabel ||
     asana.project_name;
-  const phase = findPhase(lookups, phaseText);
   const cycle = findCycle(lookups, cycleText);
+  // Frames 1 is VIN-tracked work that executes in the Frames work area. Keep
+  // its VIN/cycle custom fields intact, while using the matching Frames A/B
+  // record for capacity and pacing so a dual-homed task is counted once.
+  const phaseText = sourceContext.isFramesOne && cycle?.cycle_number !== null && cycle?.cycle_number !== undefined
+    ? parityPhaseName("Frames", cycle.cycle_number)
+    : originalPhaseText;
+  const phase = findPhase(lookups, phaseText);
   const assigneeName = asana.assignee_name || null;
   const assigneeEmail = asana.assignee_email || null;
   const worker = findWorker(lookups, assigneeEmail, assigneeName);
@@ -1097,11 +1126,11 @@ function applyAsanaOverlay(row, asana, lookups) {
     "Allocated Minutes"
   ]);
   const batchSeconds = explicitBatchSeconds ?? (quantity && taskSeconds ? Math.round(quantity * taskSeconds) : null);
-  const vinNumber = asanaInteger(fieldsByName, ["VIN", "VIN Number"]);
+  const vinNumber = asanaInteger(fieldsByName, ["VIN", "VIN Number"]) ?? sourceContext.vin;
 
   row.asana_task_gid = asana.gid || row.asana_task_gid;
-  row.asana_project_gid = asana.project_gid || row.asana_project_gid;
-  row.asana_project_name = asana.project_name || row.asana_project_name;
+  row.asana_project_gid = sourceContext.projectGid || row.asana_project_gid;
+  row.asana_project_name = sourceContext.projectName || row.asana_project_name;
   row.asana_portfolio_gid = asana.portfolio_gid || row.asana_portfolio_gid;
   row.asana_portfolio_name = asana.portfolio_name || row.asana_portfolio_name;
   row.asana_section = sourceSection || row.asana_section;
@@ -1132,8 +1161,8 @@ function applyAsanaOverlay(row, asana, lookups) {
 
   if (phase) {
     row.phase_record_id = phase.phase_record_id;
-    row.phase_label = phase.phase_name;
-    row.section_column = phase.section_column || row.section_column;
+    row.phase_label = sourceContext.isFramesOne ? sourceSection : phase.phase_name;
+    row.section_column = sourceContext.isFramesOne ? "Frames" : (phase.section_column || row.section_column);
   } else if (phaseText) {
     row.phase_label = phaseText;
     row.section_column = sourceSection || row.section_column;
@@ -1173,9 +1202,13 @@ function applyAsanaOverlay(row, asana, lookups) {
       gid: asana.gid,
       project_gid: asana.project_gid,
       project_name: asana.project_name,
+      canonical_project_gid: sourceContext.projectGid,
+      canonical_project_name: sourceContext.projectName,
       portfolio_gid: asana.portfolio_gid,
       portfolio_name: asana.portfolio_name,
       section_name: sourceSection,
+      original_phase: originalPhaseText,
+      frames_one: sourceContext.isFramesOne,
       permalink_url: asana.permalink_url,
       synced_at: asana.synced_at,
       fields: asanaFields

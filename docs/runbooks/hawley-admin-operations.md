@@ -93,12 +93,20 @@ exceeds remaining capacity. A separate `On Pace` or `Behind Pace` chip compares
 completion with the phase's standard or true-phase target. This allows a phase
 to be capacity-covered while still showing that work needs to accelerate.
 
-`Phase A & Frames` combines A1/A2 and Frame-A/Frame-B into one presentation
-row. Current-cycle load, completed hours, and remaining hours count only task
+`Frames` combines Frames 1 VIN work and Frames 2 component work into one
+presentation row. During the transition that starts with C12, Frames 1 tasks
+retain their VIN-project membership and gain a matching Fabrication-project
+membership: `Frames 1 - VIN Lower` in F12.26 and `Frames 1 - VIN Upper` in
+F13.26. Frames 2 is the existing cycle-batched component work (`Frames 2 - A`
+and `Frames 2 - B`). Hawley treats the Fabrication Frames 1 placement as the
+canonical execution location, preserves the VIN and cycle custom fields, and
+counts the task once in Frames capacity.
+
+Current-cycle load, completed hours, and remaining hours count only task
 instances linked to that cycle's production-schedule rows. Unlinked tasks that
 merely share a phase-cycle record are excluded because they may be carryover or
 out-of-order prototype work. For example, C11 work on VINs 325/326 must not be
-counted as C12 Phase A load. C12 VINs 327/328 enter the row after their task
+counted as C12 Frames load. C12 VINs 327/328 enter the row after their task
 instances are created and linked to their C12 A1/A2 schedule rows.
 
 The True Pace Starts table includes a persistent `Just in time` mode. Enabling

@@ -6761,7 +6761,7 @@ function adminPhaseStatusRank(status) {
 
 function adminPresentationPhaseName(phaseName) {
   const phase = adminPhaseFamilyName(phaseName);
-  if (phase === "Phase A" || phase === "Frames") return "Phase A & Frames";
+  if (phase === "Phase A" || phase === "Frames") return "Frames";
   return phase || "Unassigned";
 }
 

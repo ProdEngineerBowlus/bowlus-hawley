@@ -89,6 +89,18 @@ Purpose: Hawley Brain. This is the preferred normalized shop model for schedulin
 | `hb.project_creation_runs` | one admin create run | admin Project Creator | Audit/result table for Postgres-first Asana project creation. |
 | `hb.phase_cycle_pace_overrides` | one cycle/phase pace overlay | admin Dashboard | Non-destructive true start date overlay for phase pacing. |
 
+### Dual-project Frames 1 placement
+
+Beginning with C12, VIN-specific trailer-frame tasks can belong to both their
+VIN project and the corresponding Fabrication project. The source mirror stores
+every active Asana membership in `raw.asana_task_project_memberships`. When a
+task has a Fabrication membership in `Frames 1 - VIN Lower` or
+`Frames 1 - VIN Upper`, `pg:build:hb` uses that placement as the canonical
+execution location, derives its cycle from the Fabrication project when needed,
+and maps it to the matching Frames A/B capacity record. The original VIN,
+cycle, task GID, time, comments, and VIN-project membership are retained; the
+task is not duplicated in `hb.rev1_task_instances` or pacing totals.
+
 ### `core`
 
 Purpose: Hawley-owned runtime data. These are the tables Hawley can own directly without waiting for Airtable or Asana.

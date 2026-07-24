@@ -582,6 +582,25 @@ async function upsertMembership(client, membership) {
   );
 }
 
+// A task can be present in more than one project. When Asana returns its
+// memberships, that list is authoritative; retaining an old membership makes
+// a moved task appear in a project where it no longer exists. Subtasks may omit
+// memberships and inherit their parent's placement, so only replace explicit
+// membership snapshots.
+async function syncTaskMemberships(client, task, sourceProject) {
+  const memberships = taskMembershipRows(task, sourceProject);
+  if (Array.isArray(task.memberships) && task.memberships.length) {
+    await client.query(
+      "delete from raw.asana_task_project_memberships where task_gid = $1",
+      [task.gid]
+    );
+  }
+  for (const membership of memberships) {
+    await upsertMembership(client, membership);
+  }
+  return memberships.length;
+}
+
 function selectedPortfolioKeys(args) {
   return PORTFOLIO_ALIASES[args.portfolio];
 }
@@ -665,12 +684,9 @@ async function main() {
           await upsertTask(client, task, project);
           summary.recordsWritten += 1;
 
-          const memberships = taskMembershipRows(task, project);
-          for (const membership of memberships) {
-            await upsertMembership(client, membership);
-            summary.membershipRows += 1;
-            summary.recordsWritten += 1;
-          }
+          const membershipCount = await syncTaskMemberships(client, task, project);
+          summary.membershipRows += membershipCount;
+          summary.recordsWritten += membershipCount;
         }
       }
 

@@ -440,6 +440,23 @@ async function upsertMembership(client, membership) {
   );
 }
 
+// Event payloads include the task's current complete membership list. Replace
+// explicit snapshots so a prior project placement cannot survive after Asana
+// moves the task. Keep inherited-subtask rows when Asana supplies no list.
+async function syncTaskMemberships(client, task, sourceProject) {
+  const memberships = taskMembershipRows(task, sourceProject);
+  if (Array.isArray(task.memberships) && task.memberships.length) {
+    await client.query(
+      "delete from raw.asana_task_project_memberships where task_gid = $1",
+      [task.gid]
+    );
+  }
+  for (const membership of memberships) {
+    await upsertMembership(client, membership);
+  }
+  return memberships.length;
+}
+
 function taskGidsFromEvents(events) {
   return Array.from(new Set(
     events
@@ -463,12 +480,9 @@ async function processChangedTasks(client, asana, project, taskGids, summary) {
       summary.recordsWritten += 1;
       changed += 1;
 
-      const memberships = taskMembershipRows(task, sourceProject);
-      for (const membership of memberships) {
-        await upsertMembership(client, membership);
-        summary.membershipRows += 1;
-        summary.recordsWritten += 1;
-      }
+      const membershipCount = await syncTaskMemberships(client, task, sourceProject);
+      summary.membershipRows += membershipCount;
+      summary.recordsWritten += membershipCount;
     } catch (error) {
       if (error.status === 404) {
         summary.missingTasks += 1;

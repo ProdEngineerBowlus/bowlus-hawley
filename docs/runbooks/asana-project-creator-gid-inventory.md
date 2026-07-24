@@ -73,6 +73,12 @@ project. The established sets are:
 - VIN: `Phase A` through `Phase H`.
 - Fabrication: `Frames`, `CNC`, and `FAB`.
 
+Transition convention from C12 onward: Fabrication projects retain the Frames
+component section as `Frames 2 - A` or `Frames 2 - B`. VIN-tracked trailer-frame
+tasks remain in their VIN project's Phase A Lower/Upper section and are also
+added to `Frames 1 - VIN Lower` or `Frames 1 - VIN Upper` in the matching
+Fabrication project. This is dual project membership, not task duplication.
+
 The `Untitled section` seen on template-instantiated projects is not required.
 
 ## Direct-create readiness
