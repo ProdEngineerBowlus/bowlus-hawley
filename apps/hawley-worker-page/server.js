@@ -87,6 +87,12 @@ const ADMIN_PROJECT_PORTFOLIO_NAMES = Object.freeze({
 const ADMIN_AIRTABLE_API_BASE = "https://api.airtable.com/v0";
 const ADMIN_AIRTABLE_TASKS_TABLE = process.env.HAWLEY_AIRTABLE_TASKS_TABLE || "Tasks";
 const ADMIN_FABRICATION_PHASES = new Set(["FAB-A", "FAB-B", "FRAME-A", "FRAME-B", "CNC-A", "CNC-B"]);
+// One-time C12/C13 transition authorized on 2026-07-24. Remove after the
+// server confirms the Asana move and normalized rebuild have completed.
+const AUTHORIZED_FAB_SKILL_MIGRATION_PROJECT_GIDS = Object.freeze([
+  "1216440005982579", // F12.26
+  "1216825531220679" // F13.26
+]);
 const ADMIN_PLH_BASELINE_CYCLE = process.env.HAWLEY_ADMIN_PLH_BASELINE_CYCLE || "C5";
 const ADMIN_PLH_PHASES = new Set(
   envList(process.env.HAWLEY_ADMIN_PLH_PHASES || "")
@@ -8478,11 +8484,8 @@ async function adminFabSkillMigrationPlan(projectGid, projectName) {
   return { parity, rows, groups };
 }
 
-async function handleAdminFabSkillSectionMigration(req) {
-  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
-  requireAdminActor(actor);
-  const body = await readJsonBody(req);
-  const requestedProjectGids = [...new Set((Array.isArray(body.projectGids) ? body.projectGids : [body.projectGid])
+async function runAdminFabSkillSectionMigration(projectGids) {
+  const requestedProjectGids = [...new Set((projectGids || [])
     .map(value => String(value || "").trim())
     .filter(value => /^\d+$/.test(value)))];
   if (!requestedProjectGids.length) throw actionError("Choose at least one Fabrication project.", 400);
@@ -8544,6 +8547,13 @@ async function handleAdminFabSkillSectionMigration(req) {
     });
   }
   return { ok: true, results };
+}
+
+async function handleAdminFabSkillSectionMigration(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  return runAdminFabSkillSectionMigration(Array.isArray(body.projectGids) ? body.projectGids : [body.projectGid]);
 }
 
 async function adminCustomFieldRegistry(token, projectGid) {
@@ -10212,6 +10222,13 @@ async function startServer() {
         }));
       });
     }, 1000).unref?.();
+    if (AUTHORIZED_FAB_SKILL_MIGRATION_PROJECT_GIDS.length) {
+      setTimeout(() => {
+        runAdminFabSkillSectionMigration(AUTHORIZED_FAB_SKILL_MIGRATION_PROJECT_GIDS)
+          .then(result => console.log("[hawley-fab-skill-migration]", JSON.stringify(result)))
+          .catch(error => console.error("[hawley-fab-skill-migration]", error.message || String(error)));
+      }, 3000).unref?.();
+    }
   });
 }
 
