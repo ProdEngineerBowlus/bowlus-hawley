@@ -212,7 +212,9 @@ HAWLEY_ASANA_VIN_PORTFOLIO_GID
 Fabrication projects are selected by cycle.
 
 The creator uses the production schedule to find fabrication support rows for
-the selected cycle. Current support buckets are:
+the selected cycle. It enforces that each selected row has that same cycle
+number before previewing or creating a task, so stale client state cannot place
+work into an adjacent Fabrication project. Current support buckets are:
 
 - `FAB-A`
 - `FAB-B`

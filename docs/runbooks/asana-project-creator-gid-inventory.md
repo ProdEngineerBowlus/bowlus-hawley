@@ -86,6 +86,11 @@ tree, so a lower-skill parent with a level-3 subtask remains visible as FAB 3.
 Templates without a valid 1/2/3 skill level go to `FAB - Skill Required` for
 data cleanup rather than being assigned to a misleading tier.
 
+Fabrication creation applies a hard cycle guard: every selected schedule row
+must match the requested cycle number before any task can be previewed or
+created. This prevents a stale browser selection from placing C13 work in the
+F12 project (or the reverse).
+
 For the C12/C13 transition only, legacy unclassified top-level FAB tasks use
 their assignee as a fallback: Andrew is FAB 2, Leno is FAB 3, and all other
 assignees are FAB 1. Nested tasks stay with their parent hierarchy and receive

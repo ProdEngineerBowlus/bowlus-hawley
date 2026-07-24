@@ -6235,8 +6235,13 @@ async function adminProjectCreatorPreview(options) {
   if (projectType === "VIN" && selectedVin === null) return null;
   if (projectType === "Fabrication" && !selectedCycleNumber) return null;
 
+  // Never trust the caller's selected rows alone: an old browser payload can
+  // otherwise seed a new Fabrication project with work from an adjacent cycle.
   const targetScheduleRows = projectType === "Fabrication"
-    ? selectedCycleRows.filter(projectCreatorScheduleIsFabrication)
+    ? selectedCycleRows.filter(row =>
+      Number(row.cycle_number) === Number(selectedCycleNumber) &&
+      projectCreatorScheduleIsFabrication(row)
+    )
     : allScheduleRows.filter(row => projectCreatorVinNumber(row.vin) === selectedVin);
   if (!targetScheduleRows.length) return null;
 
