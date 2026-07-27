@@ -1479,6 +1479,11 @@
     const cncChip = cncMachine
       ? `<span class="chip cnc-chip${cncRun?.overrun ? " risk" : ""}">${cncRun ? `${formatMinutes(cncRun.elapsedMinutes)} machine${cncRun.overrun ? " — check" : ""}` : `D&E ${formatMinutes(cncMachine.expectedMinutes)} median`}</span>`
       : "";
+    const assignmentChip = task.assignmentState === "unscheduled"
+      ? `<span class="chip yellow">Assigned — not scheduled</span>`
+      : task.assignmentState === "carryover"
+        ? `<span class="chip yellow">Carryover${task.assignmentDate ? ` from ${escapeHtml(formatShortDate(task.assignmentDate))}` : ""}</span>`
+        : "";
 
     return `
       <article class="task-card${task.completed ? " done" : ""}">
@@ -1495,6 +1500,7 @@
             ${taskLoggedMinutes ? `<span class="chip green">${formatMinutes(taskLoggedMinutes)} logged</span>` : ""}
             ${taskWipMinutes ? `<span class="chip wip">${escapeHtml(wipLabel)}</span>` : ""}
             ${cncChip}
+            ${assignmentChip}
             ${canEndSession ? `<button class="chip action-chip" type="button" data-action="release-timer" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>End session</button>` : ""}
             ${task.phase ? `<span class="chip yellow">${escapeHtml(task.phase)}</span>` : ""}
             ${task.vin ? `<span class="chip">VIN ${escapeHtml(task.vin)}</span>` : ""}

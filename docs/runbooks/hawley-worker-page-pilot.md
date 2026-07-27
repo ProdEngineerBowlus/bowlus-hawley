@@ -214,6 +214,17 @@ HB refresh when `HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_ENABLED=true`. The scheduler
 injects the write gates only for the child backfill process, so normal web
 requests remain DB-only.
 
+### Worker assignment visibility
+
+Manager dashboard day totals remain strictly date-based: they show tasks whose
+`Assigned On` date equals the selected shop date. A specific worker's locked
+page additionally shows their open work in the active cycle that is either
+unplanned (assigned in Asana but missing `Assigned On`) or carried over from
+the immediately preceding cycle. Those task cards are labeled **Assigned — not
+scheduled** or **Carryover** so they are visible without silently changing the
+manager's daily staffing plan. This protects worker task recognition when the
+line lead has not assigned a date yet.
+
 ## Parallel CNC machine runs (David A)
 
 David A's CNC page exposes a separate **Run sheet** control for CNC program

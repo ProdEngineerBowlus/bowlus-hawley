@@ -1532,6 +1532,8 @@ function taskFromRow(row) {
     sourceUrl: publicLink(row.asana_permalink_url),
     trackerUrl: "",
     sopUrl: publicLink(row.sop_link || row.document_link),
+    assignmentState: row.assignment_state || "",
+    assignmentDate: row.assigned_on || "",
     sourceSyncedAt: row.source_synced_at,
     inferenceSource: row.inference_source || ""
   };
@@ -2687,6 +2689,38 @@ async function workerAssignments(date) {
   return result.rows;
 }
 
+async function workerCarryoverAssignments(date, workerId) {
+  if (!workerId) return [];
+  const result = await pool.query(
+    `
+      select
+        assignments.*,
+        case
+          when assignments.assigned_on is null then 'unscheduled'
+          else 'carryover'
+        end as assignment_state
+      from reporting.hawley_worker_page_assignments assignments
+      left join hb.cycles cycles
+        on lower(coalesce(cycles.cycle_label, '')) = lower(coalesce(assignments.cycle_name, ''))
+      where not coalesce(assignments.completed, false)
+        and ('asana-' || trim(both '-' from regexp_replace(
+          regexp_replace(lower(coalesce(assignments.worker_email, '')), '^asana\\+', ''),
+          '[^a-z0-9]+', '-', 'g'
+        ))) = $2
+        and (assignments.assigned_on is null or assignments.assigned_on < $1::date)
+        and cycles.start_date <= $1::date
+        and cycles.end_date >= ($1::date - interval '7 days')
+      order by
+        case when assignments.assigned_on is null then 0 else 1 end,
+        cycles.cycle_number desc nulls last,
+        assignments.assigned_on desc nulls last,
+        assignments.task_name
+    `,
+    [date, workerId]
+  );
+  return result.rows;
+}
+
 async function configuredWorkers() {
   const result = await pool.query(`
     select
@@ -3109,8 +3143,9 @@ async function dailyAssignmentsPayload(url, authActor = null) {
   await autoCloseScheduledTimersForDate(date);
   await enforceScheduledActualsForDate(date);
 
-  const [rows, configuredRows, latestRuns, latestDate, trackerSnapshots, actualRows] = await Promise.all([
+  const [rows, carryoverRows, configuredRows, latestRuns, latestDate, trackerSnapshots, actualRows] = await Promise.all([
     workerAssignments(date),
+    workerCarryoverAssignments(date, employee),
     configuredWorkers(),
     latestImportRuns(),
     latestAssignmentDate(),
@@ -3119,7 +3154,10 @@ async function dailyAssignmentsPayload(url, authActor = null) {
   ]);
   const selectedTrackerSnapshots = trackerSnapshots.filter(snapshot => snapshot.trackerDate === date);
   const hasTrackerSnapshot = selectedTrackerSnapshots.some(snapshot => snapshot.trackerType === "Worker" || snapshot.trackerType === "Line Overview");
-  const useTrackerSnapshot = USE_DAT_SNAPSHOTS && hasTrackerSnapshot;
+  // A locked worker page needs live ownership, including Asana-assigned work
+  // that has not been given an `Assigned On` date yet. DAT snapshots remain a
+  // manager comparison fallback only; otherwise they can hide that work.
+  const useTrackerSnapshot = USE_DAT_SNAPSHOTS && hasTrackerSnapshot && !employee;
   const latestTrackerSnapshotDate = latestActiveTrackerDate(trackerSnapshots);
 
   let allWorkers;
@@ -3144,7 +3182,7 @@ async function dailyAssignmentsPayload(url, authActor = null) {
     }
     lineOverview = selectedTrackerSnapshots.find(snapshot => snapshot.trackerType === "Line Overview");
   } else {
-    allWorkers = mergeConfiguredWorkers(buildWorkers(rows), configuredRows);
+    allWorkers = mergeConfiguredWorkers(buildWorkers([...rows, ...carryoverRows]), configuredRows);
     allWorkers = ensureLivePilotWorkers(allWorkers);
     applyWorkerDailyActualRows(allWorkers, actualRows);
     allWorkers = ensureLivePilotWorkers(allWorkers);
