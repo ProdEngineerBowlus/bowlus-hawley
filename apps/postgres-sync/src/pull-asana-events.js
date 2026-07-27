@@ -303,6 +303,33 @@ async function cursorForProject(client, projectGid) {
   return result.rows[0] || null;
 }
 
+// An event cursor only describes changes after the cursor was issued. On a
+// fresh watcher or after Asana expires a cursor, accepting a replacement token
+// without a recrawl silently loses assignments made before that moment.
+async function projectsNeedingFullRecrawl(client, projects) {
+  const projectGids = projects.map(project => project.project_gid).filter(Boolean);
+  if (!projectGids.length) return [];
+
+  const result = await client.query(
+    `
+      select project_gid
+      from sync.asana_project_event_cursors
+      where project_gid = any($1::text[])
+        and needs_full_recrawl
+    `,
+    [projectGids]
+  );
+  const flagged = new Set(result.rows.map(row => row.project_gid));
+  const known = new Set(
+    (await client.query(
+      "select project_gid from sync.asana_project_event_cursors where project_gid = any($1::text[])",
+      [projectGids]
+    )).rows.map(row => row.project_gid)
+  );
+
+  return projects.filter(project => flagged.has(project.project_gid) || !known.has(project.project_gid));
+}
+
 function parentGid(task) {
   return task.parent?.gid || null;
 }
@@ -602,7 +629,9 @@ async function pollProject(client, asana, project, args, summary) {
     lastEventAt,
     lastEventCount: events.length,
     lastChangedTaskCount: changedTasks,
-    needsFullRecrawl: initialized,
+    // pollOnce performs the required full portfolio recrawl before a missing
+    // or expired cursor is initialized, so this new cursor is safe to use.
+    needsFullRecrawl: initialized && !args.fullRecrawlCompleted,
     errorCount: 0,
     lastError: null
   });
@@ -641,9 +670,28 @@ function runBuildHb() {
   });
 }
 
+function runFullAsanaRecrawl() {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["./apps/postgres-sync/src/pull-asana.js"], {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", data => { stdout += data.toString(); });
+    child.stderr.on("data", data => { stderr += data.toString(); });
+    child.on("error", reject);
+    child.on("close", code => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`Asana full recrawl failed with exit code ${code}: ${stderr || stdout}`));
+    });
+  });
+}
+
 async function pollOnce(args) {
   const asana = new AsanaClient(requiredEnv("ASANA_PAT"));
-  const client = new Client(getDatabaseConfig({ useSyncUrl: true }));
+  let client = new Client(getDatabaseConfig({ useSyncUrl: true }));
   await client.connect();
 
   const summary = {
@@ -657,13 +705,25 @@ async function pollOnce(args) {
     membershipRows: 0,
     hbRebuilt: false,
     recordsRead: 0,
-    recordsWritten: 0
+    recordsWritten: 0,
+    fullRecrawlProjects: 0,
+    fullRecrawlCompleted: false
   };
   const runId = await startRun(client, summary.mode);
 
   try {
     const projects = await eventProjects(client, args.limitProjects);
     summary.projectScope = projects.length;
+    const recrawlProjects = args.initOnly ? [] : await projectsNeedingFullRecrawl(client, projects);
+    if (recrawlProjects.length) {
+      summary.fullRecrawlProjects = recrawlProjects.length;
+      await client.end();
+      await runFullAsanaRecrawl();
+      summary.fullRecrawlCompleted = true;
+      client = new Client(getDatabaseConfig({ useSyncUrl: true }));
+      await client.connect();
+    }
+    args.fullRecrawlCompleted = summary.fullRecrawlCompleted;
     for (const project of projects) {
       await pollProject(client, asana, project, args, summary);
     }
