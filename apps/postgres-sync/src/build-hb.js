@@ -460,6 +460,28 @@ function asanaFieldsByName(fields) {
   }, {});
 }
 
+const ASANA_SHARED_ASSIGNED_ON_FIELD_GID = "1215603865689876";
+const ASSIGNED_ON_FIELD_NAMES = new Set(["assigned on", "assigned date", "assigned on date"]);
+
+// Template-created production projects can contain both the workspace-level
+// Assigned On field and a project-local field with the same display name.
+// The local field is the one managers set for that project's daily work plan;
+// retain it instead of allowing a later shared-field entry to overwrite it.
+function asanaAssignedOnField(fields) {
+  const candidates = toArray(fields).filter(field =>
+    ASSIGNED_ON_FIELD_NAMES.has(normalizeKey(field?.name))
+  );
+  if (!candidates.length) return null;
+
+  return candidates.find(field => String(field?.gid || "") !== ASANA_SHARED_ASSIGNED_ON_FIELD_GID)
+    || candidates.find(field => String(field?.gid || "") === ASANA_SHARED_ASSIGNED_ON_FIELD_GID)
+    || candidates[0];
+}
+
+function asanaAssignedOnDate(fields) {
+  return dateValue(asanaFieldValue(asanaAssignedOnField(fields)));
+}
+
 function asanaField(fieldsByName, names) {
   for (const name of names) {
     if (Object.prototype.hasOwnProperty.call(fieldsByName, name)) return fieldsByName[name];
@@ -1106,7 +1128,8 @@ function recomputeTaskHours(row) {
 }
 
 function applyAsanaOverlay(row, asana, lookups) {
-  const fieldsByName = asanaFieldsByName(asana.custom_fields_json || asana.raw_json?.custom_fields || []);
+  const rawFields = asana.custom_fields_json || asana.raw_json?.custom_fields || [];
+  const fieldsByName = asanaFieldsByName(rawFields);
   const asanaFields = asanaFieldDisplayMap(fieldsByName);
   const sourceContext = asanaSourceContext(asana);
   const sourceSection = sourceContext.sectionName;
@@ -1117,7 +1140,6 @@ function applyAsanaOverlay(row, asana, lookups) {
       ? null
       : Math.round(Number(asana.actual_time_minutes || 0));
 
-  const assignedOnNames = ["Assigned On", "Assigned Date", "Assigned On Date"];
   const originalPhaseText =
     asanaText(fieldsByName, ["Primary Phase", "Phase", "Phase Label", "Section/Column", "Section / Column"]) ||
     displaySourceSection ||
@@ -1178,8 +1200,8 @@ function applyAsanaOverlay(row, asana, lookups) {
   row.start_date = dateValue(asana.start_on || asana.start_at) || row.start_date;
   row.end_date = dateValue(asana.due_on || asana.due_at) || row.end_date;
 
-  if (hasAsanaField(fieldsByName, assignedOnNames)) {
-    row.assigned_on = asanaDate(fieldsByName, assignedOnNames);
+  if (asanaAssignedOnField(rawFields)) {
+    row.assigned_on = asanaAssignedOnDate(rawFields);
   }
 
   row.assignee_name = assigneeName;
@@ -1252,7 +1274,8 @@ function applyAsanaOverlay(row, asana, lookups) {
 }
 
 function asanaTaskRow(asana, lookups) {
-  const fieldsByName = asanaFieldsByName(asana.custom_fields_json || asana.raw_json?.custom_fields || []);
+  const rawFields = asana.custom_fields_json || asana.raw_json?.custom_fields || [];
+  const fieldsByName = asanaFieldsByName(rawFields);
   const fields = asanaFieldDisplayMap(fieldsByName);
   const row = {
     airtable_record_id: `asana:${asana.gid}`,
@@ -1279,7 +1302,7 @@ function asanaTaskRow(asana, lookups) {
     task_completed: Boolean(asana.completed),
     completed_on: Boolean(asana.completed) ? dateValue(asana.completed_at) : null,
     asana_due_date: dateValue(asana.due_on || asana.due_at),
-    assigned_on: asanaDate(fieldsByName, ["Assigned On", "Assigned Date", "Assigned On Date"]),
+    assigned_on: asanaAssignedOnDate(rawFields),
     worker_record_id: null,
     worker_name: null,
     worker_email: null,
@@ -1319,7 +1342,7 @@ function asanaTaskRow(asana, lookups) {
     est_time_remaining_project_seconds: asanaDurationSeconds(fieldsByName, ["Est Time Remaining (Project)"]),
     document_link: asanaText(fieldsByName, ["Document Link", "SOP Link"]),
     attachment_summary: null,
-    active_in_production: Boolean(asanaDate(fieldsByName, ["Assigned On", "Assigned Date", "Assigned On Date"])),
+    active_in_production: Boolean(asanaAssignedOnDate(rawFields)),
     production_match_status: "asana_only",
     sync_status: true,
     last_synced_at: asana.modified_at || asana.synced_at,

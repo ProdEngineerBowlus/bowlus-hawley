@@ -15,9 +15,4 @@ select
   ti.airtable_record_id,
   ti.normalized_at
 from hb.rev1_task_instances ti
-where ti.assigned_on is not null
-   or (
-     ti.asana_task_gid is not null
-     and coalesce(ti.task_completed, false) = false
-     and nullif(coalesce(ti.worker_email, ti.assignee_email, ''), '') is not null
-   );
+where ti.assigned_on is not null;
