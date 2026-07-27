@@ -106,6 +106,7 @@ const CNC_PARALLEL_OPERATOR_EMAILS = new Set(
     .filter(Boolean)
 );
 const CNC_PARALLEL_MAX_ACTIVE_RUNS = Math.max(1, Number(process.env.HAWLEY_CNC_PARALLEL_MAX_ACTIVE_RUNS || 3));
+const CNC_MACHINE_COUNT = Math.max(1, Number(process.env.HAWLEY_CNC_MACHINE_COUNT || 2));
 const CNC_MACHINE_OVERRUN_MINUTES = Math.max(5, Number(process.env.HAWLEY_CNC_MACHINE_OVERRUN_MINUTES || 10));
 const CNC_MACHINE_OVERRUN_RATIO = Math.max(1, Number(process.env.HAWLEY_CNC_MACHINE_OVERRUN_RATIO || 1.35));
 const APP_AUTH_ACTIVE = booleanEnv("HAWLEY_AUTH_ACTIVE", false);
@@ -2998,6 +2999,9 @@ function cncMachineRunPayload(row, now = new Date()) {
     startedAt: row.started_at,
     stoppedAt: row.stopped_at || "",
     elapsedMinutes: Math.round(elapsedMinutes),
+    actualWindowMinutes: Number(row.actual_window_minutes ?? row.machine_runtime_minutes ?? elapsedMinutes) || 0,
+    creditedMachineMinutes: Number(row.credited_machine_minutes ?? Math.min(elapsedMinutes, expectedMinutes)) || 0,
+    derivedManualMinutes: Number(row.derived_manual_minutes || 0),
     status: row.status,
     overrun
   };
@@ -3006,10 +3010,10 @@ function cncMachineRunPayload(row, now = new Date()) {
 async function attachCncMachineRunData(workers, date) {
   const enabledWorkers = (workers || []).filter(isCncParallelOperator);
   if (!enabledWorkers.length) {
-    return { enabled: false, maxActiveRuns: CNC_PARALLEL_MAX_ACTIVE_RUNS, activeRuns: [], alerts: [] };
+    return { enabled: false, maxActiveRuns: CNC_PARALLEL_MAX_ACTIVE_RUNS, machineCount: CNC_MACHINE_COUNT, activeRuns: [], alerts: [] };
   }
 
-  const [profilesResult, runsResult] = await Promise.all([
+  const [profilesResult, activeRunsResult, todayRunsResult] = await Promise.all([
     pool.query(`
       select
         program_key,
@@ -3035,10 +3039,37 @@ async function attachCncMachineRunData(workers, date) {
         alert_after_minutes,
         started_at,
         stopped_at,
+        machine_runtime_minutes,
+        actual_window_minutes,
+        credited_machine_minutes,
+        derived_manual_minutes,
         status
       from core.cnc_machine_runs
       where work_date = $1::date
         and status = 'running'
+      order by started_at
+    `, [date]),
+    pool.query(`
+      select
+        machine_run_key,
+        worker_key,
+        worker_name,
+        asana_task_gid,
+        task_name,
+        program_key,
+        program_name,
+        machine_key,
+        expected_runtime_minutes,
+        alert_after_minutes,
+        started_at,
+        stopped_at,
+        machine_runtime_minutes,
+        actual_window_minutes,
+        credited_machine_minutes,
+        derived_manual_minutes,
+        status
+      from core.cnc_machine_runs
+      where work_date = $1::date
       order by started_at
     `, [date])
   ]);
@@ -3049,12 +3080,20 @@ async function attachCncMachineRunData(workers, date) {
     estimatedMinutes: Number(row.estimated_runtime_minutes || 0),
     confidence: row.confidence || ""
   }]));
-  const activeRuns = runsResult.rows.map(row => cncMachineRunPayload(row));
+  const activeRuns = activeRunsResult.rows.map(row => cncMachineRunPayload(row));
+  const todayRuns = todayRunsResult.rows.map(row => cncMachineRunPayload(row));
   const activeRunsByTask = new Map();
+  const stoppedRunsByTask = new Map();
   for (const run of activeRuns) {
     const key = `${run.workerId}::${run.taskId}`;
     if (!activeRunsByTask.has(key)) activeRunsByTask.set(key, []);
     activeRunsByTask.get(key).push(run);
+  }
+  for (const run of todayRuns) {
+    if (run.status === "running") continue;
+    const key = `${run.workerId}::${run.taskId}`;
+    if (!stoppedRunsByTask.has(key)) stoppedRunsByTask.set(key, []);
+    stoppedRunsByTask.get(key).push(run);
   }
 
   for (const worker of enabledWorkers) {
@@ -3063,6 +3102,7 @@ async function attachCncMachineRunData(workers, date) {
       const profile = profilesByKey.get(cncProgramKey(task.title));
       if (!profile) continue;
       const taskRuns = activeRunsByTask.get(`${worker.id}::${task.id}`) || [];
+      const stoppedRuns = stoppedRunsByTask.get(`${worker.id}::${task.id}`) || [];
       task.cncMachine = {
         enabled: true,
         programKey: profile.programKey,
@@ -3071,17 +3111,39 @@ async function attachCncMachineRunData(workers, date) {
         completedRunCount: profile.completedRunCount,
         confidence: profile.confidence,
         activeRuns: taskRuns,
+        stoppedRunCount: stoppedRuns.length,
+        latestStoppedRun: stoppedRuns[stoppedRuns.length - 1] || null,
         canStart: !task.completed && !taskRuns.length
       };
     }
   }
 
   const alerts = activeRuns.filter(run => run.overrun);
+  const closedRuns = todayRuns.filter(run => run.status !== "running");
+  const firstStartedAt = todayRuns.length ? Math.min(...todayRuns.map(run => new Date(run.startedAt).getTime())) : 0;
+  const latestEndpointAt = todayRuns.length ? Math.max(...todayRuns.map(run => new Date(run.stoppedAt || new Date()).getTime())) : 0;
+  const elapsedSpanMinutes = firstStartedAt && latestEndpointAt
+    ? Math.max(0, Math.round((latestEndpointAt - firstStartedAt) / 60000))
+    : 0;
+  const creditedMachineMinutes = Math.round(todayRuns.reduce((sum, run) => sum + Number(run.creditedMachineMinutes || 0), 0));
+  const observedWindowMinutes = Math.round(todayRuns.reduce((sum, run) => sum + Number(run.actualWindowMinutes || run.elapsedMinutes || 0), 0));
+  const machineAvailableMinutes = elapsedSpanMinutes * CNC_MACHINE_COUNT;
   return {
     enabled: true,
     maxActiveRuns: CNC_PARALLEL_MAX_ACTIVE_RUNS,
+    machineCount: CNC_MACHINE_COUNT,
     activeRuns,
-    alerts
+    alerts,
+    utilization: {
+      runCount: todayRuns.length,
+      completedRunCount: closedRuns.length,
+      creditedMachineMinutes,
+      observedWindowMinutes,
+      elapsedSpanMinutes,
+      machineAvailableMinutes,
+      machineEquivalentMinutes: Math.round(creditedMachineMinutes / CNC_MACHINE_COUNT),
+      percent: machineAvailableMinutes ? Math.round((creditedMachineMinutes / machineAvailableMinutes) * 100) : 0
+    }
   };
 }
 
@@ -3750,6 +3812,25 @@ async function blockingLiveTimerForWorker(client, workerId, date, exceptTaskId =
   return liveTimerFromRow(result.rows[0]);
 }
 
+async function runningLiveTimerForWorker(client, workerId, date) {
+  const result = await client.query(
+    `
+      select ledger_key, asana_task_gid, task_name, actual_minutes, timer_minutes,
+        asana_posted_minutes, completed, fields_json
+      from hb.worker_daily_task_actuals
+      where worker_key = $1
+        and work_date = $2::date
+        and coalesce(completed, false) = false
+        and source_system = $3
+        and coalesce(fields_json ->> 'Timer Started At', '') <> ''
+      order by source_synced_at desc nulls last, worker_daily_actual_id desc
+      limit 1
+    `,
+    [workerId, date, LIVE_WORKER_SOURCE]
+  );
+  return liveTimerFromRow(result.rows[0]);
+}
+
 async function releaseResidualWorkerTimerBlockers(client, worker, date, excludedLedgerKey, eventAt, authActor = null) {
   const result = await client.query(
     `
@@ -4280,6 +4361,50 @@ async function closeTimeSession(client, worker, task, date, startedAt, stoppedAt
     ]
   );
   return insert.rows[0];
+}
+
+async function recordCncDerivedSupportSession(client, worker, task, date, machineRunKey, stoppedAt, durationMinutes, payload = {}) {
+  if (durationMinutes <= 0) return null;
+  const phaseKey = phaseKeyForTask(task);
+  const phaseName = phaseNameForTask(task);
+  const stopped = new Date(stoppedAt);
+  const startedAt = new Date(stopped.getTime() - durationMinutes * 60000).toISOString();
+  const sessionKey = `cnc-support:${machineRunKey}`;
+  const result = await client.query(
+    `
+      insert into core.time_sessions (
+        session_key, worker_key, worker_name, worker_email, asana_task_gid,
+        task_instance_id, task_name, phase_key, phase_name,
+        reporting_phase_key, reporting_phase_name, work_date, started_at,
+        stopped_at, duration_minutes, estimated_minutes, stop_reason, source,
+        source_payload
+      ) values (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $8, $9, $10::date,
+        $11::timestamptz, $12::timestamptz, $13, $14, 'cnc_cut_support',
+        'hawley_cnc_derived_support', $15::jsonb
+      )
+      on conflict (session_key) do nothing
+      returning *
+    `,
+    [
+      sessionKey,
+      worker.id,
+      worker.name,
+      worker.email || "",
+      String(task.id || ""),
+      task.taskInstanceId || null,
+      task.title || "",
+      phaseKey,
+      phaseName,
+      date,
+      startedAt,
+      stoppedAt,
+      durationMinutes,
+      estimatedMinutesForTask(task),
+      JSON.stringify(payload)
+    ]
+  );
+  return { sessionKey, inserted: result.rows[0] || null };
 }
 
 function workerFromActualRow(row) {
@@ -4963,7 +5088,13 @@ async function handleWorkerTaskAction(req) {
     }
 
     const authAudit = actorAuditPayload(authActor, worker.id);
-    const current = liveTimerFromRow(currentRecord) || await readLiveActualRow(client, ledgerKey);
+    let current = liveTimerFromRow(currentRecord) || await readLiveActualRow(client, ledgerKey);
+
+    if (action === "start" && isCncParallelOperator(worker) && isCncProgramTask(task)) {
+      throw actionError("Use Start cut for a CNC sheet. This keeps machine runtime separate from David's labor time.", 409, {
+        code: "CNC_CUT_CONTROL_REQUIRED"
+      });
+    }
 
     if (action === "reopen") {
       if (!current || !current.completed) {
@@ -5094,8 +5225,52 @@ async function handleWorkerTaskAction(req) {
       };
     }
 
+    let stoppedCncRun = null;
+    if (action === "complete" && isCncParallelOperator(worker) && isCncProgramTask(task)) {
+      const activeCncRun = await client.query(`
+        select machine_run_key
+        from core.cnc_machine_runs
+        where worker_key = $1
+          and asana_task_gid = $2
+          and work_date = $3::date
+          and status = 'running'
+        limit 1
+      `, [worker.id, task.id, date]);
+      if (activeCncRun.rows[0]) {
+        throw actionError("Stop the active CNC cut before completing this sheet.", 409, {
+          code: "CNC_CUT_STILL_RUNNING"
+        });
+      }
+      const stoppedResult = await client.query(`
+        select machine_run_key
+        from core.cnc_machine_runs
+        where worker_key = $1
+          and asana_task_gid = $2
+          and work_date = $3::date
+          and status in ('stopped', 'completed')
+        order by stopped_at desc nulls last
+        limit 1
+      `, [worker.id, task.id, date]);
+      stoppedCncRun = stoppedResult.rows[0] || null;
+      if (!stoppedCncRun) {
+        throw actionError("Start and stop the CNC cut before completing this sheet.", 409, {
+          code: "CNC_CUT_NOT_RECORDED"
+        });
+      }
+    }
+
     if (!current) {
-      throw actionError("Start the timer before stopping or completing this task.", 409);
+      if (!(action === "complete" && stoppedCncRun)) {
+        throw actionError("Start the timer before stopping or completing this task.", 409);
+      }
+      current = {
+        startedAt: "",
+        accumulatedMinutes: 0,
+        actualMinutes: 0,
+        asanaPostedMinutes: 0,
+        completed: false,
+        timeEntryCreated: false
+      };
     }
 
     const eventAt = effectiveScheduledStopDate(now, date) || now;
@@ -5203,7 +5378,7 @@ async function handleWorkerTaskAction(req) {
       };
     }
 
-    if (actualMinutes <= 0) {
+    if (actualMinutes <= 0 && !stoppedCncRun) {
       throw actionError("Start the timer before completing this task.", 409);
     }
     if (current.completed && current.timeEntryCreated) {
@@ -5282,7 +5457,9 @@ async function handleWorkerTaskAction(req) {
     }
 
     await updateAsanaTask(token, task.id, { completed: true });
-    await createAsanaStory(token, task.id, `Hawley worker pilot timer logged ${formatTimerMinutes(elapsedMinutes)}.`);
+    await createAsanaStory(token, task.id, stoppedCncRun
+      ? `Hawley CNC cut recorded ${formatTimerMinutes(actualMinutes)} of operator support time; machine runtime is stored separately.`
+      : `Hawley worker pilot timer logged ${formatTimerMinutes(elapsedMinutes)}.`);
     const saved = await upsertLiveWorkerActual(client, worker, task, date, {
       ...current,
       startedAt: "",
@@ -6010,8 +6187,10 @@ async function handleCncMachineRunAction(req) {
   if (action === "stop" && !machineRunId) throw actionError("Machine run ID is required to stop a machine run.", 400);
 
   const client = await writePool.connect();
+  let workerTimerLockKey = "";
   try {
     await client.query("begin");
+    workerTimerLockKey = await acquireWorkerDayTimerLock(client, employee, date);
     const now = new Date();
     const nowIso = now.toISOString();
 
@@ -6027,18 +6206,95 @@ async function handleCncMachineRunAction(req) {
       `, [machineRunId, employee, date]);
       if (!active.rows[0]) throw actionError("This CNC machine run is no longer active.", 409);
       const row = active.rows[0];
-      const durationMinutes = Math.max(0, Math.round((now.getTime() - new Date(row.started_at).getTime()) / 60000));
+      const { worker, task } = await assignedWorkerTaskForWrite(employee, date, taskId || row.asana_task_gid, authActor);
+      if (String(task.id) !== String(row.asana_task_gid)) {
+        throw actionError("The CNC run does not belong to the selected task.", 409);
+      }
+      const runningTimer = await runningLiveTimerForWorker(client, worker.id, date);
+      if (runningTimer) {
+        throw actionError(`Pause \"${runningTimer.taskName || "the manual task"}\" before stopping this cut so labor time is not double counted.`, 409, {
+          code: "CNC_MANUAL_TIMER_RUNNING",
+          blockingTaskId: runningTimer.taskId,
+          blockingTaskName: runningTimer.taskName || ""
+        });
+      }
+      const actualWindowMinutes = Math.max(0, Math.round((now.getTime() - new Date(row.started_at).getTime()) / 60000));
+      const expectedMinutes = Math.max(0, Math.round(Number(row.expected_runtime_minutes || 0)));
+      const creditedMachineMinutes = Math.min(actualWindowMinutes, expectedMinutes);
+      const derivedManualMinutes = Math.max(0, actualWindowMinutes - expectedMinutes);
+      const authAudit = actorAuditPayload(authActor, worker.id);
+      const current = await readLiveActualRow(client, ledgerKeyForWorkerTask(worker.id, date, task.id));
+      const currentActualMinutes = Number(current?.actualMinutes || 0);
+      const currentTimerMinutes = Number(current?.accumulatedMinutes || 0);
+      let supportSession = null;
+      if (derivedManualMinutes > 0) {
+        supportSession = await recordCncDerivedSupportSession(
+          client,
+          worker,
+          task,
+          date,
+          row.machine_run_key,
+          nowIso,
+          derivedManualMinutes,
+          {
+            action: "stop-cnc-cut",
+            ...authAudit,
+            actualWindowMinutes,
+            creditedMachineMinutes,
+            derivedManualMinutes,
+            expectedMinutes
+          }
+        );
+        await upsertLiveWorkerActual(client, worker, task, date, {
+          startedAt: "",
+          accumulatedMinutes: currentTimerMinutes,
+          actualMinutes: currentActualMinutes + derivedManualMinutes,
+          asanaPostedMinutes: Number(current?.asanaPostedMinutes || 0)
+        }, {
+          actualMinutes: currentActualMinutes + derivedManualMinutes,
+          timerMinutes: currentTimerMinutes,
+          asanaPostedMinutes: Number(current?.asanaPostedMinutes || 0),
+          sourceLabel: "Hawley CNC cut support time",
+          seenAt: nowIso,
+          authActor
+        });
+      }
       const updated = await client.query(`
         update core.cnc_machine_runs
         set
           stopped_at = $2::timestamptz,
           machine_runtime_minutes = $3,
+          actual_window_minutes = $3,
+          credited_machine_minutes = $4,
+          derived_manual_minutes = $5,
+          support_time_session_key = $6,
           status = 'stopped',
-          stopped_by_email = $4,
+          stopped_by_email = $7,
           updated_at = now()
         where machine_run_key = $1
         returning *
-      `, [machineRunId, nowIso, durationMinutes, authActor?.email || row.worker_email || ""]);
+      `, [
+        machineRunId,
+        nowIso,
+        actualWindowMinutes,
+        creditedMachineMinutes,
+        derivedManualMinutes,
+        supportSession?.sessionKey || null,
+        authActor?.email || row.worker_email || ""
+      ]);
+      await recordWorkerTaskEvent(client, worker, task, date, "cnc_cut_stop", nowIso, {
+        authActor,
+        durationMinutes: derivedManualMinutes || null,
+        payload: {
+          ...authAudit,
+          machineRunKey: row.machine_run_key,
+          actualWindowMinutes,
+          creditedMachineMinutes,
+          derivedManualMinutes,
+          expectedMinutes,
+          supportTimeSessionKey: supportSession?.sessionKey || ""
+        }
+      });
       await client.query("commit");
       return { ok: true, action, run: cncMachineRunPayload(updated.rows[0], now) };
     }
@@ -6128,6 +6384,7 @@ async function handleCncMachineRunAction(req) {
     await client.query("rollback");
     throw error;
   } finally {
+    await releaseWorkerDayTimerLock(client, workerTimerLockKey);
     client.release();
   }
 }

@@ -224,19 +224,34 @@ project-local and workspace-shared field named `Assigned On`; Hawley prefers
 the project-local field because that is the field managers edit for the daily
 plan.
 
-## Parallel CNC machine runs (David A)
+## Parallel CNC cuts (David A)
 
-David A's CNC page exposes a separate **Run sheet** control for CNC program
-tasks with a historical D&E estimate. It can track up to three concurrent
-machine runs. David can use the normal Hawley timer for the work he personally
-does (setup, deburr, assembly, and so on) while sheet runs remain active.
+Each CNC sheet has one **Start cut / Stop cut** control. David starts it when
+the machine begins cutting, not when he starts loading material. He may run up
+to three sheet cuts concurrently and use the ordinary Hawley timer for one
+manual task (deburr, assembly, setup, and so on). He pauses that manual timer
+before stopping a cut.
 
-Machine runs write only to `core.cnc_machine_runs`; they do not write a normal
-worker timer, `core.time_sessions`, or a `hb.worker_daily_task_actuals` row.
-This intentionally prevents a single operator from being credited with two or
-three full days of labor when two or three machines are running at the same
-time. The run record retains the linked Asana task, expected runtime, actual
-machine duration, and start/stop audit metadata.
+On **Stop cut**, Hawley stores the full observed cut window in
+`core.cnc_machine_runs`, but splits it without double counting labor:
+
+- credited machine minutes = the lesser of the observed window and the
+  historical program estimate;
+- operator support minutes = the positive difference between the observed
+  window and that estimate.
+
+Only the operator-support portion is written as a closed
+`core.time_sessions` record and added to that sheet's
+`hb.worker_daily_task_actuals` total. A cut that finishes within the expected
+machine runtime adds no operator labor. The sheet can still be completed once
+its cut has been stopped. Hawley rejects stopping a cut while an ordinary timer
+is actively running, which prevents the same minutes from landing on both
+tasks.
+
+The CNC panel reports fleet utilization as credited machine minutes divided by
+the configured machine count (two by default) times the elapsed operating
+span. This is an operational machine-cutting measure, not controller-certified
+uptime.
 
 The initial runtime profiles live in `hb.cnc_program_runtime_profiles`. The
 profile importer matches `JobHistory-*.csv` records marked `Job Ended Normally`

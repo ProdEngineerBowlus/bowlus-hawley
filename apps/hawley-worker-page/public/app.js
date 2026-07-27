@@ -1476,9 +1476,17 @@
       : `${formatMinutes(taskWipMinutes)} WIP`;
     const cncMachine = task.cncMachine || null;
     const cncRun = cncMachine?.activeRuns?.[0] || null;
-    const cncChip = cncMachine
+    let cncChip = cncMachine
       ? `<span class="chip cnc-chip${cncRun?.overrun ? " risk" : ""}">${cncRun ? `${formatMinutes(cncRun.elapsedMinutes)} machine${cncRun.overrun ? " — check" : ""}` : `D&E ${formatMinutes(cncMachine.expectedMinutes)} median`}</span>`
       : "";
+    if (cncMachine) {
+      const cncLabel = cncRun
+        ? `${formatMinutes(cncRun.elapsedMinutes)} cutting${cncRun.overrun ? " - check" : ""}`
+        : cncMachine.latestStoppedRun
+          ? `${formatMinutes(cncMachine.latestStoppedRun.derivedManualMinutes)} support logged`
+          : `D&E ${formatMinutes(cncMachine.expectedMinutes)} expected`;
+      cncChip = `<span class="chip cnc-chip${cncRun?.overrun ? " risk" : ""}">${cncLabel}</span>`;
+    }
     return `
       <article class="task-card${task.completed ? " done" : ""}">
         ${skillMarker}
@@ -1505,10 +1513,12 @@
                   <a class="btn ${hasSop ? "ghost" : "disabled"}" ${hasSop ? `href="${escapeAttr(sopUrl)}" target="_blank" rel="noreferrer"` : ""} aria-disabled="${hasSop ? "false" : "true"}">${icons.open}<span>SOP</span></a>
                   ${task.completed
                     ? `<button class="btn ghost" type="button" data-action="reopen-task" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>${busy ? "Saving..." : "Mark incomplete"}</button>`
-                    : `<button class="btn ghost" type="button" data-action="start-timer" data-task-id="${escapeAttr(task.id)}" ${timerRunning || busy ? "disabled" : ""}>${timerRunning ? "Running" : startLabel}</button>
-                      ${timerRunning ? `<button class="btn ghost" type="button" data-action="stop-timer" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>Stop</button>` : ""}
-                      ${cncMachine ? `<button class="btn ${cncRun?.overrun ? "danger" : "ghost"}" type="button" data-action="${cncRun ? "stop-cnc-run" : "start-cnc-run"}" data-task-id="${escapeAttr(task.id)}" ${cncRun ? `data-machine-run-id="${escapeAttr(cncRun.id)}"` : ""} ${busy ? "disabled" : ""}>${cncRun ? "Stop machine" : "Run sheet"}</button>` : ""}
-                      <button class="btn primary" type="button" data-action="complete-task" data-task-id="${escapeAttr(task.id)}" ${!timerHasTime || busy ? "disabled" : ""}>${busy ? "Saving..." : "Complete"}</button>`}
+                    : cncMachine
+                      ? `<button class="btn ${cncRun?.overrun ? "danger" : "primary"}" type="button" data-action="${cncRun ? "stop-cnc-run" : "start-cnc-run"}" data-task-id="${escapeAttr(task.id)}" ${cncRun ? `data-machine-run-id="${escapeAttr(cncRun.id)}"` : ""} ${busy ? "disabled" : ""}>${cncRun ? "Stop cut" : "Start cut"}</button>
+                         <button class="btn ghost" type="button" data-action="complete-task" data-task-id="${escapeAttr(task.id)}" ${cncRun || !Number(cncMachine.stoppedRunCount || 0) || busy ? "disabled" : ""}>${busy ? "Saving..." : "Complete sheet"}</button>`
+                      : `<button class="btn ghost" type="button" data-action="start-timer" data-task-id="${escapeAttr(task.id)}" ${timerRunning || busy ? "disabled" : ""}>${timerRunning ? "Running" : startLabel}</button>
+                         ${timerRunning ? `<button class="btn ghost" type="button" data-action="stop-timer" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>Stop</button>` : ""}
+                         <button class="btn primary" type="button" data-action="complete-task" data-task-id="${escapeAttr(task.id)}" ${!timerHasTime || busy ? "disabled" : ""}>${busy ? "Saving..." : "Complete"}</button>`}
                 </div>`
               : ""
           }
@@ -1859,7 +1869,13 @@
         const payload = await response.json().catch(() => ({}));
         throw new Error(payload.error || `CNC machine run failed with ${response.status}`);
       }
-      showToast(action === "start" ? "CNC machine run started; it will not count as additional operator time." : "CNC machine run stopped");
+      const payload = await response.json();
+      const supportMinutes = Number(payload?.run?.derivedManualMinutes || 0);
+      showToast(action === "start"
+        ? "Cut started. You can start another sheet or a normal manual task."
+        : supportMinutes > 0
+          ? `Cut stopped. ${formatMinutes(supportMinutes)} support time was added once to this sheet.`
+          : "Cut stopped. The cut was within its expected machine runtime, so no manual support time was added.");
       await loadAssignments();
     } catch (error) {
       state.actionTaskId = "";
@@ -1998,14 +2014,15 @@
     const allRuns = Array.isArray(cnc.activeRuns) ? cnc.activeRuns : [];
     const runs = worker ? allRuns.filter((run) => run.workerId === worker.id) : allRuns;
     const alerts = runs.filter((run) => run.overrun);
+    const utilization = cnc.utilization || {};
     if (!runs.length && (!worker || !cnc.enabled)) return "";
     if (worker && !runs.length && !cnc.enabled) return "";
     const heading = worker ? "CNC machine runs" : "CNC machine watch";
     const detail = alerts.length
       ? `${alerts.length} run${alerts.length === 1 ? " is" : "s are"} past its alert limit.`
       : runs.length
-        ? `${runs.length} active run${runs.length === 1 ? "" : "s"}; machine minutes are excluded from operator utilization.`
-        : `Start up to ${Number(cnc.maxActiveRuns || 3)} sheet runs in parallel. Machine minutes stay separate from operator time.`;
+        ? `${runs.length} active cut${runs.length === 1 ? "" : "s"}; only time beyond the program estimate becomes operator support labor.`
+        : `Start up to ${Number(cnc.maxActiveRuns || 3)} cuts in parallel. Only time beyond the program estimate is added to operator labor.`;
     return `
       <section class="panel cnc-machine-panel${alerts.length ? " risk" : ""}">
         <div class="panel-header dashboard-header">
@@ -2018,10 +2035,11 @@
         ${runs.length ? `<div class="panel-body cnc-machine-run-list">${runs.map((run) => `
           <div class="cnc-machine-run${run.overrun ? " overrun" : ""}">
             <strong>${escapeHtml(run.programName || run.taskName)}</strong>
-            <span>${escapeHtml(run.workerName || "CNC operator")} - ${escapeHtml(formatMinutes(run.elapsedMinutes))} running</span>
-            <small>${run.overrun ? `Over alert limit ${formatMinutes(run.alertAfterMinutes)} - check machine / stop if complete.` : `Historical median ${formatMinutes(run.expectedMinutes)} - alert at ${formatMinutes(run.alertAfterMinutes)}`}</small>
+            <span>${escapeHtml(run.workerName || "CNC operator")} - ${escapeHtml(formatMinutes(run.elapsedMinutes))} cutting</span>
+            <small>${run.overrun ? `Over alert limit ${formatMinutes(run.alertAfterMinutes)} - check machine / stop if complete.` : `Historical expected ${formatMinutes(run.expectedMinutes)} - alert at ${formatMinutes(run.alertAfterMinutes)}`}</small>
           </div>
         `).join("")}</div>` : ""}
+        ${Number(utilization.runCount || 0) ? `<div class="panel-body"><p class="summary-line">Machine utilization: <strong>${escapeHtml(String(utilization.percent || 0))}%</strong> (${escapeHtml(formatMinutes(utilization.creditedMachineMinutes || 0))} credited cutting across ${escapeHtml(String(utilization.machineCount || 2))} machines over ${escapeHtml(formatMinutes(utilization.elapsedSpanMinutes || 0))} elapsed).</p></div>` : ""}
       </section>
     `;
   }

@@ -131,7 +131,7 @@ Purpose: Hawley-owned runtime data. These are the tables Hawley can own directly
 | `core.app_auth_events` | one auth event | Login/audit event trail. |
 | `core.task_completion_evidence` | one worker contribution to one completed task instance | Historical task completion, timing, confidence, assistance, quality, and verification evidence. |
 | `core.worker_task_capabilities` | one worker/task-template pair | Refreshable capability rollup with completion counts, median/recent timing, consistency, and verification state. |
-| `core.cnc_machine_runs` | one physical CNC sheet run | Hawley worker app | Parallel D&E machine run tied to an Asana task/program. Machine time is deliberately excluded from operator labor/utilization. |
+| `core.cnc_machine_runs` | one physical CNC sheet run | Hawley worker app | Parallel D&E cut tied to an Asana task/program. Stores observed cut window, credited historical machine time, and only the excess operator-support minutes. |
 
 ### Admin-Owned Overlays
 
