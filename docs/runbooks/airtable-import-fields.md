@@ -69,6 +69,29 @@ The admin project-creator path also mirrors:
 Those records normalize into `hb.task_templates` and
 `hb.production_schedule` for Postgres-backed admin features.
 
+## Phase Template Assignment Propagation
+
+For bulk phase ownership changes, Airtable is the administrative control
+surface. Update the `Tasks` template's linked worker; its `Assignee` lookup is
+the intended owner for that template. Hawley then applies that owner to open
+`Task Instances Rev1` rows and their linked Asana tasks. Completed tasks are
+deliberately excluded so their historical worker and recorded time remain
+intact.
+
+Use a dry run first, then the explicitly gated apply command:
+
+```powershell
+node ./apps/postgres-sync/src/propagate-template-assignees.js --min-vin 325
+$env:HAWLEY_ALLOW_SOURCE_WRITES='true'
+node ./apps/postgres-sync/src/propagate-template-assignees.js --apply --min-vin 325
+```
+
+The command writes Airtable `Assigned Worker`, `Email`, `Assignee Name`, and
+`Assignee Email` first, then aligns the linked Asana task assignee. During the
+HB rebuild, a populated Airtable `Assigned Worker` link takes precedence over
+the imported Asana owner; Asana remains the source for live task state,
+completion, and elapsed time.
+
 The admin creator follows the same scope rules as the established project
 creator: VIN projects use only Production rows directly linked to that VIN;
 Fabrication projects use the selected cycle's no-VIN FAB, CNC, and Frames

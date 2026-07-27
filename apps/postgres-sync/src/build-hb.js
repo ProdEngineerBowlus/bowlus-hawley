@@ -1204,11 +1204,21 @@ function applyAsanaOverlay(row, asana, lookups) {
     row.assigned_on = asanaAssignedOnDate(rawFields);
   }
 
-  row.assignee_name = assigneeName;
-  row.assignee_email = assigneeEmail;
-  row.worker_record_id = worker?.workforce_record_id || null;
-  row.worker_name = worker?.worker_name || assigneeName;
-  row.worker_email = worker?.worker_email || assigneeEmail;
+  // Airtable's Assigned Worker link is Hawley's planning control surface.  An
+  // Asana pull is allowed to enrich task state, but must not roll a deliberate
+  // Airtable reassignment back to the assignee that happened to be in Asana
+  // when the import ran.  Tasks without an Airtable worker remain Asana-led.
+  const airtableOwnsAssignment = Boolean(row.worker_record_id);
+  if (airtableOwnsAssignment) {
+    row.assignee_name = row.worker_name || row.assignee_name || assigneeName;
+    row.assignee_email = row.worker_email || row.assignee_email || assigneeEmail;
+  } else {
+    row.assignee_name = assigneeName;
+    row.assignee_email = assigneeEmail;
+    row.worker_record_id = worker?.workforce_record_id || null;
+    row.worker_name = worker?.worker_name || assigneeName;
+    row.worker_email = worker?.worker_email || assigneeEmail;
+  }
 
   if (phase) {
     row.phase_record_id = phase.phase_record_id;
