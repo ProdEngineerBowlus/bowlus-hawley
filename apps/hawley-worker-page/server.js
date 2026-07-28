@@ -3797,12 +3797,11 @@ async function blockingLiveTimerForWorker(client, workerId, date, exceptTaskId =
         and coalesce(asana_task_gid, '') <> $3
         and coalesce(completed, false) = false
         and source_system = $4
-        and (
-          coalesce(fields_json ->> 'Timer Started At', '') <> ''
-          or coalesce(timer_minutes, 0) > 0
-        )
+        -- A paused task retains accumulated minutes. It is resumable work, not
+        -- a concurrent labor session, so it must not prevent David from
+        -- starting his one active manual task while CNC cuts are running.
+        and coalesce(fields_json ->> 'Timer Started At', '') <> ''
       order by
-        case when coalesce(fields_json ->> 'Timer Started At', '') <> '' then 0 else 1 end,
         source_synced_at desc nulls last,
         worker_daily_actual_id desc
       limit 1

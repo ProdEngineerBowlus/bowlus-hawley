@@ -2428,7 +2428,10 @@
     return (worker.tasks || []).find((task) => {
       if (task.id === exceptTaskId || task.completed) return false;
       const timer = getTaskTimer(task);
-      return Boolean(timer.startedAt || timer.accumulatedMinutes);
+      // Accumulated minutes without a start time mean this task is paused.
+      // Preserve that WIP for later resume, but do not treat it as the one
+      // currently running manual labor timer.
+      return Boolean(timer.startedAt);
     });
   }
 

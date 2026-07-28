@@ -232,6 +232,11 @@ to three sheet cuts concurrently and use the ordinary Hawley timer for one
 manual task (deburr, assembly, setup, and so on). He pauses that manual timer
 before stopping a cut.
 
+Only a currently running manual timer blocks starting another manual task.
+Paused tasks retain their recorded WIP and can be resumed later, but they do
+not count as concurrent operator labor or block David from starting the manual
+task he needs while sheet cuts are running.
+
 On **Stop cut**, Hawley stores the full observed cut window in
 `core.cnc_machine_runs`, but splits it without double counting labor:
 
