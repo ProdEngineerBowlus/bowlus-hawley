@@ -335,7 +335,14 @@ function isCncParallelOperator(worker) {
 }
 
 function isCncProgramTask(task) {
-  return /\bcnc\b/i.test(String(task?.phase || task?.workArea || "")) && Boolean(cncProgramKey(task?.title));
+  // Being assigned to CNC does not make every task a machine cut. David also
+  // receives normal assembly/deburr work in the CNC work block. Runtime
+  // profiles are keyed to the sheet/program convention (for example
+  // `14-A032_A_Endless`), so use that convention to keep manual labor tasks
+  // on the normal timer path.
+  const title = String(task?.title || "").trim();
+  return /\bcnc\b/i.test(String(task?.phase || task?.workArea || ""))
+    && /^\d{1,3}-[a-z]\d{2,5}(?:[_ -][a-z0-9]+)+(?:\.nc)?$/i.test(title);
 }
 
 function cncMachineAlertAfterMinutes(expectedMinutes) {
