@@ -1,6 +1,6 @@
 # Hawley Database Schema Map
 
-Last updated: 2026-07-13
+Last updated: 2026-07-29
 
 This file describes the Postgres shape defined by `db/migrations` and `db/views`.
 It is the working map for expanding Hawley's shop-floor context.
@@ -55,6 +55,7 @@ Purpose: loss-preserving mirrors of external systems. These tables are not the p
 | `raw.airtable_production` | Airtable `Production` | `record_id` | Production schedule source for project creation. |
 | `raw.airtable_vins` | Airtable `VINs` | `record_id` | VIN model/frame context source for project creation. |
 | `raw.airtable_models` | Airtable `Models` | `record_id` | Model and frame-class context source for project creation. |
+| `raw.airtable_cnc_parts_master` | Airtable `CNC Parts Master` | `record_id` | Nightly loss-preserving mirror of CNC part number, sheet, material, component, model, and task relationships. It is source context only until a Hawley feature reads a normalized projection of it. |
 | `raw.airtable_cycles` | Airtable `Cycles` | `record_id` | Cycle date and capacity source. |
 | `raw.airtable_work_force` | Airtable `Work Force` | `record_id` | Employee roster, skill, phase, and availability source. |
 | `raw.airtable_phases` | Airtable `Phases` | `record_id` | Phase, section, parity, and grouping source. |

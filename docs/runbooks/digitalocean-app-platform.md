@@ -275,17 +275,19 @@ request path still does not read from or write to Airtable.
 Do not add a separate App Platform Worker component without explicit approval,
 because that can change the App Platform bill or resource layout.
 
-The web service also schedules a nightly Hawley worker read-model refresh at
+The web service also schedules the full nightly Hawley read-model refresh at
 1:00 AM Pacific by default in production:
 
 ```powershell
-npm run pg:refresh-worker-read-model
+npm run pg:refresh-hawley-read-model
 ```
 
-That refresh runs `pg:pull:asana`, `pg:build:hb`, and `pg:pull:daily-tracker`.
-It writes only to Hawley/Postgres mirror and read-model tables; it does not
-write to Asana or Airtable. When the refresh exits cleanly, the chained Airtable
-backfill exports the latest Hawley-owned worker actual rows to Airtable.
+That refresh runs the Airtable pull and normalization before its Asana and HB
+rebuild stages. It refreshes the raw `CNC Parts Master` mirror along with the
+existing planning tables, writes only to Hawley/Postgres mirror and read-model
+tables, and does not write to Asana or Airtable. When the refresh exits cleanly,
+the chained Airtable backfill exports the latest Hawley-owned worker actual rows
+to Airtable.
 `/api/sync-status` reports the scheduler state under `watchers.nightlyRefresh`
 and `watchers.nightlyAirtableBackfill`.
 

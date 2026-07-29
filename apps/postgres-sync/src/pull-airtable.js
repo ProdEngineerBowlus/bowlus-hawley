@@ -65,6 +65,11 @@ const TABLES = Object.freeze([
     envKey: "HAWLEY_AIRTABLE_WORKER_DAILY_ACTUALS_TABLE",
     sourceName: "Worker Daily Task Actuals",
     targetTable: "raw.airtable_worker_daily_actuals"
+  },
+  {
+    envKey: "HAWLEY_AIRTABLE_CNC_PARTS_MASTER_TABLE",
+    sourceName: "CNC Parts Master",
+    targetTable: "raw.airtable_cnc_parts_master"
   }
 ]);
 

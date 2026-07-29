@@ -24,6 +24,9 @@ Recent work moved Hawley closer to a Postgres-first shop execution system:
 - Nightly HB refresh and nightly Airtable worker-actuals backfill were added.
 - Airtable `Tasks`, `Production`, `VINs`, and `Models` are mirrored into
   Postgres/HB tables for admin project creation.
+- Airtable `CNC Parts Master` is mirrored into Postgres nightly as
+  `raw.airtable_cnc_parts_master`. It is deliberately isolated from pacing and
+  worker-assignment calculations until a CNC-part feature consumes it.
 - The Admin Dashboard now recreates the PLH-style pacing visuals from
   Postgres/HB data instead of the Daily Assignment Tracker runtime flow.
 - Redundant admin summary panels were removed, leaving the visual pacing panels
