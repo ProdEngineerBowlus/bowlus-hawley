@@ -1120,6 +1120,7 @@
         </summary>
         <div class="config-drawer-body">
           ${renderCapacityRecommendationControls(plh)}
+          ${renderTimeStudyReportControl()}
           ${renderTruePaceControls(plh)}
           ${renderScheduleAlignment(plh)}
           <article class="panel config-inner-panel">
@@ -1131,6 +1132,19 @@
         </div>
       </details>
     `;
+  }
+
+  function renderTimeStudyReportControl() {
+    return `
+      <article class="panel config-inner-panel">
+        <div class="panel-header">
+          <div>
+            <h3 class="panel-title">Task Time Studies</h3>
+            <p class="muted">Download observed study laps from the last 90 days. Manual entries are labeled separately from live worker laps.</p>
+          </div>
+          <a class="btn ghost" href="/api/admin/time-studies/report">Download CSV</a>
+        </div>
+      </article>`;
   }
 
   function renderCapacityRecommendationControls(plh) {

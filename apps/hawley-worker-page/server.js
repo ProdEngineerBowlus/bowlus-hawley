@@ -322,6 +322,17 @@ function normalizeEmail(value) {
   return String(value || "").trim().toLowerCase();
 }
 
+function sendCsv(res, status, filename, rows) {
+  const escape = value => `"${String(value ?? "").replace(/"/g, '""')}"`;
+  const body = rows.map(row => row.map(escape).join(",")).join("\r\n");
+  res.writeHead(status, {
+    "Content-Type": "text/csv; charset=utf-8",
+    "Content-Disposition": `attachment; filename="${filename}"`,
+    "Cache-Control": "no-store"
+  });
+  res.end(`\uFEFF${body}`);
+}
+
 function cncProgramKey(value) {
   return String(value || "")
     .trim()
@@ -5145,7 +5156,6 @@ async function handleAdminTimeStudyCreate(req) {
   if (!label) throw actionError("Give the time study a short label, such as Bending.", 400);
 
   const { worker, task } = await assignedWorkerTaskForWrite(employee, date, taskId, actor);
-  if (task.completed) throw actionError("A time study can only be applied to an open task.", 409);
   const client = await writePool.connect();
   try {
     const existing = await client.query(
@@ -5189,6 +5199,140 @@ async function handleAdminTimeStudyCreate(req) {
   } finally {
     client.release();
   }
+}
+
+function manualStudyEndAt(date, endTime = "") {
+  const clock = String(endTime || "").trim();
+  if (!clock) return new Date();
+  if (!/^([01]?\d|2[0-3]):[0-5]\d$/.test(clock)) {
+    throw actionError("Observed end time must use 24-hour HH:MM format.", 400);
+  }
+  const value = dateAtZonedClock(date, clock);
+  if (!value) throw actionError("Observed end time could not be read.", 400);
+  return value;
+}
+
+async function handleAdminTimeStudyManualLap(req, studyKey) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const employee = canonicalWorkerIdForWrites(body.employee || "");
+  const taskId = String(body.taskId || "").trim();
+  const date = String(body.date || todayIso()).trim();
+  const durationMinutes = Math.round(Number(body.durationMinutes || 0));
+  const notes = String(body.notes || "").trim().slice(0, 1000);
+  if (!employee || !taskId || !isIsoDate(date)) throw actionError("Worker, task, and work date are required.", 400);
+  if (!Number.isFinite(durationMinutes) || durationMinutes < 1 || durationMinutes > 1440) {
+    throw actionError("Observed study time must be between 1 and 1,440 minutes.", 400);
+  }
+
+  const { worker, task } = await assignedWorkerTaskForWrite(employee, date, taskId, actor);
+  const client = await writePool.connect();
+  try {
+    await client.query("begin");
+    const studyResult = await client.query(
+      `
+        select * from core.task_time_studies
+        where study_key = $1 and worker_key = $2 and asana_task_gid = $3 and work_date = $4::date
+        for update
+      `,
+      [studyKey, worker.id, task.id, date]
+    );
+    const study = studyResult.rows[0];
+    if (!study) throw actionError("That study was not found on this worker task.", 404);
+    const endedAt = manualStudyEndAt(date, body.observedEndTime);
+    const startedAt = new Date(endedAt.getTime() - durationMinutes * 60000);
+    const lap = await client.query(
+      `
+        insert into core.task_time_study_laps (
+          lap_key, task_time_study_id, started_at, stopped_at, duration_minutes,
+          stop_reason, started_by_email, stopped_by_email, capture_mode, notes, source_payload
+        ) values ($1, $2, $3::timestamptz, $4::timestamptz, $5, 'admin_retroactive', $6, $6, 'manual_retroactive', $7, $8::jsonb)
+        returning lap_key, started_at, stopped_at, duration_minutes
+      `,
+      [
+        `study-lap:${crypto.randomUUID()}`,
+        study.task_time_study_id,
+        startedAt.toISOString(),
+        endedAt.toISOString(),
+        durationMinutes,
+        normalizeEmail(actor?.email || "") || null,
+        notes || null,
+        JSON.stringify({ enteredFrom: "hawley_admin_retroactive_entry", actor: authActorSummary(actor) })
+      ]
+    );
+    await client.query("commit");
+    return { ok: true, studyKey, mode: "manual_retroactive", lap: lap.rows[0] };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function reportDate(value, fallback) {
+  const candidate = String(value || "").trim();
+  return isIsoDate(candidate) ? candidate : fallback;
+}
+
+async function timeStudyReportRows(fromDate, toDate) {
+  const result = await pool.query(
+    `
+      select
+        studies.label as study_label,
+        studies.work_date::text,
+        studies.worker_name,
+        studies.worker_email,
+        studies.task_name,
+        studies.phase_name,
+        studies.asana_task_gid,
+        laps.started_at,
+        laps.stopped_at,
+        laps.duration_minutes,
+        laps.capture_mode,
+        laps.notes,
+        laps.stop_reason,
+        laps.created_at as recorded_at
+      from core.task_time_study_laps laps
+      join core.task_time_studies studies on studies.task_time_study_id = laps.task_time_study_id
+      where studies.work_date between $1::date and $2::date
+      order by studies.work_date desc, studies.label, studies.worker_name, laps.started_at
+    `,
+    [fromDate, toDate]
+  );
+  return result.rows;
+}
+
+async function handleAdminTimeStudyReport(req, url, res) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const today = todayIso();
+  const defaultFrom = new Date(`${today}T12:00:00Z`);
+  defaultFrom.setUTCDate(defaultFrom.getUTCDate() - 89);
+  const fromDate = reportDate(url.searchParams.get("from"), defaultFrom.toISOString().slice(0, 10));
+  const toDate = reportDate(url.searchParams.get("to"), today);
+  if (fromDate > toDate) throw actionError("Report start date must be on or before its end date.", 400);
+  const rows = await timeStudyReportRows(fromDate, toDate);
+  sendCsv(res, 200, `hawley-time-studies-${fromDate}-to-${toDate}.csv`, [
+    ["Study", "Work Date", "Worker", "Worker Email", "Task", "Phase", "Asana Task GID", "Observed Start", "Observed End", "Study Minutes", "Capture Mode", "Note", "Stop Reason", "Recorded At"],
+    ...rows.map(row => [
+      row.study_label,
+      row.work_date,
+      row.worker_name,
+      row.worker_email,
+      row.task_name,
+      row.phase_name,
+      row.asana_task_gid,
+      row.started_at ? new Date(row.started_at).toISOString() : "",
+      row.stopped_at ? new Date(row.stopped_at).toISOString() : "",
+      row.duration_minutes,
+      row.capture_mode,
+      row.notes,
+      row.stop_reason,
+      row.recorded_at ? new Date(row.recorded_at).toISOString() : ""
+    ])
+  ]);
 }
 
 async function handleAdminTimeStudyEnd(req, studyKey) {
@@ -10898,9 +11042,20 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/admin/time-studies/report" && req.method === "GET") {
+      await handleAdminTimeStudyReport(req, url, res);
+      return;
+    }
+
     const timeStudyEndMatch = url.pathname.match(/^\/api\/admin\/time-studies\/(study%3A[0-9a-f-]+|study:[0-9a-f-]+)\/end$/i);
     if (timeStudyEndMatch && req.method === "POST") {
       sendJson(res, 200, await handleAdminTimeStudyEnd(req, decodeURIComponent(timeStudyEndMatch[1])));
+      return;
+    }
+
+    const timeStudyManualMatch = url.pathname.match(/^\/api\/admin\/time-studies\/(study%3A[0-9a-f-]+|study:[0-9a-f-]+)\/manual-lap$/i);
+    if (timeStudyManualMatch && req.method === "POST") {
+      sendJson(res, 200, await handleAdminTimeStudyManualLap(req, decodeURIComponent(timeStudyManualMatch[1])));
       return;
     }
 

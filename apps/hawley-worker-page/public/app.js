@@ -1530,8 +1530,8 @@
                          <button class="btn primary" type="button" data-action="complete-task" data-task-id="${escapeAttr(task.id)}" ${!timerHasTime || busy ? "disabled" : ""}>${busy ? "Saving..." : "Complete"}</button>`}
                   ${timeStudy
                     ? `<button class="btn ${studyLapRunning ? "danger" : "ghost"}" type="button" data-action="${studyLapRunning ? "stop-time-study" : "start-time-study"}" data-task-id="${escapeAttr(task.id)}" data-study-key="${escapeAttr(timeStudy.id)}" ${(!studyLapRunning && !timerRunning) || busy ? "disabled" : ""}>${studyLapRunning ? `Stop ${escapeHtml(timeStudy.label)}` : `Start ${escapeHtml(timeStudy.label)}`}</button>
-                       ${timeStudyAdminEnabled() ? `<button class="btn ghost" type="button" data-action="end-time-study" data-task-id="${escapeAttr(task.id)}" data-study-key="${escapeAttr(timeStudy.id)}" ${busy ? "disabled" : ""}>End study</button>` : ""}`
-                    : timeStudyAdminEnabled() && !task.completed
+                       ${timeStudyAdminEnabled() ? `<button class="btn ghost" type="button" data-action="record-time-study" data-task-id="${escapeAttr(task.id)}" data-study-key="${escapeAttr(timeStudy.id)}" data-study-label="${escapeAttr(timeStudy.label)}" ${busy ? "disabled" : ""}>Record past time</button><button class="btn ghost" type="button" data-action="end-time-study" data-task-id="${escapeAttr(task.id)}" data-study-key="${escapeAttr(timeStudy.id)}" ${busy ? "disabled" : ""}>End study</button>` : ""}`
+                    : timeStudyAdminEnabled()
                       ? `<button class="btn ghost" type="button" data-action="apply-time-study" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>Apply time study</button>`
                       : ""}
                 </div>`
@@ -1698,6 +1698,20 @@
         if (!worker || !button.dataset.studyKey) return;
         if (!window.confirm("End this time study? The worker will no longer see its lap control.")) return;
         await endTimeStudy(worker.id, button.dataset.taskId, button.dataset.studyKey);
+      });
+    });
+
+    document.querySelectorAll("[data-action='record-time-study']").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const worker = getSelectedWorker();
+        if (!worker || !button.dataset.studyKey) return;
+        const minutes = window.prompt(`Observed ${button.dataset.studyLabel || "study"} minutes for this task?`, "");
+        if (minutes === null) return;
+        const endTime = window.prompt("Observed end time today in 24-hour HH:MM (leave blank if unknown)", "");
+        if (endTime === null) return;
+        const notes = window.prompt("Optional observation note (part, batch, or context)", "");
+        if (notes === null) return;
+        await recordPastTimeStudy(worker.id, button.dataset.taskId, button.dataset.studyKey, minutes, endTime, notes);
       });
     });
 
@@ -1971,6 +1985,34 @@
       state.actionTaskId = "";
       render();
       showToast(error.message || "Could not update time study");
+    }
+  }
+
+  async function recordPastTimeStudy(employee, taskId, studyKey, durationMinutes, observedEndTime, notes) {
+    if (!timeStudyAdminEnabled()) {
+      showToast("Only an admin can record past study time.");
+      return;
+    }
+    state.actionTaskId = taskId;
+    render();
+    try {
+      const response = await postJsonWithPin(`/api/admin/time-studies/${encodeURIComponent(studyKey)}/manual-lap`, {
+        employee,
+        taskId,
+        date: state.date,
+        durationMinutes,
+        observedEndTime,
+        notes
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || `Time study failed with ${response.status}`);
+      showToast(`Recorded ${formatMinutes(payload.lap?.duration_minutes || durationMinutes)} as a manual observation.`);
+      state.actionTaskId = "";
+      await loadAssignments();
+    } catch (error) {
+      state.actionTaskId = "";
+      render();
+      showToast(error.message || "Could not record past study time");
     }
   }
 

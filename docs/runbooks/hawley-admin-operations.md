@@ -134,6 +134,17 @@ parent task timer stops, ends, completes, or is schedule-auto-stopped. Study
 minutes therefore do not change Asana time entries, worker actuals, efficiency,
 pacing, or capacity.
 
+For a one-time recovery of observations made before the feature was enabled,
+an admin can apply a study to an assigned task (including a completed task) and
+choose **Record past time**. The entry captures observed minutes, an optional
+observed end time, and a note. It is explicitly labeled
+`manual_retroactive` in reporting and is never treated as a live timer lap.
+
+The Admin Dashboard Configuration drawer includes **Task Time Studies →
+Download CSV**. The report covers the previous 90 days by default and includes
+study label, task, worker, work date, observed timestamps, minutes, capture
+mode, note, and record timestamp.
+
 ## True Phase Pacing
 
 True pacing lets an admin shift the start date for a phase within a cycle
