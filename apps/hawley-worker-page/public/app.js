@@ -1464,6 +1464,14 @@
     const timerSessionOpen = timerHasTime && (Boolean(timerStartedAt) || Number(task.timerAccumulatedMinutes || 0) > 0);
     const canEndSession = managerControlEnabled() && timerSessionOpen;
     const startLabel = timerHasTime ? "Resume timer" : "Start timer";
+    const timeStudy = task.timeStudy || null;
+    const studyLapRunning = Boolean(timeStudy?.activeLapStartedAt);
+    const studyElapsedMinutes = studyLapRunning
+      ? Math.max(0, Math.round((Date.now() - new Date(timeStudy.activeLapStartedAt).getTime()) / 60000))
+      : 0;
+    const studyChip = timeStudy
+      ? `<span class="chip purple">Study: ${escapeHtml(timeStudy.label)}${studyLapRunning ? ` ${formatMinutes(studyElapsedMinutes)} running` : timeStudy.totalMinutes ? ` ${formatMinutes(timeStudy.totalMinutes)} logged` : " ready"}</span>`
+      : "";
     const estimateChip = renderEstimateChip(task);
     const taskLoggedMinutes = taskActualLoggedMinutes(task);
     const taskWipMinutes = taskActualWipMinutes(task);
@@ -1502,6 +1510,7 @@
             ${taskLoggedMinutes ? `<span class="chip green">${formatMinutes(taskLoggedMinutes)} logged</span>` : ""}
             ${taskWipMinutes ? `<span class="chip wip">${escapeHtml(wipLabel)}</span>` : ""}
             ${cncChip}
+            ${studyChip}
             ${canEndSession ? `<button class="chip action-chip" type="button" data-action="release-timer" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>End session</button>` : ""}
             ${task.phase ? `<span class="chip yellow">${escapeHtml(task.phase)}</span>` : ""}
             ${task.vin ? `<span class="chip">VIN ${escapeHtml(task.vin)}</span>` : ""}
@@ -1519,6 +1528,12 @@
                       : `<button class="btn ghost" type="button" data-action="start-timer" data-task-id="${escapeAttr(task.id)}" ${timerRunning || busy ? "disabled" : ""}>${timerRunning ? "Running" : startLabel}</button>
                          ${timerRunning ? `<button class="btn ghost" type="button" data-action="stop-timer" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>Stop</button>` : ""}
                          <button class="btn primary" type="button" data-action="complete-task" data-task-id="${escapeAttr(task.id)}" ${!timerHasTime || busy ? "disabled" : ""}>${busy ? "Saving..." : "Complete"}</button>`}
+                  ${timeStudy
+                    ? `<button class="btn ${studyLapRunning ? "danger" : "ghost"}" type="button" data-action="${studyLapRunning ? "stop-time-study" : "start-time-study"}" data-task-id="${escapeAttr(task.id)}" data-study-key="${escapeAttr(timeStudy.id)}" ${(!studyLapRunning && !timerRunning) || busy ? "disabled" : ""}>${studyLapRunning ? `Stop ${escapeHtml(timeStudy.label)}` : `Start ${escapeHtml(timeStudy.label)}`}</button>
+                       ${timeStudyAdminEnabled() ? `<button class="btn ghost" type="button" data-action="end-time-study" data-task-id="${escapeAttr(task.id)}" data-study-key="${escapeAttr(timeStudy.id)}" ${busy ? "disabled" : ""}>End study</button>` : ""}`
+                    : timeStudyAdminEnabled() && !task.completed
+                      ? `<button class="btn ghost" type="button" data-action="apply-time-study" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>Apply time study</button>`
+                      : ""}
                 </div>`
               : ""
           }
@@ -1651,6 +1666,38 @@
         const worker = getSelectedWorker();
         if (!worker) return;
         await stopWorkerTimer(worker.id, button.dataset.taskId);
+      });
+    });
+
+    document.querySelectorAll("[data-action='apply-time-study']").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const worker = getSelectedWorker();
+        if (!worker) return;
+        const label = window.prompt("What should this study measure?", "Bending");
+        if (label === null) return;
+        await applyTimeStudy(worker.id, button.dataset.taskId, label);
+      });
+    });
+
+    document.querySelectorAll("[data-action='start-time-study'], [data-action='stop-time-study']").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const worker = getSelectedWorker();
+        if (!worker) return;
+        await updateTimeStudyLap(
+          worker.id,
+          button.dataset.taskId,
+          button.dataset.studyKey,
+          button.dataset.action === "start-time-study" ? "start" : "stop"
+        );
+      });
+    });
+
+    document.querySelectorAll("[data-action='end-time-study']").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const worker = getSelectedWorker();
+        if (!worker || !button.dataset.studyKey) return;
+        if (!window.confirm("End this time study? The worker will no longer see its lap control.")) return;
+        await endTimeStudy(worker.id, button.dataset.taskId, button.dataset.studyKey);
       });
     });
 
@@ -1826,6 +1873,11 @@
     return Boolean(state.authStatus.managerControlEnabled && !workerPageLocked());
   }
 
+  function timeStudyAdminEnabled() {
+    const user = state.auth.user || state.authStatus?.accountAuth?.user || {};
+    return Boolean(user && user.role === "admin");
+  }
+
   function serverWritesEnabledFor(employee) {
     if (state.source === "asana") return true;
     const ids = Array.isArray(state.authStatus.writeWorkerIds) ? state.authStatus.writeWorkerIds : [];
@@ -1881,6 +1933,65 @@
       state.actionTaskId = "";
       render();
       showToast(error.message || "Could not update CNC machine run");
+    }
+  }
+
+  async function applyTimeStudy(employee, taskId, label) {
+    if (!timeStudyAdminEnabled()) {
+      showToast("Only an admin can apply a time study.");
+      return;
+    }
+    state.actionTaskId = taskId;
+    render();
+    try {
+      const response = await postJsonWithPin("/api/admin/time-studies", { employee, taskId, date: state.date, label });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || `Time study failed with ${response.status}`);
+      showToast(payload.alreadyActive ? `${payload.label} is already active on this task.` : `${payload.label} study applied.`);
+      state.actionTaskId = "";
+      await loadAssignments();
+    } catch (error) {
+      state.actionTaskId = "";
+      render();
+      showToast(error.message || "Could not apply time study");
+    }
+  }
+
+  async function updateTimeStudyLap(employee, taskId, studyKey, action) {
+    state.actionTaskId = taskId;
+    render();
+    try {
+      const response = await postJsonWithPin("/api/time-study-lap", { employee, taskId, studyKey, date: state.date, action });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || `Time study failed with ${response.status}`);
+      showToast(action === "start" ? "Study lap started." : "Study lap stopped.");
+      state.actionTaskId = "";
+      await loadAssignments();
+    } catch (error) {
+      state.actionTaskId = "";
+      render();
+      showToast(error.message || "Could not update time study");
+    }
+  }
+
+  async function endTimeStudy(employee, taskId, studyKey) {
+    if (!timeStudyAdminEnabled()) {
+      showToast("Only an admin can end a time study.");
+      return;
+    }
+    state.actionTaskId = taskId;
+    render();
+    try {
+      const response = await postJsonWithPin(`/api/admin/time-studies/${encodeURIComponent(studyKey)}/end`, { employee, taskId, date: state.date });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || `Time study failed with ${response.status}`);
+      showToast("Time study ended.");
+      state.actionTaskId = "";
+      await loadAssignments();
+    } catch (error) {
+      state.actionTaskId = "";
+      render();
+      showToast(error.message || "Could not end time study");
     }
   }
 

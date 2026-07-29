@@ -271,7 +271,7 @@ function sendError(res, status, message, details = {}) {
 
 function publicErrorMessage(error) {
   const message = error.message || "";
-  if (/hawley_worker_page_assignments|hawley_cycle_calendar|hawley_reporting_day_summary|worker_daily_utilization|phase_cycle_load_rev1|phase_cycle_pace_overrides|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|task_templates|production_schedule|airtable_tasks|airtable_production|airtable_vins|airtable_models|hb\.vins|hb\.models|project_creation_runs|jsonb_display_text|task_transition_events|time_sessions|transition_category_catalog|app_users|app_sessions|app_auth_events/.test(message)) {
+  if (/hawley_worker_page_assignments|hawley_cycle_calendar|hawley_reporting_day_summary|worker_daily_utilization|phase_cycle_load_rev1|phase_cycle_pace_overrides|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|task_templates|production_schedule|airtable_tasks|airtable_production|airtable_vins|airtable_models|hb\.vins|hb\.models|project_creation_runs|jsonb_display_text|task_transition_events|time_sessions|task_time_studies|task_time_study_laps|transition_category_catalog|app_users|app_sessions|app_auth_events/.test(message)) {
     return {
       status: 503,
       message: "Hawley worker read model is not migrated yet. Run npm run pg:migrate."
@@ -3222,6 +3222,7 @@ async function dailyAssignmentsPayload(url, authActor = null) {
 
   const workers = visibleWorkersForRequest(allWorkers, employee, includeNoWork);
   await attachWorkerTaskActualHistory(workers);
+  await attachWorkerTaskTimeStudies(workers, date);
   const cncMachine = await attachCncMachineRunData(workers, date);
   const managerLineOverview = employee
     ? null
@@ -3338,6 +3339,57 @@ function authSessionTtlSeconds() {
     ? APP_AUTH_SESSION_TTL_HOURS
     : 12;
   return Math.round(hours * 60 * 60);
+}
+
+async function attachWorkerTaskTimeStudies(workers, date) {
+  const workerKeys = [...new Set((workers || []).map(worker => String(worker.id || "")).filter(Boolean))];
+  const taskIds = [...new Set((workers || []).flatMap(worker => (worker.tasks || []).map(task => String(task.id || "")).filter(Boolean)))];
+  if (!workerKeys.length || !taskIds.length || !isIsoDate(date)) return;
+
+  const result = await pool.query(
+    `
+      select
+        studies.task_time_study_id,
+        studies.study_key,
+        studies.worker_key,
+        studies.asana_task_gid,
+        studies.label,
+        studies.created_at,
+        laps.started_at as active_lap_started_at,
+        coalesce(summary.total_minutes, 0)::integer as total_minutes
+      from core.task_time_studies studies
+      left join lateral (
+        select started_at
+        from core.task_time_study_laps
+        where task_time_study_id = studies.task_time_study_id
+          and stopped_at is null
+        limit 1
+      ) laps on true
+      left join lateral (
+        select sum(coalesce(duration_minutes, 0))::integer as total_minutes
+        from core.task_time_study_laps
+        where task_time_study_id = studies.task_time_study_id
+      ) summary on true
+      where studies.is_active
+        and studies.work_date = $1::date
+        and studies.worker_key = any($2::text[])
+        and studies.asana_task_gid = any($3::text[])
+    `,
+    [date, workerKeys, taskIds]
+  );
+  const byTask = new Map(result.rows.map(row => [`${row.worker_key}::${row.asana_task_gid}`, row]));
+  for (const worker of workers || []) {
+    for (const task of worker.tasks || []) {
+      const row = byTask.get(`${worker.id}::${task.id}`);
+      task.timeStudy = row ? {
+        id: row.study_key,
+        label: row.label,
+        totalMinutes: Number(row.total_minutes || 0),
+        activeLapStartedAt: row.active_lap_started_at || "",
+        createdAt: row.created_at || ""
+      } : null;
+    }
+  }
 }
 
 function shopWorkdayFractions(now = new Date()) {
@@ -4522,6 +4574,7 @@ async function autoCloseScheduledTimersForDate(date) {
           LIVE_WORKER_SOURCE
         ]
       );
+      await closeActiveTimeStudyLaps(client, worker.id, task.id, date, autoStopAt, reason, null);
 
       await closeTimeSession(client, worker, task, date, timer.startedAt, eventIso, reason, segmentMinutes, {
         action: "schedule-auto-stop",
@@ -5037,6 +5090,212 @@ async function tryWorkerTransitionLedger(label, callback) {
   }
 }
 
+function timeStudyLabel(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").slice(0, 80);
+}
+
+async function closeActiveTimeStudyLaps(client, workerId, taskId, date, stoppedAt, reason, actor = null) {
+  const active = await client.query(
+    `
+      select laps.task_time_study_lap_id, laps.started_at
+      from core.task_time_study_laps laps
+      join core.task_time_studies studies on studies.task_time_study_id = laps.task_time_study_id
+      where studies.worker_key = $1
+        and studies.asana_task_gid = $2
+        and studies.work_date = $3::date
+        and studies.is_active
+        and laps.stopped_at is null
+      for update
+    `,
+    [workerId, String(taskId || ""), date]
+  );
+  const stopDate = stoppedAt instanceof Date ? stoppedAt : new Date(stoppedAt);
+  if (Number.isNaN(stopDate.getTime())) return [];
+  const stoppedBy = normalizeEmail(actor?.email || "");
+  const closed = [];
+  for (const lap of active.rows) {
+    const durationMinutes = scheduledWorkMinutesBetween(lap.started_at, stopDate, date);
+    const result = await client.query(
+      `
+        update core.task_time_study_laps
+        set stopped_at = $2::timestamptz,
+            duration_minutes = $3,
+            stop_reason = $4,
+            stopped_by_email = $5,
+            updated_at = now()
+        where task_time_study_lap_id = $1
+        returning task_time_study_lap_id
+      `,
+      [lap.task_time_study_lap_id, stopDate.toISOString(), durationMinutes, reason, stoppedBy || null]
+    );
+    if (result.rows[0]) closed.push(result.rows[0]);
+  }
+  return closed;
+}
+
+async function handleAdminTimeStudyCreate(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const employee = canonicalWorkerIdForWrites(body.employee || "");
+  const taskId = String(body.taskId || "").trim();
+  const date = String(body.date || todayIso()).trim();
+  const label = timeStudyLabel(body.label);
+  if (!employee || !taskId || !isIsoDate(date)) throw actionError("Worker, task, and work date are required.", 400);
+  if (!label) throw actionError("Give the time study a short label, such as Bending.", 400);
+
+  const { worker, task } = await assignedWorkerTaskForWrite(employee, date, taskId, actor);
+  if (task.completed) throw actionError("A time study can only be applied to an open task.", 409);
+  const client = await writePool.connect();
+  try {
+    const existing = await client.query(
+      `
+        select study_key, label
+        from core.task_time_studies
+        where worker_key = $1 and asana_task_gid = $2 and work_date = $3::date and is_active
+        limit 1
+      `,
+      [worker.id, task.id, date]
+    );
+    if (existing.rows[0]) {
+      return { ok: true, alreadyActive: true, studyKey: existing.rows[0].study_key, label: existing.rows[0].label };
+    }
+    const inserted = await client.query(
+      `
+        insert into core.task_time_studies (
+          study_key, worker_key, worker_name, worker_email, asana_task_gid,
+          task_instance_id, task_name, phase_key, phase_name, work_date, label,
+          created_by_email, source_payload
+        ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date, $11, $12, $13::jsonb)
+        returning study_key, label
+      `,
+      [
+        `study:${crypto.randomUUID()}`,
+        worker.id,
+        worker.name,
+        worker.email || "",
+        task.id,
+        task.taskInstanceId || null,
+        task.title || "",
+        phaseKeyForTask(task),
+        phaseNameForTask(task),
+        date,
+        label,
+        normalizeEmail(actor?.email || "") || null,
+        JSON.stringify({ createdFrom: "hawley_worker_manager_page", createdBy: authActorSummary(actor) })
+      ]
+    );
+    return { ok: true, studyKey: inserted.rows[0].study_key, label: inserted.rows[0].label };
+  } finally {
+    client.release();
+  }
+}
+
+async function handleAdminTimeStudyEnd(req, studyKey) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const client = await writePool.connect();
+  try {
+    await client.query("begin");
+    const studyResult = await client.query(
+      `select * from core.task_time_studies where study_key = $1 and is_active for update`,
+      [studyKey]
+    );
+    const study = studyResult.rows[0];
+    if (!study) throw actionError("This time study is already inactive or was not found.", 404);
+    const now = effectiveScheduledStopDate(new Date(), String(study.work_date)) || new Date();
+    await closeActiveTimeStudyLaps(client, study.worker_key, study.asana_task_gid, String(study.work_date), now, "study_ended", actor);
+    await client.query(
+      `
+        update core.task_time_studies
+        set is_active = false, ended_at = $2::timestamptz, ended_by_email = $3, ended_reason = 'admin_ended', updated_at = now()
+        where task_time_study_id = $1
+      `,
+      [study.task_time_study_id, now.toISOString(), normalizeEmail(actor?.email || "") || null]
+    );
+    await client.query("commit");
+    return { ok: true, studyKey, ended: true };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function handleTimeStudyLap(req) {
+  const body = await readJsonBody(req);
+  const action = String(body.action || "").trim().toLowerCase();
+  const employee = canonicalWorkerIdForWrites(body.employee || "");
+  const taskId = String(body.taskId || "").trim();
+  const studyKey = String(body.studyKey || "").trim();
+  const date = String(body.date || todayIso()).trim();
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  if (!['start', 'stop'].includes(action)) throw actionError("Time-study action must be start or stop.", 400);
+  requireWorkerAccess(actor, employee);
+  if (!employee || !taskId || !studyKey || !isIsoDate(date)) throw actionError("Study, worker, task, and work date are required.", 400);
+
+  const { worker, task } = await assignedWorkerTaskForWrite(employee, date, taskId, actor);
+  const client = await writePool.connect();
+  try {
+    await client.query("begin");
+    const studyResult = await client.query(
+      `
+        select * from core.task_time_studies
+        where study_key = $1 and worker_key = $2 and asana_task_gid = $3 and work_date = $4::date and is_active
+        for update
+      `,
+      [studyKey, worker.id, task.id, date]
+    );
+    const study = studyResult.rows[0];
+    if (!study) throw actionError("That time study is no longer active for this task.", 409);
+    const now = new Date();
+    const eventAt = effectiveScheduledStopDate(now, date) || now;
+    if (action === "start") {
+      const timer = await readLiveActualRow(client, ledgerKeyForWorkerTask(worker.id, date, task.id));
+      if (!timer?.startedAt) throw actionError("Start the normal task timer before starting this study lap.", 409);
+      const otherOpen = await client.query(
+        `
+          select studies.label
+          from core.task_time_study_laps laps
+          join core.task_time_studies studies on studies.task_time_study_id = laps.task_time_study_id
+          where studies.worker_key = $1 and studies.work_date = $2::date and laps.stopped_at is null
+          limit 1
+        `,
+        [worker.id, date]
+      );
+      if (otherOpen.rows[0]) throw actionError(`Stop the existing ${otherOpen.rows[0].label} study lap first.`, 409);
+      const lap = await client.query(
+        `
+          insert into core.task_time_study_laps (
+            lap_key, task_time_study_id, started_at, started_by_email, source_payload
+          ) values ($1, $2, $3::timestamptz, $4, $5::jsonb)
+          returning lap_key, started_at
+        `,
+        [
+          `study-lap:${crypto.randomUUID()}`,
+          study.task_time_study_id,
+          eventAt.toISOString(),
+          normalizeEmail(actor?.email || "") || null,
+          JSON.stringify({ startedFrom: "hawley_worker_page", actor: authActorSummary(actor) })
+        ]
+      );
+      await client.query("commit");
+      return { ok: true, action, studyKey, startedAt: lap.rows[0].started_at };
+    }
+
+    const closed = await closeActiveTimeStudyLaps(client, worker.id, task.id, date, eventAt, "worker_stopped", actor);
+    if (!closed.length) throw actionError("There is no running study lap to stop.", 409);
+    await client.query("commit");
+    return { ok: true, action, studyKey, stoppedAt: eventAt.toISOString() };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function handleWorkerTaskAction(req) {
   const body = await readJsonBody(req);
   const action = String(body.action || "").trim().toLowerCase();
@@ -5284,6 +5543,9 @@ async function handleWorkerTaskAction(req) {
     const elapsedMinutes = liveTimerElapsedMinutes(current, eventAt, date);
     const actualMinutes = liveTimerTotalActualMinutes(current, eventAt, date);
     const segmentMinutes = runningSegmentMinutes(current, eventAt, date);
+    if (["stop", "release", "complete"].includes(action)) {
+      await closeActiveTimeStudyLaps(client, worker.id, task.id, date, eventAt, `parent_${action}`, authActor);
+    }
     if (action === "stop") {
       const saved = await upsertLiveWorkerActual(client, worker, task, date, {
         ...current,
@@ -10631,6 +10893,17 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/admin/time-studies" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminTimeStudyCreate(req));
+      return;
+    }
+
+    const timeStudyEndMatch = url.pathname.match(/^\/api\/admin\/time-studies\/(study%3A[0-9a-f-]+|study:[0-9a-f-]+)\/end$/i);
+    if (timeStudyEndMatch && req.method === "POST") {
+      sendJson(res, 200, await handleAdminTimeStudyEnd(req, decodeURIComponent(timeStudyEndMatch[1])));
+      return;
+    }
+
     if (url.pathname === "/api/admin/capacity-recommendations/preview" && req.method === "POST") {
       sendJson(res, 200, await handleAdminCapacityRecommendationPreview(req));
       return;
@@ -10726,6 +10999,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/worker-task-action" && req.method === "POST") {
       sendJson(res, 200, await handleWorkerTaskAction(req));
+      return;
+    }
+
+    if (url.pathname === "/api/time-study-lap" && req.method === "POST") {
+      sendJson(res, 200, await handleTimeStudyLap(req));
       return;
     }
 

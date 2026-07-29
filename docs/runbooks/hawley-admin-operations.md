@@ -1,6 +1,6 @@
 # Hawley Admin Operations
 
-Last updated: 2026-07-23
+Last updated: 2026-07-29
 
 The Hawley Admin page is the operations control layer for shop-floor execution.
 It lives in the Hawley worker web app at:
@@ -118,6 +118,21 @@ Capacity uses active concurrent station staffing, not the total number of
 workers qualified for or assigned some tasks in a phase during the cycle. Phase
 F is capped at one concurrently assigned worker; additional Phase F-qualified
 workers do not multiply its pacing capacity.
+
+## Manager-Controlled Task Time Studies
+
+An admin can open a worker's assigned-task page, choose **Apply time study** on
+an open task, and name the measurement (for example, `Bending`). The worker
+then sees a small Start/Stop control for that named lap while the normal task
+timer is running. This supports focused studies without creating Asana subtasks
+or modifying the source task shape.
+
+Only an admin can apply or end a study. Ending it removes the lap control; it
+can be re-applied later if the study resumes. A lap is a measured subset of the
+normal task timer, not additional labor. Hawley closes any open lap when its
+parent task timer stops, ends, completes, or is schedule-auto-stopped. Study
+minutes therefore do not change Asana time entries, worker actuals, efficiency,
+pacing, or capacity.
 
 ## True Phase Pacing
 

@@ -132,6 +132,8 @@ Purpose: Hawley-owned runtime data. These are the tables Hawley can own directly
 | `core.task_completion_evidence` | one worker contribution to one completed task instance | Historical task completion, timing, confidence, assistance, quality, and verification evidence. |
 | `core.worker_task_capabilities` | one worker/task-template pair | Refreshable capability rollup with completion counts, median/recent timing, consistency, and verification state. |
 | `core.cnc_machine_runs` | one physical CNC sheet run | Hawley worker app | Parallel D&E cut tied to an Asana task/program. Stores observed cut window, credited historical machine time, and only the excess operator-support minutes. |
+| `core.task_time_studies` | one admin-applied task study | Hawley worker app | A named, admin-managed study on one worker/task/day. It is intentionally separate from labor actuals. |
+| `core.task_time_study_laps` | one study lap | Hawley worker app | Measured interval belonging to a task time study. Its minutes never roll into worker actuals, Asana time entries, pacing, or efficiency. |
 
 ### Admin-Owned Overlays
 
