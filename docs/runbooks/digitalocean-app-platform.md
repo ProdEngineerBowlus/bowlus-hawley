@@ -316,7 +316,10 @@ refresh/adoption controls. It is opened from manager cycle/day history tiles
 after a workday is selected. Its first screen is a day/line phase overview;
 worker, task, transition, and review detail appears only after selecting a
 phase. Transition review buttons, when enabled, write only to Hawley's Postgres
-review tables.
+review tables. Opening a prior day is read-only: live timer auto-stop and
+schedule-correction maintenance run only for the current shop day and are
+single-flight across concurrent requests, so historical reporting cannot alter
+time records or contend with its own reporting queries.
 
 For larger beta work, create a separate App Platform app or component from a
 dedicated Git branch such as `beta`. Keep the staging environment pointed at the

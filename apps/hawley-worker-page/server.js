@@ -160,6 +160,14 @@ const scheduleCorrectionState = {
   lastSamples: []
 };
 
+// A Reporting View load makes two parallel requests. Keep each live-day timer
+// reconciliation single-flight so those requests never compete to correct the
+// same ledger rows. Past dates are historical evidence and must stay read-only.
+const liveScheduleReconciliationState = {
+  date: "",
+  promise: null
+};
+
 const authRuntimeState = {
   lastLoginAt: "",
   lastLoginStep: "",
@@ -3186,8 +3194,7 @@ async function dailyAssignmentsPayload(url, authActor = null) {
     throw error;
   }
 
-  await autoCloseScheduledTimersForDate(date);
-  await enforceScheduledActualsForDate(date);
+  await reconcileLiveScheduleForCurrentDate(date);
 
   const [rows, configuredRows, latestRuns, latestDate, trackerSnapshots, actualRows] = await Promise.all([
     workerAssignments(date),
@@ -5101,6 +5108,34 @@ async function tryWorkerTransitionLedger(label, callback) {
   }
 }
 
+async function reconcileLiveScheduleForCurrentDate(date) {
+  // Do not auto-stop or normalize a historical day just because someone opens
+  // it in Reporting. Those corrections are live operational maintenance, not
+  // report generation, and historical navigation must be a read-only path.
+  if (date !== todayIso()) return;
+
+  if (liveScheduleReconciliationState.date === date && liveScheduleReconciliationState.promise) {
+    return liveScheduleReconciliationState.promise;
+  }
+
+  const reconciliation = (async () => {
+    await autoCloseScheduledTimersForDate(date);
+    await enforceScheduledActualsForDate(date);
+  })();
+  liveScheduleReconciliationState.date = date;
+  liveScheduleReconciliationState.promise = reconciliation;
+
+  try {
+    return await reconciliation;
+  } finally {
+    // Keep only concurrent calls together. A later live request must still be
+    // able to auto-stop a timer that runs into the next scheduled break.
+    if (liveScheduleReconciliationState.date === date && liveScheduleReconciliationState.promise === reconciliation) {
+      liveScheduleReconciliationState.promise = null;
+    }
+  }
+}
+
 function timeStudyLabel(value) {
   return String(value || "").trim().replace(/\s+/g, " ").slice(0, 80);
 }
@@ -6144,7 +6179,7 @@ async function utilizationReportPayload(url) {
   const workerFilter = url.searchParams.get("worker") || "";
   if (!isIsoDate(date)) throw actionError("Date must be YYYY-MM-DD.", 400);
 
-  await enforceScheduledActualsForDate(date);
+  await reconcileLiveScheduleForCurrentDate(date);
 
   const [phaseResult, workerPhaseResult, workerDailyResult, transitionResult, categories] = await Promise.all([
     pool.query("select * from reporting.phase_day_summary where work_date = $1::date order by total_actual_task_minutes desc, total_estimated_minutes desc, phase_name", [date]),
