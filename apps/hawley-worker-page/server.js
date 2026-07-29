@@ -7207,39 +7207,39 @@ async function adminProjectCreatorPreview(options) {
   const [taskResult, vinResult, modelResult, existingResult] = await Promise.all([
     pool.query(`
       select
-        task_record_id,
-        tasks_key,
-        task_name,
-        parent_task_name,
-        task_order,
-        quantity,
-        estimated_task_time_seconds,
-        estimated_batch_task_time_seconds,
-        primary_phase_record_id,
-        primary_phase_name,
-        phase_record_ids,
-        phase_names,
-        primary_worker_record_id,
-        primary_worker_name,
-        assignee_email,
-        parity_mode,
-        supported_phase_record_id,
-        supported_phase_name,
-        supported_offset,
-        model_type_names,
-        frame_class_names,
-        document_link,
-        attachment_summary,
-        attachment_files_json,
-        task_description,
-        required_skill_level,
+        template.task_record_id,
+        template.tasks_key,
+        template.task_name,
+        template.parent_task_name,
+        template.task_order,
+        template.quantity,
+        template.estimated_task_time_seconds,
+        template.estimated_batch_task_time_seconds,
+        template.primary_phase_record_id,
+        template.primary_phase_name,
+        template.phase_record_ids,
+        template.phase_names,
+        template.primary_worker_record_id,
+        template.primary_worker_name,
+        template.assignee_email,
+        template.parity_mode,
+        template.supported_phase_record_id,
+        template.supported_phase_name,
+        template.supported_offset,
+        template.model_type_names,
+        template.frame_class_names,
+        template.document_link,
+        template.attachment_summary,
+        template.attachment_files_json,
+        template.task_description,
+        template.required_skill_level,
         bom.part_numbers as cnc_part_numbers,
         bom.sheet_names as cnc_sheet_names,
         bom.material_names as material_names
-      from hb.task_templates
-      left join reporting.task_template_bom bom using (task_record_id)
-      where coalesce(active, true)
-      order by task_order nulls last, parent_task_name nulls first, task_name
+      from hb.task_templates template
+      left join reporting.task_template_bom bom on bom.task_record_id = template.task_record_id
+      where coalesce(template.active, true)
+      order by template.task_order nulls last, template.parent_task_name nulls first, template.task_name
       limit 2000
     `),
     pool.query(`
