@@ -6568,8 +6568,12 @@ async function healthPayload() {
     pool.query("select current_database() as database_name, current_user as user_name, version() as postgres_version"),
     pool.query(`
       select
-        (select count(*)::int from reporting.hawley_worker_page_assignments) as assignment_rows,
-        (select count(distinct worker_email)::int from reporting.hawley_worker_page_assignments where worker_email is not null) as assigned_worker_count,
+        -- Health counts do not need the costly presentation-only joins in
+        -- hawley_worker_page_assignments.  This is the same assigned-task
+        -- population as reporting.daily_worker_assignments, directly from
+        -- the normalized task-instance source.
+        (select count(*)::int from hb.rev1_task_instances where assigned_on is not null) as assignment_rows,
+        (select count(distinct worker_email)::int from hb.rev1_task_instances where assigned_on is not null and worker_email is not null) as assigned_worker_count,
         (select count(*)::int from raw.asana_tasks where project_gid = $1) as daily_tracker_rows,
         (select count(*)::int from raw.airtable_phase_cycle_load) as raw_phase_cycle_load_rows,
         (select count(*)::int from raw.airtable_worker_cycle_bank) as raw_worker_cycle_bank_rows,

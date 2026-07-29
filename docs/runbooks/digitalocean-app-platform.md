@@ -343,6 +343,8 @@ Database health:
 GET /api/health
 ```
 
-Expected after migration/load: `ok: true` plus row counts for the worker read
-model, Daily Assignment Tracker mirror, workforce mirror, HB actuals, and the
-current Asana event watcher and nightly HB refresh states.
+Expected after migration/load: `ok: true` plus lightweight row counts from the
+normalized task-instance/read-model tables, the Daily Assignment Tracker mirror,
+workforce mirror, HB actuals, and the current Asana event watcher and nightly
+HB refresh states. The health probe deliberately avoids presentation-only views
+so it remains dependable during active shop use.

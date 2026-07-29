@@ -88,7 +88,10 @@ npm run pg:build:hb
 npm run pg:pull:asana-events
 ```
 
-The active local pilot process logs to `runtime-output/hawley-asana-events.out.log`. It is a local background process, not a persistent Windows scheduled task yet.
+Production Asana events now run as a one-minute DigitalOcean App Platform
+sidecar watcher. Its current state is reported by `/api/health` under
+`watchers.asanaEvents`; the local command remains useful only for an explicit
+operator-run repair or a development checkout.
 
 HB local rebuild only:
 
@@ -153,4 +156,8 @@ Verified on 2026-07-08:
 
 ## Next Step
 
-Move the Airtable pull to an overnight/legacy cadence and, after the pilot is trusted, move the Asana event watcher from this local session into the official host/service plan.
+The production refresh model is now in place: Airtable runs as the nightly
+source/mirror refresh, while the DigitalOcean-hosted Asana event watcher keeps
+task-state changes fresh on a one-minute interval. Future work should retain
+that server-hosted model rather than reintroducing an `SW_Machine` runtime
+dependency.
