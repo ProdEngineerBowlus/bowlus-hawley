@@ -46,9 +46,10 @@ Current deployment:
 - Asana events and the Worker Daily Actuals mirror refresh every minute.
 - The full HB refresh runs nightly at 1:00 a.m. Pacific, followed by the
   Airtable worker-actuals archive export.
-- That full refresh also mirrors the CNC Parts Master into
-  `raw.airtable_cnc_parts_master`; it remains source context and does not
-  affect pacing or worker assignments by itself.
+- That full refresh also mirrors `CNC Parts Master` and `CNC Sheets`, then
+  rebuilds the task-template BOM bridges for related parts, materials, and
+  sheet/program context. This is reference context only and does not affect
+  pacing or worker assignments by itself.
 
 See `docs/runbooks/digitalocean-app-platform.md` for the current deployment
 configuration and health checks.

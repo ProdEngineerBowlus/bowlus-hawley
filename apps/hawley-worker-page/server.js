@@ -271,7 +271,7 @@ function sendError(res, status, message, details = {}) {
 
 function publicErrorMessage(error) {
   const message = error.message || "";
-  if (/hawley_worker_page_assignments|hawley_cycle_calendar|hawley_reporting_day_summary|worker_daily_utilization|phase_cycle_load_rev1|phase_cycle_pace_overrides|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|task_templates|production_schedule|airtable_tasks|airtable_production|airtable_vins|airtable_models|hb\.vins|hb\.models|project_creation_runs|jsonb_display_text|task_transition_events|time_sessions|task_time_studies|task_time_study_laps|transition_category_catalog|app_users|app_sessions|app_auth_events/.test(message)) {
+  if (/hawley_worker_page_assignments|hawley_cycle_calendar|hawley_reporting_day_summary|worker_daily_utilization|phase_cycle_load_rev1|phase_cycle_pace_overrides|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|task_templates|production_schedule|airtable_tasks|airtable_production|airtable_vins|airtable_models|airtable_cnc_sheets|cnc_parts_master|cnc_sheets|task_template_(part_links|cnc_sheet_links|materials|bom)|hb\.vins|hb\.models|project_creation_runs|jsonb_display_text|task_transition_events|time_sessions|task_time_studies|task_time_study_laps|transition_category_catalog|app_users|app_sessions|app_auth_events/.test(message)) {
     return {
       status: 503,
       message: "Hawley worker read model is not migrated yet. Run npm run pg:migrate."
@@ -7232,8 +7232,12 @@ async function adminProjectCreatorPreview(options) {
         attachment_summary,
         attachment_files_json,
         task_description,
-        required_skill_level
+        required_skill_level,
+        bom.part_numbers as cnc_part_numbers,
+        bom.sheet_names as cnc_sheet_names,
+        bom.material_names as material_names
       from hb.task_templates
+      left join reporting.task_template_bom bom using (task_record_id)
       where coalesce(active, true)
       order by task_order nulls last, parent_task_name nulls first, task_name
       limit 2000
@@ -9901,6 +9905,9 @@ function adminAsanaCustomFields(task, preview, registry) {
   adminPutTextCustomField(payload, registry, "TasksKey", task.tasks_key);
   adminPutTextCustomField(payload, registry, "SOP Link", task.document_link);
   adminPutTextCustomField(payload, registry, "Attachment summary", task.attachment_summary);
+  adminPutTextCustomField(payload, registry, "CNC Parts", projectCreatorArray(task.cnc_part_numbers).join(", "));
+  adminPutTextCustomField(payload, registry, "CNC Sheets", projectCreatorArray(task.cnc_sheet_names).join(", "));
+  adminPutTextCustomField(payload, registry, "Materials", projectCreatorArray(task.material_names).join(", "));
   adminPutEnumCustomField(payload, registry, "Cycle", projectCreatorAsanaCycleLabel(schedule));
   const phaseOption = /^Phase A - (Lower|Upper)$/i.test(task.asanaSection || "")
     ? "Phase A"

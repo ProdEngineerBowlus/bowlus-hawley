@@ -55,7 +55,8 @@ Purpose: loss-preserving mirrors of external systems. These tables are not the p
 | `raw.airtable_production` | Airtable `Production` | `record_id` | Production schedule source for project creation. |
 | `raw.airtable_vins` | Airtable `VINs` | `record_id` | VIN model/frame context source for project creation. |
 | `raw.airtable_models` | Airtable `Models` | `record_id` | Model and frame-class context source for project creation. |
-| `raw.airtable_cnc_parts_master` | Airtable `CNC Parts Master` | `record_id` | Nightly loss-preserving mirror of CNC part number, sheet, material, component, model, and task relationships. It is source context only until a Hawley feature reads a normalized projection of it. |
+| `raw.airtable_cnc_parts_master` | Airtable `CNC Parts Master` | `record_id` | Nightly loss-preserving mirror of CNC part number, material, component, model, sheet, and task relationships. |
+| `raw.airtable_cnc_sheets` | Airtable `CNC Sheets` | `record_id` | Nightly loss-preserving mirror of CNC sheet material, dimensions, cost, parts-on-sheet, and task relationships. |
 | `raw.airtable_cycles` | Airtable `Cycles` | `record_id` | Cycle date and capacity source. |
 | `raw.airtable_work_force` | Airtable `Work Force` | `record_id` | Employee roster, skill, phase, and availability source. |
 | `raw.airtable_phases` | Airtable `Phases` | `record_id` | Phase, section, parity, and grouping source. |
@@ -84,12 +85,23 @@ Purpose: Hawley Brain. This is the preferred normalized shop model for schedulin
 | `hb.worker_phase_allocation_rev1` | one worker/cycle/phase allocation | `pg:build:hb` | Assigned, imported, exported, and cross-phase support hours. |
 | `hb.worker_cycle_bank_rev1` | one worker/cycle capacity bank | `pg:build:hb` | Worker cycle capacity, assigned hours, remaining hours, and effective bank. |
 | `hb.task_templates` | one task template | `pg:build:hb` | Postgres task-template model sourced from Airtable `Tasks`, including the normalized `Required Skill Level`. |
+| `hb.cnc_parts_master` | one CNC part | `pg:build:hb` | Normalized CNC part reference, including part number, material, quantities, model/component context, and its Airtable task and sheet links. |
+| `hb.cnc_sheets` | one CNC sheet/program | `pg:build:hb` | Normalized CNC sheet reference, including material, dimensions, cost, inventory context, parts-on-sheet, and linked tasks. |
+| `hb.task_template_part_links` | one task-template/part pair | `pg:build:hb` | Many-to-many task BOM bridge. `link_sources` preserves whether the relationship came from the task, part, or sheet side of the Airtable relationship. |
+| `hb.task_template_cnc_sheet_links` | one task-template/sheet pair | `pg:build:hb` | Many-to-many task CNC-sheet bridge, including direct and part-derived sheet context. |
+| `hb.task_template_materials` | one task-template/material pair | `pg:build:hb` | Material bridge compiled from the task’s lookup plus linked parts and sheets. |
 | `hb.production_schedule` | one production schedule row | `pg:build:hb` | Postgres production schedule sourced from Airtable `Production`. |
 | `hb.vins` | one VIN | `pg:build:hb` | Normalized VIN model and frame-class context for project creation. |
 | `hb.models` | one model/frame row | `pg:build:hb` | Normalized model/frame reference table for template filtering. |
 | `hb.project_creation_runs` | one admin create run | admin Project Creator | Audit/result table for Postgres-first Asana project creation. |
 | `hb.phase_cycle_pace_overrides` | one cycle/phase pace overlay | admin Dashboard | Non-destructive true start date overlay for phase pacing. |
 | `hb.cnc_program_runtime_profiles` | one D&E CNC program | CNC runtime importer | Historical runtime profile from Job History CSV files matched to the `C - Endless Highways` G-code catalog. The median completed-normal run is the app estimate. |
+
+`reporting.task_template_bom` is the task-centric read surface for this data. It
+returns each task template with its part count/numbers/names, CNC sheet
+count/names, and deduplicated material list. The source links stay Airtable
+owned; the view is rebuilt during `pg:build:hb` and never writes back to
+Airtable.
 
 ### Dual-project Frames 1 placement
 

@@ -927,6 +927,184 @@ function taskTemplateRows(rawRows, lookups) {
   return rows;
 }
 
+function cncPartRow(raw) {
+  const fields = raw.fields_json || {};
+  return {
+    part_record_id: raw.record_id,
+    part_number: text(fields["Part Number"]),
+    part_name: text(fields["Part Name"]),
+    quantity_on_sheet: numberValue(fields["Qty On Sheet"]),
+    total_count: numberValue(fields["Total Count"]),
+    retired: booleanValue(fields.Retired),
+    material_name: text(fields.Material),
+    sheet_material_names: nonRecordTextList(fields["Sheet Material"]),
+    model_type_record_ids: recordLinkedIds(fields["Model Type"]),
+    component_names: nonRecordTextList(fields.Component),
+    sub_component_record_ids: recordLinkedIds(fields["Sub Components"]),
+    installation_phase_record_ids: recordLinkedIds(fields["Installation Phase"]),
+    cnc_sheet_record_ids: recordLinkedIds(fields["CNC Sheets"]),
+    task_record_ids: recordLinkedIds(fields.Tasks),
+    engineering_change_record_ids: recordLinkedIds(fields["Engineering Changes"]),
+    frame_class_names: nonRecordTextList(fields["Frame Class"]),
+    fields_json: fields,
+    source_system: "airtable_cnc_parts_master",
+    source_synced_at: raw.synced_at
+  };
+}
+
+function cncSheetRow(raw) {
+  const fields = raw.fields_json || {};
+  return {
+    sheet_record_id: raw.record_id,
+    sheet_name: text(fields["Sheet Name"]),
+    sheet_number: numberValue(fields["Sheet Number"]),
+    material_name: text(fields.Material),
+    sheet_dimensions: text(fields["Sheet DImensions"]) || text(fields["Sheet Dimensions"]),
+    sheet_cost: numberValue(fields["Sheet Cost"]),
+    inventory_location: text(fields["Inventory Location"]),
+    gross_weight: numberValue(fields["Gross Weight"]),
+    average_price_per_part: numberValue(fields["Avg. Price Per Part"]),
+    frame_class_names: nonRecordTextList(fields["Frame Class"]),
+    model_type_names: nonRecordTextList(fields["Model Type"]),
+    part_record_ids: recordLinkedIds(fields["Parts On Sheet"]),
+    task_record_ids: recordLinkedIds(fields["Tasks 2"]),
+    fields_json: fields,
+    source_system: "airtable_cnc_sheets",
+    source_synced_at: raw.synced_at
+  };
+}
+
+function sourceTextList(value) {
+  const values = [];
+  const visit = item => {
+    if (item === null || item === undefined || item === "") return;
+    if (Array.isArray(item)) {
+      item.forEach(visit);
+      return;
+    }
+    if (typeof item === "object") {
+      if (item.valuesByLinkedRecordId) {
+        Object.values(item.valuesByLinkedRecordId).forEach(visit);
+        return;
+      }
+      visit(item.name ?? item.value ?? item.text ?? item.id);
+      return;
+    }
+    const normalized = String(item).trim();
+    if (normalized && !/^rec[a-z0-9]+$/i.test(normalized)) values.push(normalized);
+  };
+  visit(value);
+  return unique(values);
+}
+
+function addRelationship(map, key, source) {
+  if (!map.has(key)) map.set(key, new Set());
+  map.get(key).add(source);
+}
+
+function addTaskMaterial(materialsByTask, taskRecordId, materialName, source) {
+  const normalized = String(materialName || "").trim();
+  if (!taskRecordId || !normalized) return;
+  if (!materialsByTask.has(taskRecordId)) materialsByTask.set(taskRecordId, new Map());
+  const sources = materialsByTask.get(taskRecordId);
+  if (!sources.has(normalized)) sources.set(normalized, new Set());
+  sources.get(normalized).add(source);
+}
+
+function buildTaskTemplateBomRows(taskRaw, partRaw, sheetRaw) {
+  const tasksById = new Map(taskRaw.map(row => [row.record_id, row]));
+  const partsById = new Map(partRaw.map(row => [row.record_id, row]));
+  const sheetsById = new Map(sheetRaw.map(row => [row.record_id, row]));
+  const partLinks = new Map();
+  const sheetLinks = new Map();
+  const materialsByTask = new Map();
+  const partLinkKey = (taskRecordId, partRecordId) => `${taskRecordId}::${partRecordId}`;
+  const sheetLinkKey = (taskRecordId, sheetRecordId) => `${taskRecordId}::${sheetRecordId}`;
+  const linkPart = (taskRecordId, partRecordId, source) => {
+    if (!tasksById.has(taskRecordId) || !partRecordId) return;
+    addRelationship(partLinks, partLinkKey(taskRecordId, partRecordId), source);
+  };
+  const linkSheet = (taskRecordId, sheetRecordId, source) => {
+    if (!tasksById.has(taskRecordId) || !sheetRecordId) return;
+    addRelationship(sheetLinks, sheetLinkKey(taskRecordId, sheetRecordId), source);
+  };
+
+  for (const task of taskRaw) {
+    const fields = task.fields_json || {};
+    recordLinkedIds(fields["Parts Master"]).forEach(partRecordId => linkPart(task.record_id, partRecordId, "task_parts_master"));
+    recordLinkedIds(fields["CNC Sheets"]).forEach(sheetRecordId => linkSheet(task.record_id, sheetRecordId, "task_cnc_sheets"));
+    sourceTextList(fields.Material).forEach(material => addTaskMaterial(materialsByTask, task.record_id, material, "task_material_lookup"));
+  }
+
+  for (const part of partRaw) {
+    const fields = part.fields_json || {};
+    recordLinkedIds(fields.Tasks).forEach(taskRecordId => linkPart(taskRecordId, part.record_id, "part_master_tasks"));
+  }
+
+  for (const sheet of sheetRaw) {
+    const fields = sheet.fields_json || {};
+    recordLinkedIds(fields["Tasks 2"]).forEach(taskRecordId => linkSheet(taskRecordId, sheet.record_id, "cnc_sheet_tasks"));
+  }
+
+  // Resolve task -> part -> sheet and task -> sheet -> part links to a fixed
+  // point. This preserves both direct Airtable links and the useful context
+  // carried through their inverse links without inferring any new ownership.
+  for (let pass = 0; pass < 3; pass += 1) {
+    for (const key of Array.from(partLinks.keys())) {
+      const [taskRecordId, partRecordId] = key.split("::");
+      const part = partsById.get(partRecordId);
+      if (!part) continue;
+      const fields = part.fields_json || {};
+      sourceTextList(fields.Material).forEach(material => addTaskMaterial(materialsByTask, taskRecordId, material, "part_material"));
+      sourceTextList(fields["Sheet Material"]).forEach(material => addTaskMaterial(materialsByTask, taskRecordId, material, "part_sheet_material"));
+      recordLinkedIds(fields["CNC Sheets"]).forEach(sheetRecordId => linkSheet(taskRecordId, sheetRecordId, "via_part"));
+    }
+
+    for (const key of Array.from(sheetLinks.keys())) {
+      const [taskRecordId, sheetRecordId] = key.split("::");
+      const sheet = sheetsById.get(sheetRecordId);
+      if (!sheet) continue;
+      const fields = sheet.fields_json || {};
+      sourceTextList(fields.Material).forEach(material => addTaskMaterial(materialsByTask, taskRecordId, material, "sheet_material"));
+      recordLinkedIds(fields["Parts On Sheet"]).forEach(partRecordId => linkPart(taskRecordId, partRecordId, "sheet_parts"));
+    }
+  }
+
+  const partRows = Array.from(partLinks.entries()).map(([key, sources]) => {
+    const [task_record_id, part_record_id] = key.split("::");
+    return {
+      task_record_id,
+      part_record_id,
+      link_sources: Array.from(sources).sort(),
+      source_synced_at: maxTimestamp(tasksById.get(task_record_id)?.synced_at, partsById.get(part_record_id)?.synced_at)
+    };
+  });
+  const sheetRows = Array.from(sheetLinks.entries()).map(([key, sources]) => {
+    const [task_record_id, sheet_record_id] = key.split("::");
+    return {
+      task_record_id,
+      sheet_record_id,
+      link_sources: Array.from(sources).sort(),
+      source_synced_at: maxTimestamp(tasksById.get(task_record_id)?.synced_at, sheetsById.get(sheet_record_id)?.synced_at)
+    };
+  });
+  const materialRows = Array.from(materialsByTask.entries()).flatMap(([task_record_id, materials]) =>
+    Array.from(materials.entries()).map(([material_name, sources]) => ({
+      task_record_id,
+      material_name,
+      material_sources: Array.from(sources).sort(),
+      source_synced_at: tasksById.get(task_record_id)?.synced_at || null
+    }))
+  );
+
+  return { partRows, sheetRows, materialRows };
+}
+
+async function replaceRows(client, tableName, rows) {
+  await client.query(`delete from ${fullTableName(tableName)}`);
+  await insertRows(client, tableName, rows);
+}
+
 function modelRow(raw) {
   const fields = raw.fields_json || {};
   return {
@@ -1688,6 +1866,33 @@ async function normalizeBaseTables(client) {
     taskTemplates.map(row => row.task_record_id)
   );
 
+  const cncPartRaw = await rawRows(client, "raw.airtable_cnc_parts_master");
+  const cncParts = cncPartRaw.map(cncPartRow);
+  await upsertRows(client, "hb.cnc_parts_master", "part_record_id", cncParts);
+  await deleteSourceRowsNotSeen(
+    client,
+    "hb.cnc_parts_master",
+    "part_record_id",
+    "airtable_cnc_parts_master",
+    cncParts.map(row => row.part_record_id)
+  );
+
+  const cncSheetRaw = await rawRows(client, "raw.airtable_cnc_sheets");
+  const cncSheets = cncSheetRaw.map(cncSheetRow);
+  await upsertRows(client, "hb.cnc_sheets", "sheet_record_id", cncSheets);
+  await deleteSourceRowsNotSeen(
+    client,
+    "hb.cnc_sheets",
+    "sheet_record_id",
+    "airtable_cnc_sheets",
+    cncSheets.map(row => row.sheet_record_id)
+  );
+
+  const taskTemplateBom = buildTaskTemplateBomRows(taskTemplateRaw, cncPartRaw, cncSheetRaw);
+  await replaceRows(client, "hb.task_template_part_links", taskTemplateBom.partRows);
+  await replaceRows(client, "hb.task_template_cnc_sheet_links", taskTemplateBom.sheetRows);
+  await replaceRows(client, "hb.task_template_materials", taskTemplateBom.materialRows);
+
   const productionRaw = await rawRows(client, "raw.airtable_production");
   const productionSchedule = productionRaw.map(row => productionScheduleRow(row, lookups));
   await upsertRows(client, "hb.production_schedule", "production_record_id", productionSchedule);
@@ -1757,6 +1962,11 @@ async function normalizeBaseTables(client) {
     phases: phases.length,
     models: models.length,
     taskTemplates: taskTemplates.length,
+    cncParts: cncParts.length,
+    cncSheets: cncSheets.length,
+    taskTemplatePartLinks: taskTemplateBom.partRows.length,
+    taskTemplateSheetLinks: taskTemplateBom.sheetRows.length,
+    taskTemplateMaterials: taskTemplateBom.materialRows.length,
     productionSchedule: productionSchedule.length,
     vins: vins.length,
     taskInstances: allTaskRows.length,

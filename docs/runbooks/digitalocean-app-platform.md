@@ -46,6 +46,7 @@ HAWLEY_AIRTABLE_PRODUCTION_TABLE=Production
 HAWLEY_AIRTABLE_VINS_TABLE=VINs
 HAWLEY_AIRTABLE_MODELS_TABLE=Models
 HAWLEY_AIRTABLE_CNC_PARTS_MASTER_TABLE=CNC Parts Master
+HAWLEY_AIRTABLE_CNC_SHEETS_TABLE=CNC Sheets
 HAWLEY_ASANA_PORTFOLIO_SCOPE=both
 HAWLEY_ASANA_PROJECT_TEMPLATE_GID=1211664083967075
 HAWLEY_ASANA_FABRICATION_PORTFOLIO_GID=1212620750946278
@@ -284,8 +285,9 @@ npm run pg:refresh-hawley-read-model
 ```
 
 That refresh runs the Airtable pull and normalization before its Asana and HB
-rebuild stages. It refreshes the raw `CNC Parts Master` mirror along with the
-existing planning tables, writes only to Hawley/Postgres mirror and read-model
+rebuild stages. It refreshes the raw `CNC Parts Master` and `CNC Sheets`
+mirrors along with the existing planning tables, rebuilds the normalized
+task-template BOM links, writes only to Hawley/Postgres mirror and read-model
 tables, and does not write to Asana or Airtable. When the refresh exits cleanly,
 the chained Airtable backfill exports the latest Hawley-owned worker actual rows
 to Airtable.

@@ -70,6 +70,11 @@ const TABLES = Object.freeze([
     envKey: "HAWLEY_AIRTABLE_CNC_PARTS_MASTER_TABLE",
     sourceName: "CNC Parts Master",
     targetTable: "raw.airtable_cnc_parts_master"
+  },
+  {
+    envKey: "HAWLEY_AIRTABLE_CNC_SHEETS_TABLE",
+    sourceName: "CNC Sheets",
+    targetTable: "raw.airtable_cnc_sheets"
   }
 ]);
 

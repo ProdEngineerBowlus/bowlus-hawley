@@ -23,6 +23,8 @@ remain represented in the schema catalog.
 - `Worker Cycle Bank Rev1` -> `raw.airtable_worker_cycle_bank`
 - `Phases` -> `raw.airtable_phases`
 - `Worker Phase Allocation Rev1` -> `raw.airtable_worker_phase_allocation`
+- `CNC Parts Master` -> `raw.airtable_cnc_parts_master`
+- `CNC Sheets` -> `raw.airtable_cnc_sheets`
 
 ## Fields The Existing Bowlus Scripts Rely On
 
@@ -68,6 +70,23 @@ The admin project-creator path also mirrors:
 
 Those records normalize into `hb.task_templates` and
 `hb.production_schedule` for Postgres-backed admin features.
+
+## Task Parts, Materials, and CNC Sheets
+
+The task-template BOM is sourced from Airtable, not maintained separately in
+Hawley. The relevant relationships are:
+
+- `Tasks`: `Parts Master`, `CNC Sheets`, and the derived `Material` lookup.
+- `CNC Parts Master`: `Tasks`, `CNC Sheets`, `Material`, `Sheet Material`,
+  quantities, component context, and model context.
+- `CNC Sheets`: `Parts On Sheet`, `Tasks 2`, `Material`, dimensions, cost,
+  and inventory context.
+
+The nightly import mirrors all three records and `pg:build:hb` builds the
+many-to-many task/part, task/sheet, and task/material bridges. Query
+`reporting.task_template_bom` for the compact task-centric output. This is
+read-model context only; it does not alter project creation, pacing, task
+assignment, or Airtable source records.
 
 ## Phase Template Assignment Propagation
 
