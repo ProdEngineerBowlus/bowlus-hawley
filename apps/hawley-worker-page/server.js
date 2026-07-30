@@ -1567,9 +1567,9 @@ function taskFromRow(row) {
     targetHours: round(estimatedHours),
     estimatedHours: round(estimatedHours),
     estimatedMinutes: minutesFromHours(estimatedHours),
-    requiredSkillLevel: row.required_skill_level === null || row.required_skill_level === undefined
+    requiredSkillLevel: row.resolved_required_skill_level === null || row.resolved_required_skill_level === undefined
       ? null
-      : Number(row.required_skill_level),
+      : Number(row.resolved_required_skill_level),
     actualTimeMinutes: Number(row.actual_time_minutes || 0),
     actualTimeOnDateMinutes: 0,
     sourceUrl: publicLink(row.asana_permalink_url),
@@ -2721,6 +2721,7 @@ async function workerAssignments(date) {
     `
       select
         assignment.*,
+        coalesce(assignment.required_skill_level, template.required_skill_level) as resolved_required_skill_level,
         coalesce(bom.part_numbers, '{}'::text[]) as part_numbers,
         coalesce(bom.part_names, '{}'::text[]) as part_names,
         coalesce(bom.sheet_names, '{}'::text[]) as cnc_sheet_names,
@@ -2728,8 +2729,38 @@ async function workerAssignments(date) {
       from reporting.hawley_worker_page_assignments assignment
       left join hb.rev1_task_instances task_instance
         on task_instance.rev1_task_instance_id = assignment.task_instance_id
+      left join lateral (
+        select candidate.task_record_id
+        from (
+          select direct_template.task_record_id, 1 as match_rank
+          from hb.task_templates direct_template
+          where direct_template.task_record_id = task_instance.tasks_record_id
+
+          union all
+
+          select keyed_template.task_record_id, 2 as match_rank
+          from hb.task_templates keyed_template
+          where nullif(task_instance.tasks_key, '') is not null
+            and keyed_template.tasks_key = task_instance.tasks_key
+
+          union all
+
+          select named_template.task_record_id, 3 as match_rank
+          from hb.task_templates named_template
+          where named_template.task_name = assignment.task_name
+            and 1 = (
+              select count(*)
+              from hb.task_templates same_name
+              where same_name.task_name = assignment.task_name
+            )
+        ) candidate
+        order by candidate.match_rank, candidate.task_record_id
+        limit 1
+      ) resolved_template on true
+      left join hb.task_templates template
+        on template.task_record_id = resolved_template.task_record_id
       left join reporting.task_template_bom bom
-        on bom.task_record_id = task_instance.tasks_record_id
+        on bom.task_record_id = template.task_record_id
       where assignment.assigned_on = $1::date
       order by
         assignment.worker_name nulls last,
