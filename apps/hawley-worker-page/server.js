@@ -3392,10 +3392,23 @@ function actionError(message, statusCode = 400, details = {}) {
   return error;
 }
 
+function isFabPhase(value) {
+  const phase = String(value || "")
+    .trim()
+    .replace(/[–—]/g, "-")
+    .replace(/\s+/g, " ")
+    .toUpperCase();
+  return /^FAB(?:\s*-?\s*(?:A|B|1|2|3|1-3))?$/.test(phase);
+}
+
+function isFabBendingTask(task) {
+  return isFabPhase(task?.phase) || (!task?.phase && isFabPhase(task?.workArea));
+}
+
 async function ensureAutomaticBendingStudies(workers, date) {
   if (!isIsoDate(date) || date < todayIso()) return 0;
   const candidates = (workers || []).flatMap(worker => (worker.tasks || [])
-    .filter(task => task.hasBending && !task.completed && task.id)
+    .filter(task => task.hasBending && isFabBendingTask(task) && !task.completed && task.id)
     .map(task => ({ worker, task })));
   if (!candidates.length) return 0;
 
@@ -3475,6 +3488,57 @@ async function ensureAutomaticBendingStudies(workers, date) {
       ]
     );
     return inserted.rowCount || 0;
+  } finally {
+    client.release();
+  }
+}
+
+async function deactivateNonFabAutomaticBendingStudies() {
+  const client = await writePool.connect();
+  try {
+    const result = await client.query(
+      `
+        select task_time_study_id, worker_key, asana_task_gid, work_date::text as work_date,
+               coalesce(phase_key, '') as phase_key, coalesce(phase_name, '') as phase_name
+        from core.task_time_studies
+        where is_active
+          and auto_rule_key = $1
+      `,
+      [AUTOMATIC_BENDING_STUDY_RULE_KEY]
+    );
+    const incorrect = result.rows.filter(study => !isFabPhase(study.phase_key) && !isFabPhase(study.phase_name));
+    for (const study of incorrect) {
+      await client.query("begin");
+      try {
+        const stoppedAt = effectiveScheduledStopDate(new Date(), study.work_date) || new Date();
+        await closeActiveTimeStudyLaps(
+          client,
+          study.worker_key,
+          study.asana_task_gid,
+          study.work_date,
+          stoppedAt,
+          "template_rule_scope_corrected_non_fab",
+          null
+        );
+        await client.query(
+          `
+            update core.task_time_studies
+            set is_active = false,
+                ended_at = $2::timestamptz,
+                ended_reason = 'template_rule_scope_corrected_non_fab',
+                updated_at = now()
+            where task_time_study_id = $1
+              and is_active
+          `,
+          [study.task_time_study_id, stoppedAt.toISOString()]
+        );
+        await client.query("commit");
+      } catch (error) {
+        await client.query("rollback").catch(() => {});
+        throw error;
+      }
+    }
+    return { deactivated: incorrect.length };
   } finally {
     client.release();
   }
@@ -11492,6 +11556,12 @@ async function startServer() {
     console.log("[hawley-bending-study]", JSON.stringify(summary));
   } catch (error) {
     console.error(`[hawley-bending-study] source refresh failed: ${error.message}`);
+  }
+  try {
+    const summary = await deactivateNonFabAutomaticBendingStudies();
+    console.log("[hawley-bending-study]", JSON.stringify(summary));
+  } catch (error) {
+    console.error(`[hawley-bending-study] non-FAB cleanup failed: ${error.message}`);
   }
   await applyRuntimeReadGrants();
   try {
