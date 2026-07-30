@@ -10247,6 +10247,64 @@ async function adminFreshTaskAttachmentsByRecordId(tasks) {
   return attachmentsByRecordId;
 }
 
+async function refreshBendingTemplateFlagsFromAirtable() {
+  const token = process.env.AIRTABLE_PAT;
+  const baseId = process.env.AIRTABLE_BASE || process.env.AIRTABLE_BASE_ID;
+  if (!token || !baseId) return { skipped: "Airtable credentials are not configured." };
+
+  const records = [];
+  let offset = "";
+  do {
+    const url = new URL(`${ADMIN_AIRTABLE_API_BASE}/${encodeURIComponent(baseId)}/${encodeURIComponent(ADMIN_AIRTABLE_TASKS_TABLE)}`);
+    url.searchParams.set("pageSize", "100");
+    url.searchParams.append("fields[]", "Has Bending?");
+    if (offset) url.searchParams.set("offset", offset);
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    const responseText = await response.text();
+    if (!response.ok) throw new Error(`Airtable bending-flag refresh failed (${response.status}).`);
+    const payload = JSON.parse(responseText);
+    records.push(...(payload.records || []));
+    offset = payload.offset || "";
+  } while (offset);
+
+  if (!records.length) return { refreshed: 0 };
+  const recordIds = records.map(record => record.id);
+  const flags = records.map(record => Boolean(record.fields?.["Has Bending?"]));
+  const client = await writePool.connect();
+  try {
+    await client.query("begin");
+    await client.query(
+      `
+        update raw.airtable_tasks task
+        set fields_json = jsonb_set(coalesce(task.fields_json, '{}'::jsonb), array['Has Bending?'], to_jsonb(source.has_bending), true),
+            synced_at = now()
+        from unnest($1::text[], $2::boolean[]) as source(record_id, has_bending)
+        where task.record_id = source.record_id
+      `,
+      [recordIds, flags]
+    );
+    const updated = await client.query(
+      `
+        update hb.task_templates template
+        set has_bending = source.has_bending,
+            normalized_at = now()
+        from unnest($1::text[], $2::boolean[]) as source(task_record_id, has_bending)
+        where template.task_record_id = source.task_record_id
+          and template.has_bending is distinct from source.has_bending
+        returning template.task_record_id
+      `,
+      [recordIds, flags]
+    );
+    await client.query("commit");
+    return { refreshed: records.length, changed: updated.rowCount || 0 };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function insertAdminProjectCreationRows(preview, runId, projectName, actor, requestJson) {
   const client = await writePool.connect();
   const runSchedule = preview.schedule || {};
@@ -11428,6 +11486,12 @@ async function startServer() {
     await applyAuthSchemaMigrationIfNeeded();
   } catch (error) {
     console.error(`Hawley auth schema migration failed: ${error.message}`);
+  }
+  try {
+    const summary = await refreshBendingTemplateFlagsFromAirtable();
+    console.log("[hawley-bending-study]", JSON.stringify(summary));
+  } catch (error) {
+    console.error(`[hawley-bending-study] source refresh failed: ${error.message}`);
   }
   await applyRuntimeReadGrants();
   try {
