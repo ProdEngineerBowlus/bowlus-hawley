@@ -1575,7 +1575,7 @@
                     ? `<button class="btn ${studyLapRunning ? "danger" : "ghost"}" type="button" data-action="${studyLapRunning ? "stop-time-study" : "start-time-study"}" data-task-id="${escapeAttr(task.id)}" data-study-key="${escapeAttr(timeStudy.id)}" ${(!studyLapRunning && !timerRunning) || busy ? "disabled" : ""}>${studyLapRunning ? `Stop ${escapeHtml(timeStudy.label)}` : `Start ${escapeHtml(timeStudy.label)}`}</button>
                        ${timeStudyAdminEnabled() ? `<button class="btn ghost" type="button" data-action="record-time-study" data-task-id="${escapeAttr(task.id)}" data-study-key="${escapeAttr(timeStudy.id)}" data-study-label="${escapeAttr(timeStudy.label)}" ${busy ? "disabled" : ""}>Record past time</button><button class="btn ghost" type="button" data-action="end-time-study" data-task-id="${escapeAttr(task.id)}" data-study-key="${escapeAttr(timeStudy.id)}" ${busy ? "disabled" : ""}>End study</button>` : ""}`
                     : timeStudyAdminEnabled()
-                      ? `<button class="btn ghost" type="button" data-action="apply-time-study" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>Apply time study</button>`
+                      ? `<button class="btn ghost" type="button" data-action="apply-time-study" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>Add custom study</button>`
                       : ""}
                 </div>`
               : ""

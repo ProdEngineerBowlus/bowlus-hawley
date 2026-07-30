@@ -125,7 +125,7 @@ workers do not multiply its pacing capacity.
 
 ## Manager-Controlled Task Time Studies
 
-An admin can open a worker's assigned-task page, choose **Apply time study** on
+An admin can open a worker's assigned-task page, choose **Add custom study** on
 an open task, and name the measurement (for example, `Bending`). The worker
 then sees a small Start/Stop control for that named lap while the normal task
 timer is running. This supports focused studies without creating Asana subtasks
