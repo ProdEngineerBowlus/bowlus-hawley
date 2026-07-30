@@ -138,6 +138,17 @@ parent task timer stops, ends, completes, or is schedule-auto-stopped. Study
 minutes therefore do not change Asana time entries, worker actuals, efficiency,
 pacing, or capacity.
 
+### Template-driven Bending study
+
+`Tasks → Has Bending?` in Airtable is the source flag for the `Bending` study.
+After the normal Airtable refresh, Hawley automatically adds a ready Bending
+lap control to every open assignment for a checked template on the current or
+a future workday. This is not automatic time capture: the worker still starts
+and stops the Bending lap while the normal task timer is running. The flag can
+be changed in Airtable without an app code change. Ending an auto-created study
+keeps it ended for that worker, task, and day; it will still be available for a
+new assignment or a later workday.
+
 For a one-time recovery of observations made before the feature was enabled,
 an admin can apply a study to an assigned task (including a completed task) and
 choose **Record past time**. The entry captures observed minutes, an optional

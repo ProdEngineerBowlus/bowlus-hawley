@@ -138,6 +138,8 @@ const SHOP_DAILY_AVAILABLE_MINUTES = 460;
 const SHOP_DAILY_AVAILABLE_HOURS = SHOP_DAILY_AVAILABLE_MINUTES / 60;
 const SHOP_SCHEDULE_CORRECTION_SOURCE = "7:00-15:30 America/Los_Angeles minus 09:00-09:10, 11:00-11:30, 13:30-13:40";
 const OVER_CAPACITY_FLAG = "over_daily_capacity";
+const AUTOMATIC_BENDING_STUDY_LABEL = "Bending";
+const AUTOMATIC_BENDING_STUDY_RULE_KEY = "airtable_has_bending_v1";
 
 const runtimeDatabaseConfig = getDatabaseConfig({ useSyncUrl: true });
 const pool = new Pool(runtimeDatabaseConfig);
@@ -1570,6 +1572,7 @@ function taskFromRow(row) {
     requiredSkillLevel: row.resolved_required_skill_level === null || row.resolved_required_skill_level === undefined
       ? null
       : Number(row.resolved_required_skill_level),
+    hasBending: Boolean(row.has_bending),
     actualTimeMinutes: Number(row.actual_time_minutes || 0),
     actualTimeOnDateMinutes: 0,
     sourceUrl: publicLink(row.asana_permalink_url),
@@ -2319,14 +2322,51 @@ async function enrichSnapshotWorkersFromRaw(workers) {
   const result = await pool.query(
     `
       select
-        gid,
-        name,
-        completed,
-        actual_time_minutes,
-        permalink_url,
-        custom_fields_json
-      from raw.asana_tasks
-      where gid = any($1::text[])
+        asana_task.gid,
+        asana_task.name,
+        asana_task.completed,
+        asana_task.actual_time_minutes,
+        asana_task.permalink_url,
+        asana_task.custom_fields_json,
+        coalesce(template.has_bending, false) as has_bending
+      from raw.asana_tasks asana_task
+      left join lateral (
+        select instance.*
+        from hb.rev1_task_instances instance
+        where instance.asana_task_gid = asana_task.gid
+        order by instance.normalized_at desc nulls last, instance.rev1_task_instance_id desc
+        limit 1
+      ) task_instance on true
+      left join lateral (
+        select candidate.task_record_id
+        from (
+          select direct_template.task_record_id, 1 as match_rank
+          from hb.task_templates direct_template
+          where direct_template.task_record_id = task_instance.tasks_record_id
+
+          union all
+
+          select keyed_template.task_record_id, 2 as match_rank
+          from hb.task_templates keyed_template
+          where nullif(task_instance.tasks_key, '') is not null
+            and keyed_template.tasks_key = task_instance.tasks_key
+
+          union all
+
+          select named_template.task_record_id, 3 as match_rank
+          from hb.task_templates named_template
+          where named_template.task_name = asana_task.name
+            and 1 = (
+              select count(*)
+              from hb.task_templates same_name
+              where same_name.task_name = asana_task.name
+            )
+        ) candidate
+        order by candidate.match_rank, candidate.task_record_id
+        limit 1
+      ) resolved_template on true
+      left join hb.task_templates template on template.task_record_id = resolved_template.task_record_id
+      where asana_task.gid = any($1::text[])
     `,
     [taskIds]
   );
@@ -2347,6 +2387,7 @@ async function enrichSnapshotWorkersFromRaw(workers) {
       task.sourceUrl = publicLink(row.permalink_url) || task.sourceUrl;
       task.actualTimeMinutes = Number(row.actual_time_minutes || 0);
       task.actualTimeOnDateMinutes = Number(task.actualTimeOnDateMinutes || 0);
+      task.hasBending = Boolean(row.has_bending);
       task.sopUrl = publicLink(textValue(fields["SOP Link"]) || task.sopUrl);
       task.estimatedMinutes = estimatedMinutes || task.estimatedMinutes || minutesFromHours(task.assignedHours);
       if (estimatedMinutes) {
@@ -2722,6 +2763,7 @@ async function workerAssignments(date) {
       select
         assignment.*,
         coalesce(assignment.required_skill_level, template.required_skill_level) as resolved_required_skill_level,
+        coalesce(template.has_bending, false) as has_bending,
         coalesce(bom.part_numbers, '{}'::text[]) as part_numbers,
         coalesce(bom.part_names, '{}'::text[]) as part_names,
         coalesce(bom.sheet_names, '{}'::text[]) as cnc_sheet_names,
@@ -3300,6 +3342,7 @@ async function dailyAssignmentsPayload(url, authActor = null) {
 
   const workers = visibleWorkersForRequest(allWorkers, employee, includeNoWork);
   await attachWorkerTaskActualHistory(workers);
+  await ensureAutomaticBendingStudies(workers, date);
   await attachWorkerTaskTimeStudies(workers, date);
   const cncMachine = await attachCncMachineRunData(workers, date);
   const managerLineOverview = employee
@@ -3347,6 +3390,94 @@ function actionError(message, statusCode = 400, details = {}) {
   error.statusCode = statusCode;
   Object.assign(error, details);
   return error;
+}
+
+async function ensureAutomaticBendingStudies(workers, date) {
+  if (!isIsoDate(date) || date < todayIso()) return 0;
+  const candidates = (workers || []).flatMap(worker => (worker.tasks || [])
+    .filter(task => task.hasBending && !task.completed && task.id)
+    .map(task => ({ worker, task })));
+  if (!candidates.length) return 0;
+
+  const client = await writePool.connect();
+  try {
+    const inserted = await client.query(
+      `
+        insert into core.task_time_studies (
+          study_key, worker_key, worker_name, worker_email, asana_task_gid,
+          task_instance_id, task_name, phase_key, phase_name, work_date, label,
+          auto_rule_key, source_payload
+        )
+        select
+          candidate.study_key,
+          candidate.worker_key,
+          candidate.worker_name,
+          candidate.worker_email,
+          candidate.asana_task_gid,
+          candidate.task_instance_id,
+          candidate.task_name,
+          candidate.phase_key,
+          candidate.phase_name,
+          $1::date,
+          $2,
+          $3,
+          candidate.source_payload::jsonb
+        from unnest(
+          $4::text[], $5::text[], $6::text[], $7::text[], $8::text[],
+          $9::bigint[], $10::text[], $11::text[], $12::text[], $13::text[]
+        ) as candidate(
+          study_key, worker_key, worker_name, worker_email, asana_task_gid,
+          task_instance_id, task_name, phase_key, phase_name, source_payload
+        )
+        where not exists (
+          select 1
+          from core.task_time_studies active_study
+          where active_study.worker_key = candidate.worker_key
+            and active_study.asana_task_gid = candidate.asana_task_gid
+            and active_study.work_date = $1::date
+            and active_study.is_active
+        )
+          and not exists (
+            select 1
+            from core.task_time_studies prior_automatic_study
+            where prior_automatic_study.worker_key = candidate.worker_key
+              and prior_automatic_study.asana_task_gid = candidate.asana_task_gid
+              and prior_automatic_study.work_date = $1::date
+              and prior_automatic_study.auto_rule_key = $3
+        )
+        on conflict (worker_key, work_date, asana_task_gid) where is_active do nothing
+        returning task_time_study_id
+      `,
+      [
+        date,
+        AUTOMATIC_BENDING_STUDY_LABEL,
+        AUTOMATIC_BENDING_STUDY_RULE_KEY,
+        candidates.map(({ worker, task }) => `study:${crypto.randomUUID()}`),
+        candidates.map(({ worker }) => worker.id),
+        candidates.map(({ worker }) => worker.name || ""),
+        candidates.map(({ worker }) => worker.email || ""),
+        candidates.map(({ task }) => String(task.id)),
+        candidates.map(({ task }) => {
+          const taskInstanceId = Number(task.taskInstanceId);
+          return Number.isInteger(taskInstanceId) && taskInstanceId > 0 ? taskInstanceId : null;
+        }),
+        candidates.map(({ task }) => task.title || ""),
+        candidates.map(({ task }) => phaseKeyForTask(task) || ""),
+        candidates.map(({ task }) => phaseNameForTask(task) || ""),
+        candidates.map(({ worker, task }) => JSON.stringify({
+          createdFrom: "airtable_task_template_flag",
+          ruleKey: AUTOMATIC_BENDING_STUDY_RULE_KEY,
+          sourceField: "Has Bending?",
+          sourceValue: true,
+          workerKey: worker.id,
+          asanaTaskGid: String(task.id)
+        }))
+      ]
+    );
+    return inserted.rowCount || 0;
+  } finally {
+    client.release();
+  }
 }
 
 async function readJsonBody(req) {

@@ -882,6 +882,7 @@ function taskTemplateRow(raw, lookups) {
       durationSeconds(fields["Estimated Batch Task Time"]) ??
       durationSeconds(fields["Estimated Time (w/ Qty)"]),
     required_skill_level: numberValue(fields["Required Skill Level"]),
+    has_bending: booleanValue(fields["Has Bending?"]),
     primary_phase_record_id: phaseIds[0] || null,
     primary_phase_name: phaseNames[0] || null,
     phase_record_ids: phaseIds,

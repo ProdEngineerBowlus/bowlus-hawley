@@ -84,7 +84,7 @@ Purpose: Hawley Brain. This is the preferred normalized shop model for schedulin
 | `hb.phase_cycle_load_rev1` | one phase/cycle load bucket | `pg:build:hb` | Remaining, completed, and total load by phase/cycle. The Admin Phase-Cycle Burn-Down uses it when its rebuild is at least as fresh as the Airtable PCL snapshot. |
 | `hb.worker_phase_allocation_rev1` | one worker/cycle/phase allocation | `pg:build:hb` | Assigned, imported, exported, and cross-phase support hours. |
 | `hb.worker_cycle_bank_rev1` | one worker/cycle capacity bank | `pg:build:hb` | Worker cycle capacity, assigned hours, remaining hours, and effective bank. |
-| `hb.task_templates` | one task template | `pg:build:hb` | Postgres task-template model sourced from Airtable `Tasks`, including the normalized `Required Skill Level`. |
+| `hb.task_templates` | one task template | `pg:build:hb` | Postgres task-template model sourced from Airtable `Tasks`, including the normalized `Required Skill Level` and `Has Bending?` flag. |
 | `hb.cnc_parts_master` | one CNC part | `pg:build:hb` | Normalized CNC part reference, including part number, material, quantities, model/component context, and its Airtable task and sheet links. |
 | `hb.cnc_sheets` | one CNC sheet/program | `pg:build:hb` | Normalized CNC sheet reference, including material, dimensions, cost, inventory context, parts-on-sheet, and linked tasks. |
 | `hb.task_template_part_links` | one task-template/part pair | `pg:build:hb` | Many-to-many task BOM bridge. `link_sources` preserves whether the relationship came from the task, part, or sheet side of the Airtable relationship. |
@@ -145,7 +145,7 @@ Purpose: Hawley-owned runtime data. These are the tables Hawley can own directly
 | `core.task_completion_evidence` | one worker contribution to one completed task instance | Historical task completion, timing, confidence, assistance, quality, and verification evidence. |
 | `core.worker_task_capabilities` | one worker/task-template pair | Refreshable capability rollup with completion counts, median/recent timing, consistency, and verification state. |
 | `core.cnc_machine_runs` | one physical CNC sheet run | Hawley worker app | Parallel D&E cut tied to an Asana task/program. Stores observed cut window, credited historical machine time, and only the excess operator-support minutes. |
-| `core.task_time_studies` | one admin-applied task study | Hawley worker app | A named, admin-managed study on one worker/task/day. It is intentionally separate from labor actuals. |
+| `core.task_time_studies` | one admin- or template-applied task study | Hawley worker app | A named study on one worker/task/day. `auto_rule_key` identifies source-driven studies such as Airtable `Tasks → Has Bending?`; it is intentionally separate from labor actuals. |
 | `core.task_time_study_laps` | one study lap | Hawley worker app | Measured interval belonging to a task time study. `capture_mode` distinguishes live worker laps from admin-entered `manual_retroactive` observations. Its minutes never roll into worker actuals, Asana time entries, pacing, or efficiency. |
 
 ### Admin-Owned Overlays
