@@ -1703,6 +1703,48 @@ button {
   margin-top: 9px;
 }
 
+.task-resources {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(79, 122, 105, 0.38);
+  border-radius: 7px;
+  background: rgba(36, 61, 49, 0.22);
+}
+
+.task-resource-heading {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.task-resource-grid {
+  display: grid;
+  gap: 8px;
+  margin-top: 7px;
+}
+
+.task-resource-group {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-resource-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.task-resource-item {
+  color: var(--text);
+  font-weight: 650;
+}
+
 .task-note {
   margin: 11px 0 0;
   color: var(--muted);

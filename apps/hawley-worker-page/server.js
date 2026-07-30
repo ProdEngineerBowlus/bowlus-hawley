@@ -1484,6 +1484,22 @@ function cleanDisplayList(value) {
     .join(", ");
 }
 
+function taskReferenceItems(value) {
+  const values = Array.isArray(value)
+    ? value
+    : String(value || "").split(",");
+  const seen = new Set();
+  return values
+    .map(item => String(item || "").trim())
+    .filter(Boolean)
+    .filter(item => {
+      const key = item.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
 function slugify(value) {
   return String(value || "")
     .toLowerCase()
@@ -1559,6 +1575,10 @@ function taskFromRow(row) {
     sourceUrl: publicLink(row.asana_permalink_url),
     trackerUrl: "",
     sopUrl: publicLink(row.sop_link || row.document_link),
+    partNumbers: taskReferenceItems(row.part_numbers),
+    partNames: taskReferenceItems(row.part_names),
+    cncSheetNames: taskReferenceItems(row.cnc_sheet_names),
+    materialNames: taskReferenceItems(row.material_names),
     sourceSyncedAt: row.source_synced_at,
     inferenceSource: row.inference_source || ""
   };
@@ -2699,14 +2719,23 @@ async function workerAssignments(date) {
 
   const result = await pool.query(
     `
-      select *
-      from reporting.hawley_worker_page_assignments
-      where assigned_on = $1::date
+      select
+        assignment.*,
+        coalesce(bom.part_numbers, '{}'::text[]) as part_numbers,
+        coalesce(bom.part_names, '{}'::text[]) as part_names,
+        coalesce(bom.sheet_names, '{}'::text[]) as cnc_sheet_names,
+        coalesce(bom.material_names, '{}'::text[]) as material_names
+      from reporting.hawley_worker_page_assignments assignment
+      left join hb.rev1_task_instances task_instance
+        on task_instance.rev1_task_instance_id = assignment.task_instance_id
+      left join reporting.task_template_bom bom
+        on bom.task_record_id = task_instance.tasks_record_id
+      where assignment.assigned_on = $1::date
       order by
-        worker_name nulls last,
-        completed,
-        coalesce(inferred_work_area_name, phase_name, section_column, ''),
-        task_name
+        assignment.worker_name nulls last,
+        assignment.completed,
+        coalesce(assignment.inferred_work_area_name, assignment.phase_name, assignment.section_column, ''),
+        assignment.task_name
     `,
     params
   );

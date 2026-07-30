@@ -165,9 +165,16 @@ That view enriches `reporting.daily_worker_assignments` with:
 
 - source Asana permalink
 - Airtable SOP/document links
+- linked Task Template BOM context: Parts Master numbers/names, CNC sheets, and materials
 - Asana completion state
 - inferred work area from the operational capability map
 - source sync timestamp
+
+When a task has linked BOM context, its worker card displays a **Parts &
+materials** section. This is reference-only: it does not change assignments,
+estimates, timers, or pacing. Maintain the links on the Airtable `Tasks`
+template record; the normal Airtable-to-Hawley mirror then supplies the updated
+references to the worker app.
 
 Manager mode uses active records from Hawley's mirrored `Work Force` data in
 `raw.airtable_work_force`, as the strict employee roster. Dated assignment

@@ -1450,6 +1450,48 @@
       .join("");
   }
 
+  function taskReferenceList(value) {
+    return Array.isArray(value)
+      ? value.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+  }
+
+  function renderTaskResourceGroup(label, items) {
+    if (!items.length) return "";
+    return `
+      <div class="task-resource-group">
+        <span>${escapeHtml(label)}</span>
+        <div class="task-resource-items">
+          ${items.map((item) => `<span class="task-resource-item">${escapeHtml(item)}</span>`).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderTaskResources(task) {
+    const partNumbers = taskReferenceList(task.partNumbers);
+    const partNames = taskReferenceList(task.partNames);
+    const parts = partNumbers.map((number, index) => {
+      const name = partNames[index] || "";
+      return name ? `${number} — ${name}` : number;
+    });
+    const extraPartNames = partNames.slice(partNumbers.length);
+    const sheets = taskReferenceList(task.cncSheetNames);
+    const materials = taskReferenceList(task.materialNames);
+    if (!parts.length && !extraPartNames.length && !sheets.length && !materials.length) return "";
+
+    return `
+      <section class="task-resources" aria-label="Parts and materials">
+        <div class="task-resource-heading">Parts &amp; materials</div>
+        <div class="task-resource-grid">
+          ${renderTaskResourceGroup("Parts", [...parts, ...extraPartNames])}
+          ${renderTaskResourceGroup("CNC sheets", sheets)}
+          ${renderTaskResourceGroup("Materials", materials)}
+        </div>
+      </section>
+    `;
+  }
+
   function renderTaskCard(task, locked, canControl = locked) {
     const busy = state.actionTaskId === task.id;
     const sopUrl = safeExternalUrl(task.sopUrl);
@@ -1516,6 +1558,7 @@
             ${task.vin ? `<span class="chip">VIN ${escapeHtml(task.vin)}</span>` : ""}
             <span class="status-pill${task.completed ? " done" : ""}">${task.completed ? "Done" : "Open"}</span>
           </div>
+          ${renderTaskResources(task)}
           ${
             canControl
               ? `<div class="work-actions${cncMachine ? " cnc-actions" : ""}" data-task-id="${escapeAttr(task.id)}">
