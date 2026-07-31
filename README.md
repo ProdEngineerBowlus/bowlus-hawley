@@ -26,6 +26,10 @@ Codex/agent tools.
   available to its Hawley worker; those tasks may run alongside other
   Engineering Changes timers and are explicitly excluded from production
   pacing and capacity.
+- Airtable `Tasks`.`Avg. Time`, its qualifying-input count, and `Avg. Time
+  Quality` are mirrored into Hawley's task-template model. Airtable remains
+  the current calculation authority; the mirrored data makes a future Hawley
+  calculation/writeback transition auditable.
 - Airtable worker actuals are an overnight archive/export target, not the live
   execution source.
 

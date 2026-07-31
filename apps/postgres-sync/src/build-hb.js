@@ -881,6 +881,12 @@ function taskTemplateRow(raw, lookups) {
       durationSeconds(fields["Estimated Batched Task Time"]) ??
       durationSeconds(fields["Estimated Batch Task Time"]) ??
       durationSeconds(fields["Estimated Time (w/ Qty)"]),
+    // Keep Airtable's existing historical-time baseline intact while it is the
+    // calculation authority. Avg. Time is stored by Airtable as seconds and
+    // may contain a fractional arithmetic mean, so it remains numeric in HB.
+    avg_time_seconds: numberValue(fields["Avg. Time"]),
+    avg_time_input_count: integerValue(fields["Avg. Time Input Count"]),
+    avg_time_quality: text(fields["Avg. Time Quality"]),
     required_skill_level: numberValue(fields["Required Skill Level"]),
     has_bending: booleanValue(fields["Has Bending?"]),
     primary_phase_record_id: phaseIds[0] || null,

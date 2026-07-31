@@ -1582,6 +1582,13 @@ function taskFromRow(row) {
     targetHours: round(estimatedHours),
     estimatedHours: round(estimatedHours),
     estimatedMinutes: minutesFromHours(estimatedHours),
+    averageTimeMinutes: row.avg_time_seconds === null || row.avg_time_seconds === undefined
+      ? null
+      : Math.round(Number(row.avg_time_seconds) / 60),
+    averageTimeInputCount: row.avg_time_input_count === null || row.avg_time_input_count === undefined
+      ? null
+      : Number(row.avg_time_input_count),
+    averageTimeQuality: row.avg_time_quality || "No Data",
     requiredSkillLevel: row.resolved_required_skill_level === null || row.resolved_required_skill_level === undefined
       ? null
       : Number(row.resolved_required_skill_level),
@@ -2780,6 +2787,9 @@ async function workerAssignments(date) {
         task_instance.task_type,
         coalesce(assignment.required_skill_level, template.required_skill_level) as resolved_required_skill_level,
         coalesce(template.has_bending, false) as has_bending,
+        template.avg_time_seconds,
+        template.avg_time_input_count,
+        template.avg_time_quality,
         coalesce(bom.part_numbers, '{}'::text[]) as part_numbers,
         coalesce(bom.part_names, '{}'::text[]) as part_names,
         coalesce(bom.sheet_names, '{}'::text[]) as cnc_sheet_names,
