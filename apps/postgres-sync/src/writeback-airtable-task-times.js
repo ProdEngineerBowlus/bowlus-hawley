@@ -249,6 +249,21 @@ async function recordWritebackState(client, runId, candidates) {
   }
 }
 
+async function updateLocalAirtableMirror(client, candidates) {
+  for (const candidate of candidates) {
+    const rawTable = candidate.targetTable === TASK_INSTANCES_TABLE
+      ? "raw.airtable_task_instances"
+      : "raw.airtable_tasks";
+    await client.query(
+      `update ${rawTable}
+       set fields_json = coalesce(fields_json, '{}'::jsonb) || $2::jsonb,
+           synced_at = now()
+       where record_id = $1`,
+      [candidate.id, JSON.stringify(candidate.fields)]
+    );
+  }
+}
+
 async function runOnce(args) {
   const writeEnabled = canWrite(args);
   const summary = {
@@ -290,6 +305,10 @@ async function runOnce(args) {
         baseId, tableName: TASKS_TABLE, token, updates: averageCandidates
       });
       const written = [...instanceCandidates, ...averageCandidates];
+      // A successful Airtable PATCH is immediately reflected in the local raw
+      // mirror. The next minute therefore only writes a genuinely new Hawley
+      // change; it does not resend this same payload until the nightly pull.
+      await updateLocalAirtableMirror(client, written);
       await recordWritebackState(client, runId, written);
       summary.recordsWritten = summary.taskInstanceUpdates + summary.taskAverageUpdates;
     }
