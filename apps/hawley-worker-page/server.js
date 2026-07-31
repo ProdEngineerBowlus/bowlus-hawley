@@ -1746,6 +1746,7 @@ function taskFromRow(row) {
     cncSheetNames: taskReferenceItems(row.cnc_sheet_names),
     materialNames: taskReferenceItems(row.material_names),
     sourceSyncedAt: row.source_synced_at,
+    asanaModifiedAt: row.asana_modified_at || row.source_synced_at || "",
     inferenceSource: row.inference_source || ""
   };
 }
@@ -2640,12 +2641,21 @@ function applyWorkerDailyActualRows(workers, actualRows) {
       existingTask.ledgerBackfilled = true;
       existingTask.ledgerSource = row.source || "Worker Daily Task Actuals";
       existingTask.ledgerSyncedAt = row.syncedAt || "";
-      // Asana is the source of truth for current completion and assignment.
-      // A Hawley ledger row records work history, and must not re-complete a
-      // task that a manager reopened or re-add a task after reassignment.
-      // The manager override is the narrow exception: it is written only
-      // after Hawley successfully reopens the source Asana task, and bridges
-      // the short delay before the Asana mirror refreshes PostgreSQL.
+      // Hawley completions render as Done immediately. A later source-system
+      // reopen wins, so a manager can safely resume the task without losing
+      // its already-recorded minutes.
+      const sourceChangedAt = Date.parse(existingTask.asanaModifiedAt || "");
+      const ledgerCompletedAt = Date.parse(row.syncedAt || "");
+      const sourceReopenedLater = !existingTask.completed
+        && Number.isFinite(sourceChangedAt)
+        && Number.isFinite(ledgerCompletedAt)
+        && sourceChangedAt > ledgerCompletedAt;
+      if (row.completed && row.source === "Hawley task completed" && !sourceReopenedLater) {
+        existingTask.completed = true;
+        existingTask.status = "Done";
+      }
+      // A manager override is written only after Hawley successfully reopens
+      // the source Asana task, and bridges the short mirror-refresh delay.
       if (row.source === "Hawley manager completion override") {
         existingTask.completed = false;
         existingTask.status = "Open";
@@ -2928,6 +2938,7 @@ async function workerAssignments(date) {
         task_instance.asana_portfolio_name,
         task_instance.asana_project_name,
         task_instance.task_type,
+        source_task.modified_at as asana_modified_at,
         coalesce(assignment.required_skill_level, template.required_skill_level) as resolved_required_skill_level,
         coalesce(template.has_bending, false) as has_bending,
         template.avg_time_seconds,
@@ -2940,6 +2951,8 @@ async function workerAssignments(date) {
       from reporting.hawley_worker_page_assignments assignment
       left join hb.rev1_task_instances task_instance
         on task_instance.rev1_task_instance_id = assignment.task_instance_id
+      left join raw.asana_tasks source_task
+        on source_task.gid = assignment.asana_task_gid
       left join lateral (
         select candidate.task_record_id
         from (
@@ -4207,6 +4220,15 @@ function liveTimerFromRow(row) {
   };
 }
 
+function sourceReopenedAfterLedger(task, record) {
+  if (!task || task.completed || !record) return false;
+  const sourceChangedAt = Date.parse(task.asanaModifiedAt || "");
+  const ledgerUpdatedAt = Date.parse(record.last_seen_at || record.source_synced_at || "");
+  return Number.isFinite(sourceChangedAt)
+    && Number.isFinite(ledgerUpdatedAt)
+    && sourceChangedAt > ledgerUpdatedAt;
+}
+
 function liveTimerElapsedMinutes(timer, now, workDate = "") {
   const accumulated = Number(timer?.accumulatedMinutes || 0);
   if (!timer?.startedAt) return accumulated;
@@ -4270,6 +4292,8 @@ async function readLiveActualRecord(client, ledgerKey) {
         timer_minutes,
         asana_posted_minutes,
         completed,
+        last_seen_at,
+        source_synced_at,
         fields_json
       from hb.worker_daily_task_actuals
       where ledger_key = $1
@@ -5961,7 +5985,8 @@ async function handleWorkerTaskAction(req) {
     }
 
     const authAudit = actorAuditPayload(authActor, worker.id);
-    let current = liveTimerFromRow(currentRecord) || await readLiveActualRow(client, ledgerKey);
+    if (!currentRecord) currentRecord = await readLiveActualRecord(client, ledgerKey);
+    let current = liveTimerFromRow(currentRecord);
 
     if (action === "start" && isCncParallelOperator(worker) && isCncProgramTask(task)) {
       throw actionError("Use Start cut for a CNC sheet. This keeps machine runtime separate from David's labor time.", 409, {
@@ -6024,6 +6049,48 @@ async function handleWorkerTaskAction(req) {
     }
 
     if (action === "start") {
+      // A direct Asana reopen can arrive after Hawley has completed the
+      // ledger row. Preserve recorded minutes and the posting watermark, but
+      // reconcile the local completion flag so the task can be resumed.
+      if (current?.completed && sourceReopenedAfterLedger(task, currentRecord)) {
+        const reopened = await upsertLiveWorkerActual(client, worker, task, date, {
+          ...current,
+          startedAt: "",
+          accumulatedMinutes: current.accumulatedMinutes,
+          actualMinutes: current.actualMinutes,
+          asanaPostedMinutes: current.asanaPostedMinutes
+        }, {
+          actualMinutes: current.actualMinutes,
+          timerMinutes: current.accumulatedMinutes,
+          asanaPostedMinutes: current.asanaPostedMinutes,
+          completed: false,
+          completionPending: false,
+          timeEntryCreated: current.timeEntryCreated,
+          sourceLabel: "Hawley completion synchronized from Asana reopen",
+          seenAt: nowIso,
+          authActor
+        });
+        current = {
+          ...current,
+          completed: false,
+          startedAt: "",
+          accumulatedMinutes: reopened.timerMinutes,
+          actualMinutes: reopened.actualMinutes,
+          asanaPostedMinutes: reopened.asanaPostedMinutes
+        };
+        await tryWorkerTransitionLedger("source-reopen", async () => {
+          await recordWorkerTaskEvent(client, worker, task, date, "reopen", nowIso, {
+            authActor,
+            payload: {
+              ...authAudit,
+              ledgerKey,
+              source: "asana_reopen_sync",
+              preservedActualMinutes: reopened.actualMinutes,
+              preservedAsanaPostedMinutes: reopened.asanaPostedMinutes
+            }
+          });
+        });
+      }
       if (current?.completed) {
         throw actionError("This task is already completed in the Hawley timer ledger.", 409);
       }

@@ -17,6 +17,9 @@ Codex/agent tools.
   and app-readable reporting model.
 - Hawley owns live worker timer/session events in Postgres. A completed worker
   task posts its verified elapsed time and completion to Asana.
+- A later Asana reopen supersedes a Hawley completion for the task's current
+  state, while Hawley preserves the existing session minutes and Asana-posted
+  watermark. The worker can then resume without duplicating logged time.
 - David's parallel CNC sheet runs are stored separately from labor sessions.
   Machine runtime is visible to the worker and manager, but it is excluded from
   the CNC operator's daily utilization so simultaneous sheets cannot multiply
