@@ -670,9 +670,11 @@ function runBuildHb() {
   });
 }
 
-function runFullAsanaRecrawl() {
+function runFullAsanaRecrawl(scopedPortfolio = "") {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["./apps/postgres-sync/src/pull-asana.js"], {
+    const args = ["./apps/postgres-sync/src/pull-asana.js"];
+    if (scopedPortfolio) args.push("--portfolio", scopedPortfolio);
+    const child = spawn(process.execPath, args, {
       cwd: process.cwd(),
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"]
@@ -717,8 +719,14 @@ async function pollOnce(args) {
     const recrawlProjects = args.initOnly ? [] : await projectsNeedingFullRecrawl(client, projects);
     if (recrawlProjects.length) {
       summary.fullRecrawlProjects = recrawlProjects.length;
+      // Engineering Changes is a direct, independent project scope. Its first
+      // event cursor should seed only that project, not trigger an expensive
+      // recrawl of every VIN/Fabrication project and delay normal freshness.
+      const engineeringOnly = recrawlProjects.every(project =>
+        String(project.portfolio_name || "").trim().toLowerCase() === "engineering changes"
+      );
       await client.end();
-      await runFullAsanaRecrawl();
+      await runFullAsanaRecrawl(engineeringOnly ? "engineering" : "");
       summary.fullRecrawlCompleted = true;
       client = new Client(getDatabaseConfig({ useSyncUrl: true }));
       await client.connect();

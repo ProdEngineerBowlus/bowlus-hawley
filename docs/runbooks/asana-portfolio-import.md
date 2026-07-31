@@ -9,6 +9,8 @@ It also mirrors the standalone `Engineering Changes` project
 (`1212721039355237`). Engineering Changes is a direct project scope rather
 than an Asana portfolio. Its assigned tasks are valid worker-tracking work, but
 they are excluded from production load, capacity, phase pace, and burn-down.
+Its first event-cursor baseline recrawls this direct project alone, so it does
+not delay the one-minute VIN/Fabrication freshness loop.
 
 The source import is read-only against Asana. It writes only to local Postgres.
 
