@@ -21,6 +21,9 @@ Codex/agent tools.
   Machine runtime is visible to the worker and manager, but it is excluded from
   the CNC operator's daily utilization so simultaneous sheets cannot multiply
   his productive hours.
+- Engineering Changes is a direct Asana project mirror. Assigned tasks are
+  available to their Hawley worker, may run alongside other Engineering Changes
+  timers, and are explicitly excluded from production pacing and capacity.
 - Airtable worker actuals are an overnight archive/export target, not the live
   execution source.
 
@@ -78,10 +81,11 @@ npm run pg:refresh-worker-read-model
 `pg:health` only checks the database connection. It does not contact Asana or
 Airtable.
 
-`pg:pull:asana` reads the `Fabrication - 2026` and `VINs - 2026` portfolios
-from Asana and mirrors portfolios, portfolio-project membership, projects,
-tasks, subtasks, custom fields, and task project/section memberships into the
-local Postgres `raw` schema.
+`pg:pull:asana` reads the `Fabrication - 2026` and `VINs - 2026` portfolios,
+plus the direct `Engineering Changes` project, from Asana and mirrors scope
+membership, projects, tasks, subtasks, custom fields, and task project/section
+memberships into the local Postgres `raw` schema. Use
+`--portfolio engineering` to refresh Engineering Changes alone.
 
 `pg:refresh-worker-read-model` is the fast worker-page path. It pulls Asana and
 rebuilds HB tables. It does not pull or write Airtable. The broader
@@ -89,9 +93,9 @@ rebuilds HB tables. It does not pull or write Airtable. The broader
 legacy planning mirror.
 
 `pg:watch:asana-events` is the one-minute pilot updater. It reads Asana project
-events for the VINs/Fabrication portfolio projects, fetches changed task rows,
-updates HB/Postgres, and rebuilds HB only when changed tasks are found. It does
-not write to Asana or Airtable.
+events for the VIN/Fabrication scopes and Engineering Changes, fetches changed
+task rows, updates HB/Postgres, and rebuilds HB only when changed tasks are
+found. It does not write to Asana or Airtable.
 
 Hawley's operational capability map lives in the `ops` schema and reporting
 views. It combines Airtable `Work Force` skill levels, observed Rev1/Asana task

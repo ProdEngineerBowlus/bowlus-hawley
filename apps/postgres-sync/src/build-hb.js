@@ -1311,6 +1311,8 @@ function applyAsanaOverlay(row, asana, lookups) {
   const fieldsByName = asanaFieldsByName(rawFields);
   const asanaFields = asanaFieldDisplayMap(fieldsByName);
   const sourceContext = asanaSourceContext(asana);
+  const isEngineeringChange = String(asana.portfolio_name || "").trim().toLowerCase() === "engineering changes"
+    || String(asana.portfolio_task_type || "").trim().toLowerCase() === "engineering change";
   const sourceSection = sourceContext.sectionName;
   const displaySourceSection = c12C13FabSkillFallbackSection(asana, sourceContext) || sourceSection;
   const completed = Boolean(asana.completed);
@@ -1435,7 +1437,12 @@ function applyAsanaOverlay(row, asana, lookups) {
   }
 
   row.document_link = asanaText(fieldsByName, ["Document Link", "SOP Link"]) || row.document_link;
-  row.active_in_production = Boolean(row.assigned_on || row.active_in_production);
+  // Engineering Changes is worker-trackable administrative work, not
+  // production work. It must never add load, capacity, or pace pressure to a
+  // phase cycle merely because it has an Assigned On date.
+  row.active_in_production = isEngineeringChange
+    ? false
+    : Boolean(row.assigned_on || row.active_in_production);
   row.last_synced_at = asana.modified_at || asana.synced_at || row.last_synced_at;
   row.fields_json = {
     ...asanaFields,

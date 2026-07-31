@@ -106,6 +106,7 @@ const CNC_PARALLEL_OPERATOR_EMAILS = new Set(
     .filter(Boolean)
 );
 const CNC_PARALLEL_MAX_ACTIVE_RUNS = Math.max(1, Number(process.env.HAWLEY_CNC_PARALLEL_MAX_ACTIVE_RUNS || 3));
+const ADMIN_PARALLEL_MAX_ACTIVE_TIMERS = Math.max(1, Number(process.env.HAWLEY_ADMIN_PARALLEL_MAX_ACTIVE_TIMERS || 3));
 const CNC_MACHINE_COUNT = Math.max(1, Number(process.env.HAWLEY_CNC_MACHINE_COUNT || 2));
 const CNC_MACHINE_OVERRUN_MINUTES = Math.max(5, Number(process.env.HAWLEY_CNC_MACHINE_OVERRUN_MINUTES || 10));
 const CNC_MACHINE_OVERRUN_RATIO = Math.max(1, Number(process.env.HAWLEY_CNC_MACHINE_OVERRUN_RATIO || 1.35));
@@ -364,6 +365,14 @@ function isCncProgramTask(task) {
   const title = String(task?.title || "").trim();
   return /\bcnc\b/i.test(String(task?.phase || task?.workArea || ""))
     && /^\d{1,3}-[a-z]\d{2,5}(?:[_ -][a-z0-9]+)+(?:\.nc)?$/i.test(title);
+}
+
+function isParallelAdminTask(task) {
+  // Engineering Changes is administrative execution work. It may be tracked
+  // concurrently with other Engineering Changes tasks, but never with a
+  // standard production task. The classification comes from the server read
+  // model, so a browser cannot opt a production task into parallel time.
+  return task?.trackingMode === "parallel_admin";
 }
 
 function cncMachineAlertAfterMinutes(expectedMinutes) {
@@ -1552,12 +1561,16 @@ function taskFromRow(row) {
   const estimatedHours = Number(row.estimated_hours || 0);
   const phase = formatPhaseName(row.phase_name || row.inferred_work_area_name);
   const workArea = formatPhaseName(row.inferred_work_area_name || row.phase_name || row.section_column || "Unspecified");
+  const isEngineeringChange = String(row.asana_portfolio_name || "").trim().toLowerCase() === "engineering changes"
+    || String(row.task_type || "").trim().toLowerCase() === "engineering change";
   return {
     id: taskId(row),
     taskInstanceId: row.task_instance_id,
     airtableRecordId: row.airtable_record_id,
     asanaTaskGid: row.asana_task_gid,
     title: row.task_name || "(Untitled task)",
+    projectName: row.asana_project_name || "",
+    trackingMode: isEngineeringChange ? "parallel_admin" : "standard",
     completed: Boolean(row.completed),
     status: row.completed ? "Done" : "Open",
     phase,
@@ -2762,6 +2775,9 @@ async function workerAssignments(date) {
     `
       select
         assignment.*,
+        task_instance.asana_portfolio_name,
+        task_instance.asana_project_name,
+        task_instance.task_type,
         coalesce(assignment.required_skill_level, template.required_skill_level) as resolved_required_skill_level,
         coalesce(template.has_bending, false) as has_bending,
         coalesce(bom.part_numbers, '{}'::text[]) as part_numbers,
@@ -4111,7 +4127,7 @@ async function readLiveActualRecord(client, ledgerKey) {
   return result.rows[0] || null;
 }
 
-async function blockingLiveTimerForWorker(client, workerId, date, exceptTaskId = "") {
+async function blockingLiveTimerForWorker(client, workerId, date, exceptTaskId = "", options = {}) {
   const result = await client.query(
     `
       select
@@ -4136,11 +4152,15 @@ async function blockingLiveTimerForWorker(client, workerId, date, exceptTaskId =
       order by
         source_synced_at desc nulls last,
         worker_daily_actual_id desc
-      limit 1
     `,
     [workerId, date, String(exceptTaskId || ""), LIVE_WORKER_SOURCE]
   );
-  return liveTimerFromRow(result.rows[0]);
+  const allowParallelAdmin = Boolean(options.allowParallelAdmin);
+  const blockingRow = result.rows.find(row => {
+    if (!allowParallelAdmin) return true;
+    return String(row.fields_json?.["Tracking Mode"] || "standard") !== "parallel_admin";
+  });
+  return liveTimerFromRow(blockingRow);
 }
 
 async function runningLiveTimerForWorker(client, workerId, date) {
@@ -4288,6 +4308,7 @@ function liveActualFields(worker, task, date, timer, options = {}) {
     "VIN": task.vin || "",
     "Cycle": formatCycleName(task.cycle),
     "Phase": formatPhaseName(task.phase || task.workArea),
+    "Tracking Mode": task.trackingMode || "standard",
     "Assigned Hours": Number(task.assignedHours || task.estimatedHours || 0),
     "Allocated Hours": Number(task.targetHours || task.assignedHours || task.estimatedHours || 0),
     "Actual Minutes": actualMinutes,
@@ -5871,13 +5892,39 @@ async function handleWorkerTaskAction(req) {
         });
       }
 
-      const blocking = await blockingLiveTimerForWorker(client, worker.id, date, task.id);
+      const blocking = await blockingLiveTimerForWorker(client, worker.id, date, task.id, {
+        allowParallelAdmin: isParallelAdminTask(task)
+      });
       if (blocking) {
-        throw actionError("Complete the current task, or have a manager use End Session, before starting another task.", 409, {
-          code: "TIMER_SESSION_BLOCKED",
-          blockingTaskId: blocking.taskId,
-          blockingTaskName: blocking.taskName || ""
-        });
+        throw actionError(
+          isParallelAdminTask(task)
+            ? "Stop the active production timer before starting parallel Engineering Changes tracking."
+            : "Stop the active Engineering Changes timer or complete the current task before starting a production timer.",
+          409,
+          {
+            code: "TIMER_SESSION_BLOCKED",
+            blockingTaskId: blocking.taskId,
+            blockingTaskName: blocking.taskName || ""
+          }
+        );
+      }
+
+      if (isParallelAdminTask(task)) {
+        const activeParallelResult = await client.query(`
+          select count(*)::int as count
+          from hb.worker_daily_task_actuals
+          where worker_key = $1
+            and work_date = $2::date
+            and coalesce(completed, false) = false
+            and source_system = $3
+            and coalesce(fields_json ->> 'Timer Started At', '') <> ''
+            and coalesce(fields_json ->> 'Tracking Mode', 'standard') = 'parallel_admin'
+        `, [worker.id, date, LIVE_WORKER_SOURCE]);
+        if (Number(activeParallelResult.rows[0]?.count || 0) >= ADMIN_PARALLEL_MAX_ACTIVE_TIMERS) {
+          throw actionError(`A maximum of ${ADMIN_PARALLEL_MAX_ACTIVE_TIMERS} parallel Engineering Changes timers is allowed. Stop one before starting another.`, 409, {
+            code: "ADMIN_PARALLEL_TIMER_LIMIT"
+          });
+        }
       }
 
       const timer = {
@@ -10942,8 +10989,14 @@ async function updateAdminProjectTaskAsanaLink(createdTask, projectGid, projectN
 
 function runAdminProjectAsanaMirrorSync(projectType, projectGid) {
   const portfolio = projectType === "Fabrication" ? "fabrication" : "vin";
+  return runAsanaScopeMirrorSync(portfolio, projectGid);
+}
+
+function runAsanaScopeMirrorSync(scope, projectGid = "") {
+  const args = ["run", "pg:pull:asana", "--", "--portfolio", scope];
+  if (projectGid) args.push("--project", projectGid);
   return new Promise((resolve, reject) => {
-    const child = spawn(npmCommand(), ["run", "pg:pull:asana", "--", "--portfolio", portfolio, "--project", projectGid], {
+    const child = spawn(npmCommand(), args, {
       cwd: repoRoot,
       env: process.env,
       windowsHide: true
@@ -10960,6 +11013,19 @@ function runAdminProjectAsanaMirrorSync(projectType, projectGid) {
       else reject(new Error(`Hawley project Asana mirror sync exited ${code}: ${output.trim().slice(-2000)}`));
     });
   });
+}
+
+async function refreshEngineeringChangesProjectScope() {
+  if (!process.env.ASANA_PAT || !syncDatabaseConfigured()) return;
+  try {
+    await runAsanaScopeMirrorSync("engineering");
+    await runAdminProjectDownstreamRebuild();
+    console.log("[hawley-engineering-changes] initial mirror and read-model rebuild completed.");
+  } catch (error) {
+    // This is a non-blocking startup refresh. The nightly full refresh retries
+    // it, and a transient Asana problem must never prevent worker operations.
+    console.error(`[hawley-engineering-changes] initial mirror failed: ${error.message || String(error)}`);
+  }
 }
 
 async function registerUnmirroredAdminProjects() {
@@ -11592,6 +11658,10 @@ async function startServer() {
         }));
       });
     }, 1000).unref?.();
+    // Engineering Changes is a direct Asana project (not a portfolio). Seed
+    // it once after deploy; the normal one-minute event watcher takes over
+    // once its project row and cursor exist.
+    setTimeout(() => refreshEngineeringChangesProjectScope(), 1500).unref?.();
   });
 }
 

@@ -231,6 +231,24 @@ project-local and workspace-shared field named `Assigned On`; Hawley prefers
 the project-local field because that is the field managers edit for the daily
 plan.
 
+### Engineering Changes admin tracking
+
+`Engineering Changes` is mirrored directly from its Asana project, in addition
+to the VIN and Fabrication portfolios. To appear on an admin's Hawley page, an
+Engineering Changes task needs both its Asana assignee and an **Assigned On**
+date for the selected day.
+
+These tasks have the **Engineering Changes · parallel** badge. Up to three of
+them may run at once for the same person; a normal production timer and a
+parallel Engineering Changes timer cannot overlap. The normal shop-day clock
+(7:00 a.m.–3:30 p.m., breaks and lunch excluded) still applies.
+
+Each parallel admin timer records the elapsed time for its own workstream. It
+is administrative tracking only: it is excluded from production capacity,
+phase pace, and burn-down. Keep concurrent timers limited to work that is
+actually being monitored concurrently; future study terms can add a more
+specific allocation or focus model without changing production time records.
+
 ## Parallel CNC cuts (David A)
 
 Each CNC sheet has one **Start cut / Stop cut** control. David starts it when

@@ -5,6 +5,11 @@ Hawley mirrors the same 2026 Asana scope that `Task Instances Rev1` imports:
 - `Fabrication - 2026` (`1212620750946278`)
 - `VINs - 2026` (`1212620750946276`)
 
+It also mirrors the standalone `Engineering Changes` project
+(`1212721039355237`). Engineering Changes is a direct project scope rather
+than an Asana portfolio. Its assigned tasks are valid worker-tracking work, but
+they are excluded from production load, capacity, phase pace, and burn-down.
+
 The source import is read-only against Asana. It writes only to local Postgres.
 
 ## Command
@@ -18,6 +23,7 @@ Useful scoped checks:
 ```powershell
 npm run pg:pull:asana -- --portfolio fabrication --limit-projects 1
 npm run pg:pull:asana -- --portfolio vin --skip-subtasks
+npm run pg:pull:asana -- --portfolio engineering
 ```
 
 ## Mirrored Tables
@@ -45,6 +51,7 @@ The existing Shop Ops Rev1 bootstrap script maps these portfolios this way:
 
 - Fabrication portfolio -> `Cycle Project`
 - VIN portfolio -> `VIN Project`
+- Engineering Changes direct project -> `Engineering Change`
 
 Hawley stores that `task_type` on `raw.asana_portfolio_projects` so the later
 normalization layer can reproduce the Rev1 distinctions instead of treating all

@@ -1514,6 +1514,9 @@
     const studyChip = timeStudy
       ? `<span class="chip purple">Study: ${escapeHtml(timeStudy.label)}${studyLapRunning ? ` ${formatMinutes(studyElapsedMinutes)} running` : timeStudy.totalMinutes ? ` ${formatMinutes(timeStudy.totalMinutes)} logged` : " ready"}</span>`
       : "";
+    const parallelAdminChip = task.trackingMode === "parallel_admin"
+      ? `<span class="chip purple" title="Can run with other Engineering Changes tasks; follows the normal shop-day and break clock.">Engineering Changes · parallel</span>`
+      : "";
     const estimateChip = renderEstimateChip(task);
     const taskLoggedMinutes = taskActualLoggedMinutes(task);
     const taskWipMinutes = taskActualWipMinutes(task);
@@ -1552,6 +1555,7 @@
             ${taskLoggedMinutes ? `<span class="chip green">${formatMinutes(taskLoggedMinutes)} logged</span>` : ""}
             ${taskWipMinutes ? `<span class="chip wip">${escapeHtml(wipLabel)}</span>` : ""}
             ${cncChip}
+            ${parallelAdminChip}
             ${studyChip}
             ${canEndSession ? `<button class="chip action-chip" type="button" data-action="release-timer" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>End session</button>` : ""}
             ${task.phase ? `<span class="chip yellow">${escapeHtml(task.phase)}</span>` : ""}
@@ -2081,9 +2085,12 @@
   }
 
   async function startWorkerTimer(employee, taskId) {
-    const activeTask = findActiveTimerTask(taskId);
+    const requestedTask = findTaskById(taskId);
+    const activeTask = findActiveTimerTask(taskId, requestedTask?.trackingMode === "parallel_admin");
     if (activeTask) {
-      showToast(`Complete "${activeTask.title}" or ask a manager to end that session before starting another task.`);
+      showToast(requestedTask?.trackingMode === "parallel_admin"
+        ? `Stop production task "${activeTask.title}" before starting parallel Engineering Changes tracking.`
+        : `Stop "${activeTask.title}" or ask a manager to end that session before starting a production task.`);
       return;
     }
 
@@ -2617,7 +2624,7 @@
     return null;
   }
 
-  function findActiveTimerTask(exceptTaskId) {
+  function findActiveTimerTask(exceptTaskId, allowParallelAdmin = false) {
     const worker = getSelectedWorker();
     if (!worker) return null;
 
@@ -2627,7 +2634,8 @@
       // Accumulated minutes without a start time mean this task is paused.
       // Preserve that WIP for later resume, but do not treat it as the one
       // currently running manual labor timer.
-      return Boolean(timer.startedAt);
+      if (!timer.startedAt) return false;
+      return !allowParallelAdmin || task.trackingMode !== "parallel_admin";
     });
   }
 

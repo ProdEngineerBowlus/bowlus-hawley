@@ -17,17 +17,32 @@ const PORTFOLIOS = Object.freeze({
     gid: process.env.HAWLEY_ASANA_VIN_PORTFOLIO_GID || "1212620750946276",
     expectedName: "VINs - 2026",
     taskType: "VIN Project"
+  },
+  engineeringChanges: {
+    // Engineering work is intentionally a first-class Hawley mirror source,
+    // while the read model keeps it out of production pacing because it has
+    // no production-cycle linkage.
+    gid: process.env.HAWLEY_ASANA_ENGINEERING_CHANGES_PROJECT_GID || "1212721039355237",
+    expectedName: "Engineering Changes",
+    taskType: "Engineering Change",
+    // Unlike the production sources, Engineering Changes is one Asana project,
+    // not an Asana portfolio. Treat it as a direct project scope.
+    scopeType: "project"
   }
 });
 
 const PORTFOLIO_ALIASES = Object.freeze({
-  both: ["fabrication", "vin"],
-  all: ["fabrication", "vin"],
+  both: ["fabrication", "vin", "engineeringChanges"],
+  all: ["fabrication", "vin", "engineeringChanges"],
   cycle: ["fabrication"],
   fabrication: ["fabrication"],
   fab: ["fabrication"],
   vin: ["vin"],
-  vins: ["vin"]
+  vins: ["vin"],
+  engineering: ["engineeringChanges"],
+  engineeringchanges: ["engineeringChanges"],
+  engineering_changes: ["engineeringChanges"],
+  eco: ["engineeringChanges"]
 });
 
 const PROJECT_OPT_FIELDS = [
@@ -120,7 +135,7 @@ function parseArgs(argv) {
         "Usage: npm run pg:pull:asana -- [options]",
         "",
         "Options:",
-        "  --portfolio both|fabrication|cycle|vin",
+        "  --portfolio both|fabrication|cycle|vin|engineering",
         "  --project GID          Pull one project under the selected portfolio context.",
         "  --limit-projects N     Limit project count for testing.",
         "  --skip-subtasks        Pull top-level project tasks only.",
@@ -134,7 +149,7 @@ function parseArgs(argv) {
   }
 
   if (!PORTFOLIO_ALIASES[args.portfolio]) {
-    throw new Error("--portfolio must be both, fabrication, cycle, or vin.");
+    throw new Error("--portfolio must be both, fabrication, cycle, vin, or engineering.");
   }
   if (args.projectGid && args.limitProjects > 0) {
     throw new Error("--project and --limit-projects cannot be combined.");
@@ -682,14 +697,19 @@ async function main() {
   try {
     for (const key of selectedPortfolioKeys(args)) {
       const config = PORTFOLIOS[key];
-      const portfolio = await asana.getPortfolio(config.gid);
+      const directProjectScope = config.scopeType === "project";
+      const portfolio = directProjectScope
+        ? { gid: config.gid, name: config.expectedName }
+        : await asana.getPortfolio(config.gid);
       await upsertPortfolio(client, portfolio);
       summary.recordsRead += 1;
       summary.recordsWritten += 1;
 
       const portfolioItems = args.projectGid
         ? [{ gid: args.projectGid, name: args.projectGid, resource_type: "project" }]
-        : await asana.getPortfolioItems(config.gid);
+        : directProjectScope
+          ? [{ gid: config.gid, name: config.expectedName, resource_type: "project" }]
+          : await asana.getPortfolioItems(config.gid);
       const scopedItems = args.limitProjects > 0 ? portfolioItems.slice(0, args.limitProjects) : portfolioItems;
       const currentProjectGids = scopedItems.map(item => item.gid);
 
