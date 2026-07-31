@@ -1,10 +1,11 @@
 # Task Average-Time Model
 
-## Current Source and Mirror
+## Current Source and Writeback
 
-The Airtable `Tasks` table currently calculates the historical task baseline.
-Hawley mirrors the three values below into `hb.task_templates` and exposes them
-on worker-task API records. This mirror is read-only with respect to Airtable.
+Hawley calculates the historical task baseline from its canonical task-instance
+history. Airtable retains the existing `Task Instances Rev1` records, template
+links, and planning controls. Hawley writes only the current actual-time value
+and the three derived average fields below.
 
 | Airtable Tasks field | Hawley field | Meaning |
 | --- | --- | --- |
@@ -22,9 +23,17 @@ anomalies before the arithmetic mean is calculated.
 The quality bands are: `No Data` for 0 inputs, `Very Low` for 1, `Low` for 2-3,
 `Medium` for 4-6, `High` for 7-8, and `Very High` for 9 or more.
 
-## Future Hawley Ownership
+## Writeback and Safety
 
-Before Hawley becomes the source, implement the same qualification rule against
-its normalized task-instance history, compare its results with the Airtable
-mirror over multiple refreshes, and only then approve a narrowly scoped Airtable
-writeback. Until that verification is complete, Airtable remains authoritative.
+`pg:writeback:airtable-task-times` is dry-run by default. With `--apply`,
+`HAWLEY_ALLOW_SOURCE_WRITES=true`, and `HAWLEY_DRY_RUN=false`, it:
+
+- updates `Task Instances Rev1.Actual time` from Hawley's canonical cumulative
+  Asana-backed task actual when it differs; and
+- recalculates `Tasks.Avg. Time`, `Avg. Time Input Count`, and `Avg. Time
+  Quality` with the qualification rule above.
+
+Successful writes are recorded in `sync.airtable_task_time_writeback_state` and
+in `sync.run_log`. The production web service runs the writeback every minute
+as a supervised sidecar. A no-change pass makes no Airtable requests, so the
+legacy history remains intact and Airtable stays fresh without needless edits.

@@ -26,12 +26,13 @@ Codex/agent tools.
   available to its Hawley worker; those tasks may run alongside other
   Engineering Changes timers and are explicitly excluded from production
   pacing and capacity.
-- Airtable `Tasks`.`Avg. Time`, its qualifying-input count, and `Avg. Time
-  Quality` are mirrored into Hawley's task-template model. Airtable remains
-  the current calculation authority; the mirrored data makes a future Hawley
-  calculation/writeback transition auditable.
-- Airtable worker actuals are an overnight archive/export target, not the live
-  execution source.
+- Hawley reconciles canonical task actuals back to the corresponding Airtable
+  `Task Instances Rev1` record every minute. It also
+  calculates and writes `Tasks`.`Avg. Time`, its qualifying-input count, and
+  `Avg. Time Quality`; linked history, planning, and assignment data remain
+  untouched in Airtable.
+- Airtable worker actuals are a human-readable mirror, not the live execution
+  source.
 
 The worker app is live for approved worker writes. Planning and project-creation
 writes remain separately gated.
@@ -52,7 +53,8 @@ Current deployment:
 
 - App Platform web service runs `npm run worker:hawley`.
 - Managed Postgres cluster is `hawley-pg-prod` in `SFO3`.
-- Asana events and the Worker Daily Actuals mirror refresh every minute.
+- Asana events, the Worker Daily Actuals mirror, and Task Instance time
+  writeback refresh every minute.
 - The full HB refresh runs nightly at 1:00 a.m. Pacific, followed by the
   Airtable worker-actuals archive export.
 - That full refresh also mirrors `CNC Parts Master` and `CNC Sheets`, then
@@ -102,6 +104,13 @@ legacy planning mirror.
 events for the VIN/Fabrication scopes and Engineering Changes, fetches changed
 task rows, updates HB/Postgres, and rebuilds HB only when changed tasks are
 found. It does not write to Asana or Airtable.
+
+`pg:writeback:airtable-task-times` is dry-run by default. With its explicit
+source-write gates enabled, it publishes Hawley's canonical task actual to
+existing Airtable Task Instances, then updates the three task-template
+average-time fields. It does not create or relink records. See
+`docs/runbooks/task-average-time-model.md` for the qualifying rule and audit
+trail.
 
 Hawley's operational capability map lives in the `ops` schema and reporting
 views. It combines Airtable `Work Force` skill levels, observed Rev1/Asana task

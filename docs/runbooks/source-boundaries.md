@@ -26,9 +26,12 @@ Airtable remains the human planning and control surface for:
 - manual overrides
 - high-level operational review
 
-Airtable should not be the live worker-actuals source. Worker actuals are
-written to Hawley/Postgres first and can be exported back to Airtable overnight
-for legacy human-readable review.
+Airtable is not the live worker-actuals source. Worker actuals are written to
+Hawley/Postgres first, posted to Asana, and reconciled back to the matching
+`Task Instances Rev1` actual-time field every minute for legacy planning and review.
+Hawley also recalculates the three `Tasks` average-time fields from that
+canonical task-instance history. This writeback does not alter Airtable task
+templates, planning links, assignments, or VIN/cycle data.
 
 ## Postgres
 

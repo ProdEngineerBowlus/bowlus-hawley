@@ -34,6 +34,8 @@ const ASANA_EVENT_WATCH_INTERVAL_MS = Number(process.env.HAWLEY_ASANA_EVENT_INTE
 const ASANA_EVENT_WATCH_RESTART_MS = Number(process.env.HAWLEY_ASANA_EVENT_WATCH_RESTART_MS || 30000);
 const WORKER_ACTUALS_WATCH_INTERVAL_MS = Number(process.env.HAWLEY_WORKER_ACTUALS_INTERVAL_MS || 60000);
 const WORKER_ACTUALS_WATCH_RESTART_MS = Number(process.env.HAWLEY_WORKER_ACTUALS_WATCH_RESTART_MS || 30000);
+const AIRTABLE_TASK_TIME_WRITEBACK_INTERVAL_MS = Number(process.env.HAWLEY_AIRTABLE_TASK_TIME_WRITEBACK_INTERVAL_MS || 60000);
+const AIRTABLE_TASK_TIME_WRITEBACK_RESTART_MS = Number(process.env.HAWLEY_AIRTABLE_TASK_TIME_WRITEBACK_RESTART_MS || 30000);
 const NIGHTLY_REFRESH_TIME = process.env.HAWLEY_NIGHTLY_REFRESH_TIME || "01:00";
 const NIGHTLY_REFRESH_TIME_ZONE = process.env.HAWLEY_NIGHTLY_REFRESH_TIME_ZONE || "America/Los_Angeles";
 const NIGHTLY_REFRESH_SCRIPT = process.env.HAWLEY_NIGHTLY_REFRESH_SCRIPT || "pg:refresh-hawley-read-model";
@@ -216,6 +218,24 @@ const workerActualsWatcherState = {
 let workerActualsWatcherProcess = null;
 let workerActualsWatcherRestartTimer = null;
 let workerActualsWatcherStopping = false;
+
+const airtableTaskTimeWritebackState = {
+  enabled: false,
+  requested: false,
+  running: false,
+  pid: null,
+  startedAt: "",
+  lastOutputAt: "",
+  lastExit: null,
+  lastError: "",
+  intervalMs: AIRTABLE_TASK_TIME_WRITEBACK_INTERVAL_MS,
+  restartMs: AIRTABLE_TASK_TIME_WRITEBACK_RESTART_MS,
+  mode: "web-service-sidecar",
+  reason: ""
+};
+let airtableTaskTimeWritebackProcess = null;
+let airtableTaskTimeWritebackRestartTimer = null;
+let airtableTaskTimeWritebackStopping = false;
 
 const nightlyRefreshState = {
   enabled: false,
@@ -453,6 +473,13 @@ function shouldStartWorkerActualsWatcher() {
   return process.env.NODE_ENV === "production";
 }
 
+function shouldStartAirtableTaskTimeWriteback() {
+  if (process.env.HAWLEY_AIRTABLE_TASK_TIME_WRITEBACK_IN_WEB !== undefined) {
+    return booleanEnv("HAWLEY_AIRTABLE_TASK_TIME_WRITEBACK_IN_WEB", false);
+  }
+  return process.env.NODE_ENV === "production";
+}
+
 function shouldStartNightlyRefreshScheduler() {
   if (process.env.HAWLEY_NIGHTLY_REFRESH_ENABLED !== undefined) {
     return booleanEnv("HAWLEY_NIGHTLY_REFRESH_ENABLED", false);
@@ -490,6 +517,10 @@ function workerActualsWatcherStatus() {
   return { ...workerActualsWatcherState };
 }
 
+function airtableTaskTimeWritebackStatus() {
+  return { ...airtableTaskTimeWritebackState };
+}
+
 function nightlyRefreshStatus() {
   return { ...nightlyRefreshState };
 }
@@ -502,6 +533,7 @@ function watcherStatuses() {
   return {
     asanaEvents: asanaEventWatcherStatus(),
     workerDailyActuals: workerActualsWatcherStatus(),
+    airtableTaskTimeWriteback: airtableTaskTimeWritebackStatus(),
     nightlyRefresh: nightlyRefreshStatus(),
     nightlyAirtableBackfill: nightlyAirtableBackfillStatus()
   };
@@ -742,6 +774,102 @@ function stopWorkerActualsWatcher(signal = "SIGTERM") {
   }
   if (workerActualsWatcherProcess && !workerActualsWatcherProcess.killed) {
     workerActualsWatcherProcess.kill(signal);
+  }
+}
+
+function startAirtableTaskTimeWriteback() {
+  airtableTaskTimeWritebackState.requested = shouldStartAirtableTaskTimeWriteback();
+  airtableTaskTimeWritebackState.enabled = false;
+  airtableTaskTimeWritebackState.reason = "";
+
+  if (!airtableTaskTimeWritebackState.requested) {
+    airtableTaskTimeWritebackState.reason = "disabled";
+    return;
+  }
+  if (!process.env.AIRTABLE_PAT || !process.env.AIRTABLE_BASE) {
+    airtableTaskTimeWritebackState.reason = "missing AIRTABLE_PAT or AIRTABLE_BASE";
+    console.warn("Hawley Airtable task-time writeback disabled: missing Airtable configuration.");
+    return;
+  }
+  if (!syncDatabaseConfigured()) {
+    airtableTaskTimeWritebackState.reason = "missing HAWLEY_SYNC_DATABASE_URL or HAWLEY_MIGRATION_DATABASE_URL";
+    console.warn("Hawley Airtable task-time writeback disabled: missing sync database URL.");
+    return;
+  }
+  if (!Number.isFinite(AIRTABLE_TASK_TIME_WRITEBACK_INTERVAL_MS) || AIRTABLE_TASK_TIME_WRITEBACK_INTERVAL_MS < 15000) {
+    airtableTaskTimeWritebackState.reason = "invalid HAWLEY_AIRTABLE_TASK_TIME_WRITEBACK_INTERVAL_MS";
+    console.warn("Hawley Airtable task-time writeback disabled: interval must be at least 15000 ms.");
+    return;
+  }
+
+  airtableTaskTimeWritebackState.enabled = true;
+  airtableTaskTimeWritebackState.reason = "running";
+  spawnAirtableTaskTimeWriteback();
+}
+
+function spawnAirtableTaskTimeWriteback() {
+  if (airtableTaskTimeWritebackStopping || airtableTaskTimeWritebackProcess) return;
+  const child = spawn(process.execPath, [
+    "./apps/postgres-sync/src/writeback-airtable-task-times.js",
+    "--loop",
+    "--interval-ms",
+    String(AIRTABLE_TASK_TIME_WRITEBACK_INTERVAL_MS),
+    "--apply"
+  ], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      HAWLEY_ALLOW_SOURCE_WRITES: "true",
+      HAWLEY_DRY_RUN: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true
+  });
+
+  airtableTaskTimeWritebackProcess = child;
+  airtableTaskTimeWritebackState.running = true;
+  airtableTaskTimeWritebackState.pid = child.pid || null;
+  airtableTaskTimeWritebackState.startedAt = new Date().toISOString();
+  airtableTaskTimeWritebackState.lastExit = null;
+  airtableTaskTimeWritebackState.lastError = "";
+  airtableTaskTimeWritebackState.reason = "running";
+  child.stdout.on("data", chunk => logAirtableTaskTimeWritebackStream("stdout", chunk));
+  child.stderr.on("data", chunk => logAirtableTaskTimeWritebackStream("stderr", chunk));
+  child.on("error", error => {
+    airtableTaskTimeWritebackState.lastError = error.message;
+    airtableTaskTimeWritebackState.reason = "spawn failed";
+    console.error(`Hawley Airtable task-time writeback failed to start: ${error.message}`);
+  });
+  child.on("exit", (code, signal) => {
+    airtableTaskTimeWritebackProcess = null;
+    airtableTaskTimeWritebackState.running = false;
+    airtableTaskTimeWritebackState.pid = null;
+    airtableTaskTimeWritebackState.lastExit = { code, signal, at: new Date().toISOString() };
+    if (airtableTaskTimeWritebackStopping || !airtableTaskTimeWritebackState.enabled) {
+      airtableTaskTimeWritebackState.reason = "stopped";
+      return;
+    }
+    airtableTaskTimeWritebackState.reason = "restarting";
+    const restartMs = Number.isFinite(AIRTABLE_TASK_TIME_WRITEBACK_RESTART_MS) && AIRTABLE_TASK_TIME_WRITEBACK_RESTART_MS >= 0
+      ? AIRTABLE_TASK_TIME_WRITEBACK_RESTART_MS
+      : 30000;
+    console.warn(`Hawley Airtable task-time writeback exited; restarting in ${restartMs} ms.`);
+    airtableTaskTimeWritebackRestartTimer = setTimeout(() => {
+      airtableTaskTimeWritebackRestartTimer = null;
+      spawnAirtableTaskTimeWriteback();
+    }, restartMs);
+    airtableTaskTimeWritebackRestartTimer.unref?.();
+  });
+}
+
+function stopAirtableTaskTimeWriteback(signal = "SIGTERM") {
+  airtableTaskTimeWritebackStopping = true;
+  if (airtableTaskTimeWritebackRestartTimer) {
+    clearTimeout(airtableTaskTimeWritebackRestartTimer);
+    airtableTaskTimeWritebackRestartTimer = null;
+  }
+  if (airtableTaskTimeWritebackProcess && !airtableTaskTimeWritebackProcess.killed) {
+    airtableTaskTimeWritebackProcess.kill(signal);
   }
 }
 
@@ -1237,6 +1365,21 @@ async function applyAuthSchemaMigrationIfNeeded() {
 function todayIso() {
   const parts = timeZoneParts(new Date(), SHOP_TIME_ZONE);
   return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+}
+
+function logAirtableTaskTimeWritebackStream(streamName, chunk) {
+  const lines = String(chunk)
+    .split(/\r?\n/)
+    .filter(Boolean);
+  for (const line of lines) {
+    airtableTaskTimeWritebackState.lastOutputAt = new Date().toISOString();
+    if (streamName === "stderr") {
+      airtableTaskTimeWritebackState.lastError = line.slice(0, 1000);
+      console.error(`[hawley-airtable-task-times] ${line}`);
+    } else {
+      console.log(`[hawley-airtable-task-times] ${line}`);
+    }
+  }
 }
 
 function isIsoDate(value) {
@@ -11649,6 +11792,7 @@ async function startServer() {
   await applyBootstrapAdminUser();
   startAsanaEventWatcher();
   startWorkerActualsWatcher();
+  startAirtableTaskTimeWriteback();
   startNightlyRefreshScheduler();
   server.listen(PORT, HOST, () => {
     console.log(`Hawley worker pilot listening on http://${HOST}:${PORT}`);
@@ -11678,6 +11822,7 @@ async function startServer() {
 function shutdown(signal) {
   stopAsanaEventWatcher(signal);
   stopWorkerActualsWatcher(signal);
+  stopAirtableTaskTimeWriteback(signal);
   stopNightlyRefreshScheduler(signal);
   server.close(() => {
     Promise.all([
