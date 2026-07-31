@@ -21,9 +21,11 @@ Codex/agent tools.
   Machine runtime is visible to the worker and manager, but it is excluded from
   the CNC operator's daily utilization so simultaneous sheets cannot multiply
   his productive hours.
-- Engineering Changes is a direct Asana project mirror. Assigned tasks are
-  available to their Hawley worker, may run alongside other Engineering Changes
-  timers, and are explicitly excluded from production pacing and capacity.
+- Engineering Changes is a direct Asana project mirror. Its entire nested
+  task tree is included, so deeply nested work with an `Assigned On` date is
+  available to its Hawley worker; those tasks may run alongside other
+  Engineering Changes timers and are explicitly excluded from production
+  pacing and capacity.
 - Airtable worker actuals are an overnight archive/export target, not the live
   execution source.
 

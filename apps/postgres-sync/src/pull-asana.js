@@ -597,6 +597,15 @@ async function upsertMembership(client, membership) {
   );
 }
 
+function projectSubtaskDepth(args, config) {
+  // Production projects conventionally use one subtask level. Engineering
+  // Changes is a single, administrative project where execution tasks are
+  // frequently nested under an ECO and then a function/work-package task.
+  // Follow its full tree so an Assigned On value is never lost solely because
+  // of its organizational depth.
+  return config.scopeType === "project" ? Infinity : args.subtaskDepth;
+}
+
 // A task can be present in more than one project. When Asana returns its
 // memberships, that list is authoritative; retaining an old membership makes
 // a moved task appear in a project where it no longer exists. Subtasks may omit
@@ -736,7 +745,10 @@ async function main() {
         console.log(`Fetching ${project.name} (${project.gid})`);
         let tasks;
         try {
-          tasks = await getProjectTaskTree(asana, project, args);
+          tasks = await getProjectTaskTree(asana, project, {
+            ...args,
+            subtaskDepth: projectSubtaskDepth(args, config)
+          });
         } catch (error) {
           if (error.status === 404) {
             console.warn(`Skipping inaccessible Asana task list for project ${project.gid} (${project.name || "unnamed project"}).`);

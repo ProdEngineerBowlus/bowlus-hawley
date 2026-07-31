@@ -7,8 +7,10 @@ Hawley mirrors the same 2026 Asana scope that `Task Instances Rev1` imports:
 
 It also mirrors the standalone `Engineering Changes` project
 (`1212721039355237`). Engineering Changes is a direct project scope rather
-than an Asana portfolio. Its assigned tasks are valid worker-tracking work, but
-they are excluded from production load, capacity, phase pace, and burn-down.
+than an Asana portfolio. Its full nested task tree is mirrored, so assigned
+work remains visible even when it sits below multiple ECO/function levels.
+Its assigned tasks are valid worker-tracking work, but they are excluded from
+production load, capacity, phase pace, and burn-down.
 Its first event-cursor baseline recrawls this direct project alone, so it does
 not delay the one-minute VIN/Fabrication freshness loop.
 
@@ -82,10 +84,12 @@ that are explicitly requested. Hawley currently requests:
 - custom field identity, display value, text/number/date values, enum values
 - notes and permalink
 
-The first importer follows Rev1's practical model and pulls top-level project
-tasks plus first-level subtasks by default. Increase `HAWLEY_ASANA_SUBTASK_DEPTH`
-or pass `--subtask-depth N` if nested subtask depth becomes operationally
-important.
+The production portfolio importer follows Rev1's practical model and pulls
+top-level project tasks plus first-level subtasks by default. Increase
+`HAWLEY_ASANA_SUBTASK_DEPTH` or pass `--subtask-depth N` if deeper nesting
+becomes operationally important there. The direct Engineering Changes mirror
+is intentionally different: it follows the full subtask tree so administrative
+tracking work is not omitted by nesting depth.
 
 ## First Import Baseline
 
