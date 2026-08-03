@@ -372,13 +372,14 @@
         render();
         return;
       }
-      if (workerPageLocked()) {
-        applyAssignments({ source: "error", date: state.date, workers: [], error: "Could not load live worker assignments. Ask a manager to check the Daily Assignment app server." }, "error");
-      } else {
-        applyAssignments(sampleAssignments, "sample");
-        state.error =
-          "Using sample data. Start the Node server with ASANA_ACCESS_TOKEN to load live Asana assignments.";
-      }
+      applyAssignments({
+        source: "error",
+        date: state.date,
+        workers: [],
+        error: workerPageLocked()
+          ? "Could not load live worker assignments. Ask a manager to check the Hawley server."
+          : "Could not load live manager assignments. Reload the page; Hawley will not display sample worker data."
+      }, "error");
     }
 
     state.loading = false;
