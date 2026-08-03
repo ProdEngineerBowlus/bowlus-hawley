@@ -1391,11 +1391,14 @@ function applyAsanaOverlay(row, asana, lookups) {
     row.assigned_on = asanaAssignedOnDate(rawFields);
   }
 
-  // Airtable's Assigned Worker link is Hawley's planning control surface.  An
-  // Asana pull is allowed to enrich task state, but must not roll a deliberate
-  // Airtable reassignment back to the assignee that happened to be in Asana
-  // when the import ran.  Tasks without an Airtable worker remain Asana-led.
-  const airtableOwnsAssignment = Boolean(row.worker_record_id);
+  // Airtable's Assigned Worker link is Hawley's planning control surface only
+  // when an Airtable Task Instance actually exists. Direct Hawley-created and
+  // Asana-adopted tasks can retain a seeded worker_record_id, but they have no
+  // Airtable planning record to own that assignment; their live Asana assignee
+  // must therefore drive the worker page.
+  const hasAirtableTaskInstance = Boolean(row.airtable_record_id)
+    && !String(row.airtable_record_id).startsWith("asana:");
+  const airtableOwnsAssignment = hasAirtableTaskInstance && Boolean(row.worker_record_id);
   if (airtableOwnsAssignment) {
     row.assignee_name = row.worker_name || row.assignee_name || assigneeName;
     row.assignee_email = row.worker_email || row.assignee_email || assigneeEmail;

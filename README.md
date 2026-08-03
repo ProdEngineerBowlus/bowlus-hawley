@@ -36,6 +36,10 @@ Codex/agent tools.
   untouched in Airtable.
 - Airtable worker actuals are a human-readable mirror, not the live execution
   source.
+- Airtable-backed task instances retain Airtable as the planning owner for a
+  worker assignment. Direct Hawley-created or Asana-only tasks have no
+  Airtable assignment record, so their current Asana assignee drives the
+  worker page.
 
 The worker app is live for approved worker writes. Planning and project-creation
 writes remain separately gated.
