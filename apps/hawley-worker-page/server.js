@@ -395,6 +395,15 @@ function isParallelAdminTask(task) {
   return task?.trackingMode === "parallel_admin";
 }
 
+function isParallelAdminLedgerRow(row) {
+  const fields = row?.fields_json || {};
+  // Older Engineering Changes timer rows predate the explicit tracking-mode
+  // field.  Their cycle is still authoritative, so never let one of those
+  // legacy rows block another Engineering Changes timer.
+  return String(fields["Tracking Mode"] || "").trim() === "parallel_admin"
+    || String(fields.Cycle || row?.cycle_label || "").trim().toLowerCase() === "engineering changes";
+}
+
 function cncMachineAlertAfterMinutes(expectedMinutes) {
   const expected = Math.max(1, Number(expectedMinutes || 0));
   return Math.ceil(Math.max(expected + CNC_MACHINE_OVERRUN_MINUTES, expected * CNC_MACHINE_OVERRUN_RATIO));
@@ -1705,6 +1714,7 @@ function taskFromRow(row) {
   const phase = formatPhaseName(row.phase_name || row.inferred_work_area_name);
   const workArea = formatPhaseName(row.inferred_work_area_name || row.phase_name || row.section_column || "Unspecified");
   const isEngineeringChange = String(row.asana_portfolio_name || "").trim().toLowerCase() === "engineering changes"
+    || String(row.asana_project_name || "").trim().toLowerCase() === "engineering changes"
     || String(row.task_type || "").trim().toLowerCase() === "engineering change";
   return {
     id: taskId(row),
@@ -4335,7 +4345,7 @@ async function blockingLiveTimerForWorker(client, workerId, date, exceptTaskId =
   const allowParallelAdmin = Boolean(options.allowParallelAdmin);
   const blockingRow = result.rows.find(row => {
     if (!allowParallelAdmin) return true;
-    return String(row.fields_json?.["Tracking Mode"] || "standard") !== "parallel_admin";
+    return !isParallelAdminLedgerRow(row);
   });
   return liveTimerFromRow(blockingRow);
 }
@@ -4945,6 +4955,7 @@ function workerFromActualRow(row) {
 }
 
 function taskFromActualRow(row) {
+  const fields = row?.fields_json || {};
   return {
     id: row.asana_task_gid || "",
     title: row.task_name || "",
@@ -4955,7 +4966,8 @@ function taskFromActualRow(row) {
     assignedHours: Number(row.assigned_hours || 0),
     targetHours: Number(row.allocated_hours || row.assigned_hours || 0),
     estimatedMinutes: minutesFromHours(row.allocated_hours || row.assigned_hours || 0),
-    sourceUrl: row.task_url || ""
+    sourceUrl: row.task_url || "",
+    trackingMode: isParallelAdminLedgerRow(row) ? "parallel_admin" : "standard"
   };
 }
 
@@ -6138,7 +6150,10 @@ async function handleWorkerTaskAction(req) {
             and coalesce(completed, false) = false
             and source_system = $3
             and coalesce(fields_json ->> 'Timer Started At', '') <> ''
-            and coalesce(fields_json ->> 'Tracking Mode', 'standard') = 'parallel_admin'
+            and (
+              coalesce(fields_json ->> 'Tracking Mode', '') = 'parallel_admin'
+              or lower(coalesce(fields_json ->> 'Cycle', '')) = 'engineering changes'
+            )
         `, [worker.id, date, LIVE_WORKER_SOURCE]);
         if (Number(activeParallelResult.rows[0]?.count || 0) >= ADMIN_PARALLEL_MAX_ACTIVE_TIMERS) {
           throw actionError(`A maximum of ${ADMIN_PARALLEL_MAX_ACTIVE_TIMERS} parallel Engineering Changes timers is allowed. Stop one before starting another.`, 409, {

@@ -1932,8 +1932,10 @@ button {
   position: fixed;
   right: 18px;
   bottom: 18px;
-  background: var(--ink);
-  color: white;
+  max-width: min(460px, calc(100vw - 36px));
+  background: #07110c;
+  color: #f7fff9;
+  border: 1px solid rgba(100, 230, 181, 0.66);
   border-radius: 8px;
   padding: 12px 14px;
   box-shadow: var(--shadow);
