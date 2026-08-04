@@ -4258,21 +4258,33 @@ function liveTimerTotalActualMinutes(timer, now, workDate = "") {
 }
 
 async function assignedWorkerTaskForWrite(employee, date, taskId, authActor = null) {
-  const assignmentUrl = new URL("http://hawley.local/api/daily-assignments");
-  assignmentUrl.searchParams.set("date", date);
-  assignmentUrl.searchParams.set("employee", employee);
-  assignmentUrl.searchParams.set("includeNoWork", "true");
-  const payload = await dailyAssignmentsPayload(assignmentUrl, authActor);
-  const worker = (payload.workers || []).find(item => item.id === employee);
-  if (!worker) {
-    throw actionError("Worker profile is not available in Hawley for this date.", 404);
-  }
-
-  const task = (worker.tasks || []).find(item => String(item.id || "") === String(taskId));
-  if (!task) {
+  // Timer actions need only one current assignment.  Do not make a start,
+  // stop, or completion depend on the full dashboard payload, which also
+  // performs reporting enrichment and automatic-study maintenance.
+  const rows = await workerAssignments(date);
+  const row = rows.find(candidate => (
+    canonicalWorkerIdForWrites(slugifyWorker({
+      workerEmail: candidate.worker_email,
+      workerName: candidate.worker_name
+    })) === employee
+      && String(candidate.asana_task_gid || "") === String(taskId)
+  ));
+  if (!row) {
     throw actionError("Task is not assigned to this employee for the selected day in Hawley.", 404);
   }
 
+  const worker = applyLivePilotWorkerFlags({
+    id: canonicalWorkerIdForWrites(slugifyWorker({
+      workerEmail: row.worker_email,
+      workerName: row.worker_name
+    })),
+    name: row.worker_name || row.worker_email || "Unassigned",
+    email: row.worker_email || "",
+    phase: formatPhaseName(row.inferred_work_area_name || row.phase_name),
+    workBlock: formatPhaseName(row.inferred_work_area_name || row.phase_name),
+    tasks: []
+  });
+  const task = taskFromRow(row);
   return { worker, task };
 }
 
