@@ -1994,7 +1994,7 @@
     } catch (error) {
       state.actionTaskId = "";
       render();
-      showToast(error.message || "Could not update CNC machine run");
+      showToastError(error.message || "Could not update CNC machine run");
     }
   }
 
@@ -2015,7 +2015,7 @@
     } catch (error) {
       state.actionTaskId = "";
       render();
-      showToast(error.message || "Could not apply time study");
+      showToastError(error.message || "Could not apply time study");
     }
   }
 
@@ -2032,7 +2032,7 @@
     } catch (error) {
       state.actionTaskId = "";
       render();
-      showToast(error.message || "Could not update time study");
+      showToastError(error.message || "Could not update time study");
     }
   }
 
@@ -2060,7 +2060,7 @@
     } catch (error) {
       state.actionTaskId = "";
       render();
-      showToast(error.message || "Could not record past study time");
+      showToastError(error.message || "Could not record past study time");
     }
   }
 
@@ -2081,7 +2081,7 @@
     } catch (error) {
       state.actionTaskId = "";
       render();
-      showToast(error.message || "Could not end time study");
+      showToastError(error.message || "Could not end time study");
     }
   }
 
@@ -2132,7 +2132,7 @@
     } catch (error) {
       state.actionTaskId = "";
       render();
-      showToast(error.message || "Could not start timer");
+      showToastError(error.message || "Could not start timer");
     }
   }
 
@@ -2174,7 +2174,7 @@
     } catch (error) {
       state.actionTaskId = "";
       render();
-      showToast(error.message || "Could not stop timer");
+      showToastError(error.message || "Could not stop timer");
     }
   }
 
@@ -2209,7 +2209,7 @@
     } catch (error) {
       state.actionTaskId = "";
       render();
-      showToast(error.message || "Could not save task");
+      showToastError(error.message || "Could not save task");
     }
   }
 
@@ -2275,7 +2275,7 @@
     } catch (error) {
       state.actionTaskId = "";
       render();
-      showToast(error.message || "Could not mark the task incomplete");
+      showToastError(error.message || "Could not mark the task incomplete");
     }
   }
 
@@ -2313,7 +2313,7 @@
     } catch (error) {
       state.actionTaskId = "";
       render();
-      showToast(error.message || "Could not end timer session");
+      showToastError(error.message || "Could not end timer session");
     }
   }
 
@@ -2791,13 +2791,20 @@
     }
   }
 
-  function showToast(message) {
+  function showToast(message, duration = 2200) {
     const toast = document.getElementById("toast");
     if (!toast) return;
     toast.textContent = message;
     toast.classList.add("show");
     window.clearTimeout(showToast.timer);
-    showToast.timer = window.setTimeout(() => toast.classList.remove("show"), 2200);
+    showToast.timer = window.setTimeout(() => toast.classList.remove("show"), duration);
+  }
+
+  function showToastError(message) {
+    // Action failures often contain the only useful diagnostic. Keep them
+    // visible long enough to read and relay, while successful confirmations
+    // remain brief.
+    showToast(message, 8000);
   }
 
   function getTodayIso() {

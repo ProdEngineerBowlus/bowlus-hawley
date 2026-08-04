@@ -4261,8 +4261,26 @@ async function assignedWorkerTaskForWrite(employee, date, taskId, authActor = nu
   // Timer actions need only one current assignment.  Do not make a start,
   // stop, or completion depend on the full dashboard payload, which also
   // performs reporting enrichment and automatic-study maintenance.
-  const rows = await workerAssignments(date);
-  const row = rows.find(candidate => (
+  const assignmentResult = await pool.query(
+    `
+      select
+        assignment.*,
+        task_instance.asana_portfolio_name,
+        task_instance.asana_project_name,
+        task_instance.task_type,
+        source_task.modified_at as asana_modified_at
+      from reporting.hawley_worker_page_assignments assignment
+      left join hb.rev1_task_instances task_instance
+        on task_instance.rev1_task_instance_id = assignment.task_instance_id
+      left join raw.asana_tasks source_task
+        on source_task.gid = assignment.asana_task_gid
+      where assignment.assigned_on = $1::date
+        and assignment.asana_task_gid = $2
+      limit 2
+    `,
+    [date, String(taskId)]
+  );
+  const row = assignmentResult.rows.find(candidate => (
     canonicalWorkerIdForWrites(slugifyWorker({
       workerEmail: candidate.worker_email,
       workerName: candidate.worker_name
