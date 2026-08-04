@@ -1387,8 +1387,9 @@ function applyAsanaOverlay(row, asana, lookups) {
   row.start_date = dateValue(asana.start_on || asana.start_at) || row.start_date;
   row.end_date = dateValue(asana.due_on || asana.due_at) || row.end_date;
 
-  if (asanaAssignedOnField(rawFields)) {
-    row.assigned_on = asanaAssignedOnDate(rawFields);
+  const asanaAssignedOn = asanaAssignedOnDate(rawFields);
+  if (asanaAssignedOn) {
+    row.assigned_on = asanaAssignedOn;
   }
 
   // Airtable's Assigned Worker link is Hawley's planning control surface only
@@ -1399,7 +1400,14 @@ function applyAsanaOverlay(row, asana, lookups) {
   const hasAirtableTaskInstance = Boolean(row.airtable_record_id)
     && !String(row.airtable_record_id).startsWith("asana:");
   const airtableOwnsAssignment = hasAirtableTaskInstance && Boolean(row.worker_record_id);
-  if (airtableOwnsAssignment) {
+  // A current Assigned On value on the source Asana task is an explicit live
+  // dispatch. It must win over an older Airtable worker link so a reassigned
+  // task cannot remain on the prior worker until the next Airtable import.
+  // Airtable continues to own planning assignments when Asana has not been
+  // dispatched yet; its normal propagation to Asana then makes both sources
+  // agree again.
+  const asanaOwnsLiveAssignment = Boolean(asanaAssignedOn) && Boolean(assigneeEmail || assigneeName);
+  if (airtableOwnsAssignment && !asanaOwnsLiveAssignment) {
     row.assignee_name = row.worker_name || row.assignee_name || assigneeName;
     row.assignee_email = row.worker_email || row.assignee_email || assigneeEmail;
   } else {
