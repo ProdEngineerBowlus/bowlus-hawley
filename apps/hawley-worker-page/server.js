@@ -2947,28 +2947,71 @@ async function workerAssignments(date) {
 
   const result = await pool.query(
     `
-      with scoped_assignments as (
-        select distinct on (coalesce(assignment.asana_task_gid, assignment.task_instance_id::text))
-          assignment.*,
-          (assignment.assigned_on < $1::date) as is_carryover
-        from reporting.hawley_worker_page_assignments assignment
-        where assignment.assigned_on = $1::date
+      -- Select the small dated task-instance set before any enrichment.  The
+      -- reporting view includes per-row inference joins and becomes too slow
+      -- when live carryover work is included for every worker.
+      with scoped_instances as (
+        select distinct on (coalesce(task_instance.asana_task_gid, task_instance.rev1_task_instance_id::text))
+          task_instance.*,
+          source_task.completed as asana_completed,
+          source_task.permalink_url as asana_permalink_url,
+          source_task.modified_at as asana_modified_at,
+          source_task.synced_at as asana_synced_at,
+          (task_instance.assigned_on < $1::date) as is_carryover
+        from hb.rev1_task_instances task_instance
+        left join raw.asana_tasks source_task
+          on source_task.gid = task_instance.asana_task_gid
+        where task_instance.assigned_on = $1::date
           or (
             $2::boolean
-            and assignment.assigned_on < $1::date
-            and not assignment.completed
+            and task_instance.assigned_on < $1::date
+            and not coalesce(
+              source_task.completed,
+              lower(coalesce(task_instance.task_status, '')) = any(array['true', 'complete', 'completed', 'done', 'yes'])
+            )
           )
         order by
-          coalesce(assignment.asana_task_gid, assignment.task_instance_id::text),
-          assignment.assigned_on desc
+          coalesce(task_instance.asana_task_gid, task_instance.rev1_task_instance_id::text),
+          task_instance.assigned_on desc
       )
       select
-        assignment.*,
+        task_instance.rev1_task_instance_id as task_instance_id,
+        task_instance.airtable_record_id,
+        task_instance.asana_task_gid,
+        task_instance.worker_name,
+        task_instance.worker_email,
+        task_instance.assigned_on,
+        task_instance.task_name,
+        coalesce(
+          task_instance.asana_completed,
+          lower(coalesce(task_instance.task_status, '')) = any(array['true', 'complete', 'completed', 'done', 'yes'])
+        ) as completed,
+        task_instance.task_status,
+        coalesce(task_instance.phase_label, task_instance.section_column) as phase_name,
+        task_instance.cycle_label as cycle_name,
+        coalesce(task_instance.vin_text, task_instance.vin::text) as vin,
+        round(coalesce(task_instance.estimated_batch_task_time_seconds, task_instance.estimated_task_time_seconds, 0)::numeric / 3600.0, 2)::numeric(10,2) as estimated_hours,
+        task_instance.actual_time_minutes,
+        task_instance.asana_permalink_url,
+        ops.jsonb_display_text(task_instance.fields_json -> 'SOP Link') as sop_link,
+        coalesce(task_instance.document_link, ops.jsonb_display_text(task_instance.fields_json -> 'Document Link')) as document_link,
+        coalesce(task_instance.section_column, ops.jsonb_display_text(task_instance.fields_json -> 'Section/Column')) as section_column,
+        regexp_replace(lower(coalesce(nullif(coalesce(task_instance.phase_label, task_instance.section_column), ''), 'unspecified')), '[^a-z0-9]+', '_', 'g') as inferred_work_area_key,
+        coalesce(nullif(coalesce(task_instance.phase_label, task_instance.section_column), ''), 'Unspecified') as inferred_work_area_name,
+        case when nullif(coalesce(task_instance.phase_label, task_instance.section_column), '') is not null then 'hb_phase' else 'unknown' end as inference_source,
+        task_instance.normalized_at,
+        greatest(
+          coalesce(task_instance.normalized_at, '-infinity'::timestamptz),
+          coalesce(task_instance.asana_synced_at, '-infinity'::timestamptz),
+          coalesce(task_instance.source_synced_at, '-infinity'::timestamptz),
+          coalesce(template.source_synced_at, '-infinity'::timestamptz)
+        ) as source_synced_at,
+        task_instance.asana_modified_at,
         task_instance.asana_portfolio_name,
         task_instance.asana_project_name,
         task_instance.task_type,
-        source_task.modified_at as asana_modified_at,
-        coalesce(assignment.required_skill_level, template.required_skill_level) as resolved_required_skill_level,
+        task_instance.is_carryover,
+        template.required_skill_level as resolved_required_skill_level,
         coalesce(template.has_bending, false) as has_bending,
         template.avg_time_seconds,
         template.avg_time_input_count,
@@ -2977,48 +3020,19 @@ async function workerAssignments(date) {
         coalesce(bom.part_names, '{}'::text[]) as part_names,
         coalesce(bom.sheet_names, '{}'::text[]) as cnc_sheet_names,
         coalesce(bom.material_names, '{}'::text[]) as material_names
-      from scoped_assignments assignment
-      left join hb.rev1_task_instances task_instance
-        on task_instance.rev1_task_instance_id = assignment.task_instance_id
-      left join raw.asana_tasks source_task
-        on source_task.gid = assignment.asana_task_gid
-      left join lateral (
-        select candidate.task_record_id
-        from (
-          select direct_template.task_record_id, 1 as match_rank
-          from hb.task_templates direct_template
-          where direct_template.task_record_id = task_instance.tasks_record_id
-
-          union all
-
-          select keyed_template.task_record_id, 2 as match_rank
-          from hb.task_templates keyed_template
-          where nullif(task_instance.tasks_key, '') is not null
-            and keyed_template.tasks_key = task_instance.tasks_key
-
-          union all
-
-          select named_template.task_record_id, 3 as match_rank
-          from hb.task_templates named_template
-          where named_template.task_name = assignment.task_name
-            and 1 = (
-              select count(*)
-              from hb.task_templates same_name
-              where same_name.task_name = assignment.task_name
-            )
-        ) candidate
-        order by candidate.match_rank, candidate.task_record_id
-        limit 1
-      ) resolved_template on true
+      from scoped_instances task_instance
       left join hb.task_templates template
-        on template.task_record_id = resolved_template.task_record_id
+        on template.task_record_id = task_instance.tasks_record_id
       left join reporting.task_template_bom bom
         on bom.task_record_id = template.task_record_id
       order by
-        assignment.worker_name nulls last,
-        assignment.completed,
-        coalesce(assignment.inferred_work_area_name, assignment.phase_name, assignment.section_column, ''),
-        assignment.task_name
+        task_instance.worker_name nulls last,
+        coalesce(
+          task_instance.asana_completed,
+          lower(coalesce(task_instance.task_status, '')) = any(array['true', 'complete', 'completed', 'done', 'yes'])
+        ),
+        coalesce(task_instance.phase_label, task_instance.section_column, ''),
+        task_instance.task_name
     `,
     params
   );
