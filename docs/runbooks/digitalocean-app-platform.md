@@ -218,7 +218,9 @@ node ./apps/postgres-sync/src/pull-asana-events.js --loop --interval-ms 60000
 
 It reads Asana event streams for the imported portfolio projects, refreshes
 changed task rows in Hawley/Postgres, and rebuilds HB when task changes are
-found. It does not write to Asana or Airtable.
+found. An event that does not identify its source task triggers a re-pull of
+only that event's project before HB rebuilds, so a same-day Asana dispatch is
+not silently left behind. It does not write to Asana or Airtable.
 
 The web service can run the Worker Daily Task Actuals Airtable puller alongside
 the Hawley-owned worker rows. It keeps the historical actuals mirror current;

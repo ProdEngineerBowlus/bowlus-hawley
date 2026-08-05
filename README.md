@@ -115,7 +115,10 @@ legacy planning mirror.
 `pg:watch:asana-events` is the one-minute pilot updater. It reads Asana project
 events for the VIN/Fabrication scopes and Engineering Changes, fetches changed
 task rows, updates HB/Postgres, and rebuilds HB only when changed tasks are
-found. It does not write to Asana or Airtable.
+found. If Asana reports a project event that does not identify a source task,
+Hawley re-pulls that one project before rebuilding HB; this prevents an
+assignment/custom-field change from being silently skipped. It does not write
+to Asana or Airtable.
 
 `pg:refresh:current-assignments` is the one-minute Airtable planning updater
 used by the production worker service. It mirrors only Task Instances whose

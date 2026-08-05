@@ -71,7 +71,7 @@ One-minute incremental Asana refresh:
 npm run pg:watch:asana-events
 ```
 
-This uses Asana project event sync tokens for the 30 VIN/Fabrication portfolio projects. Each poll reads Asana events, fetches changed task rows, updates Hawley Postgres raw Asana tables, and rebuilds HB only when changed task rows are found.
+This uses Asana project event sync tokens for the VIN/Fabrication portfolio projects. Each poll reads Asana events, fetches changed task rows, updates Hawley Postgres raw Asana tables, and rebuilds HB only when changed task rows are found. If an Asana event does not expose a task resource (a project-level or bubbled event), the watcher re-pulls only that project and then rebuilds HB. This targeted fallback protects same-day `Assigned On` dispatches from being skipped without turning the one-minute loop into a full-portfolio recrawl.
 
 Safety boundary:
 

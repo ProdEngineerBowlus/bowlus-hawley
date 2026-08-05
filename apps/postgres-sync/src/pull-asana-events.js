@@ -162,7 +162,7 @@ class AsanaClient {
   async getEvents(resourceGid, syncToken) {
     const params = new URLSearchParams({
       resource: resourceGid,
-      opt_fields: "action,type,created_at,resource.gid,resource.name,resource.resource_type,user.gid,user.name"
+      opt_fields: "action,type,created_at,resource.gid,resource.name,resource.resource_type,parent.gid,parent.name,parent.resource_type,user.gid,user.name"
     });
     if (syncToken) params.set("sync", syncToken);
     return this.request(`/events?${params.toString()}`);
@@ -533,12 +533,22 @@ async function inheritSubtaskMembershipSections(client, projectGid) {
   return removed.rowCount || 0;
 }
 
+function taskGidsForEvent(event) {
+  // Asana normally puts the changed task in `resource`, but project event
+  // streams can also bubble a task through `parent` (for example when a
+  // membership or nested resource changes).
+  const candidates = [event?.resource, event?.parent];
+  return candidates
+    .filter(candidate => candidate?.resource_type === "task" && candidate.gid)
+    .map(candidate => candidate.gid);
+}
+
 function taskGidsFromEvents(events) {
-  return Array.from(new Set(
-    events
-      .filter(event => event?.resource?.resource_type === "task" && event.resource.gid)
-      .map(event => event.resource.gid)
-  ));
+  return Array.from(new Set(events.flatMap(taskGidsForEvent)));
+}
+
+function hasUnresolvedTaskEvent(events) {
+  return events.some(event => taskGidsForEvent(event).length === 0);
 }
 
 async function processChangedTasks(client, asana, project, taskGids, summary) {
@@ -615,6 +625,9 @@ async function pollProject(client, asana, project, args, summary) {
 
   const taskGids = args.initOnly || initialized ? [] : taskGidsFromEvents(events);
   const changedTasks = await processChangedTasks(client, asana, project, taskGids, summary);
+  const needsProjectRecrawl = !args.initOnly
+    && !initialized
+    && hasUnresolvedTaskEvent(events);
   const lastEventAt = events
     .map(event => event.created_at)
     .filter(Boolean)
@@ -641,7 +654,7 @@ async function pollProject(client, asana, project, args, summary) {
   summary.changedTaskEvents += taskGids.length;
   summary.changedTasks += changedTasks;
   if (initialized) summary.initializedProjects += 1;
-  return changedTasks;
+  return { changedTasks, needsProjectRecrawl };
 }
 
 function runBuildHb() {
@@ -691,6 +704,38 @@ function runFullAsanaRecrawl(scopedPortfolio = "") {
   });
 }
 
+function portfolioScopeForProject(project) {
+  const portfolioName = String(project.portfolio_name || "").trim().toLowerCase();
+  if (portfolioName.includes("engineering")) return "engineering";
+  if (portfolioName.includes("vin")) return "vin";
+  return "fabrication";
+}
+
+function runProjectRecrawl(project) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [
+      "./apps/postgres-sync/src/pull-asana.js",
+      "--portfolio",
+      portfolioScopeForProject(project),
+      "--project",
+      project.project_gid
+    ], {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", data => { stdout += data.toString(); });
+    child.stderr.on("data", data => { stderr += data.toString(); });
+    child.on("error", reject);
+    child.on("close", code => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`Asana project recrawl failed for ${project.project_gid} with exit code ${code}: ${stderr || stdout}`));
+    });
+  });
+}
+
 async function pollOnce(args) {
   const asana = new AsanaClient(requiredEnv("ASANA_PAT"));
   let client = new Client(getDatabaseConfig({ useSyncUrl: true }));
@@ -709,7 +754,8 @@ async function pollOnce(args) {
     recordsRead: 0,
     recordsWritten: 0,
     fullRecrawlProjects: 0,
-    fullRecrawlCompleted: false
+    fullRecrawlCompleted: false,
+    fallbackProjectRecrawls: 0
   };
   const runId = await startRun(client, summary.mode);
 
@@ -732,14 +778,29 @@ async function pollOnce(args) {
       await client.connect();
     }
     args.fullRecrawlCompleted = summary.fullRecrawlCompleted;
+    const fallbackProjects = [];
     for (const project of projects) {
-      await pollProject(client, asana, project, args, summary);
+      const result = await pollProject(client, asana, project, args, summary);
+      if (result.needsProjectRecrawl) fallbackProjects.push(project);
     }
 
-    if (args.build && summary.changedTasks > 0) {
+    if (fallbackProjects.length) {
       await client.end();
+      for (const project of fallbackProjects) {
+        await runProjectRecrawl(project);
+      }
+      summary.fallbackProjectRecrawls = fallbackProjects.length;
+    }
+
+    if (args.build && (summary.changedTasks > 0 || fallbackProjects.length > 0)) {
+      if (!fallbackProjects.length) await client.end();
       await runBuildHb();
       summary.hbRebuilt = true;
+      const logClient = new Client(getDatabaseConfig({ useSyncUrl: true }));
+      await logClient.connect();
+      await finishRun(logClient, runId, "success", summary);
+      await logClient.end();
+    } else if (fallbackProjects.length) {
       const logClient = new Client(getDatabaseConfig({ useSyncUrl: true }));
       await logClient.connect();
       await finishRun(logClient, runId, "success", summary);
