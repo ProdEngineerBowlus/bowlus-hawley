@@ -23,7 +23,12 @@ Codex/agent tools.
 - David's parallel CNC sheet runs are stored separately from labor sessions.
   Machine runtime is visible to the worker and manager, but it is excluded from
   the CNC operator's daily utilization so simultaneous sheets cannot multiply
-  his productive hours.
+  his productive hours. The CNC run controls and machine-run panel are exposed
+  only to the configured CNC operator; every other worker remains on the
+  standard single-production-timer flow.
+- On the live shop day, unfinished assigned work carries forward until it is
+  completed or reassigned. Prior-day reporting remains an exact dated snapshot,
+  so carryover never changes historical assignment reporting.
 - Engineering Changes is a direct Asana project mirror. Its entire nested
   task tree is included, so deeply nested work with an `Assigned On` date is
   available to its Hawley worker; those tasks may run alongside other

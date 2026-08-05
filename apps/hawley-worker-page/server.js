@@ -1757,7 +1757,8 @@ function taskFromRow(row) {
     materialNames: taskReferenceItems(row.material_names),
     sourceSyncedAt: row.source_synced_at,
     asanaModifiedAt: row.asana_modified_at || row.source_synced_at || "",
-    inferenceSource: row.inference_source || ""
+    inferenceSource: row.inference_source || "",
+    carriedOver: Boolean(row.is_carryover)
   };
 }
 
@@ -2939,10 +2940,28 @@ async function latestImportRuns() {
 }
 
 async function workerAssignments(date) {
-  const params = [date];
+  // The live shop view must retain unfinished work after its originally
+  // assigned day.  Historical dates intentionally remain an exact snapshot.
+  const includeOpenCarryover = date === todayIso();
+  const params = [date, includeOpenCarryover];
 
   const result = await pool.query(
     `
+      with scoped_assignments as (
+        select distinct on (coalesce(assignment.asana_task_gid, assignment.task_instance_id::text))
+          assignment.*,
+          (assignment.assigned_on < $1::date) as is_carryover
+        from reporting.hawley_worker_page_assignments assignment
+        where assignment.assigned_on = $1::date
+          or (
+            $2::boolean
+            and assignment.assigned_on < $1::date
+            and not assignment.completed
+          )
+        order by
+          coalesce(assignment.asana_task_gid, assignment.task_instance_id::text),
+          assignment.assigned_on desc
+      )
       select
         assignment.*,
         task_instance.asana_portfolio_name,
@@ -2958,7 +2977,7 @@ async function workerAssignments(date) {
         coalesce(bom.part_names, '{}'::text[]) as part_names,
         coalesce(bom.sheet_names, '{}'::text[]) as cnc_sheet_names,
         coalesce(bom.material_names, '{}'::text[]) as material_names
-      from reporting.hawley_worker_page_assignments assignment
+      from scoped_assignments assignment
       left join hb.rev1_task_instances task_instance
         on task_instance.rev1_task_instance_id = assignment.task_instance_id
       left join raw.asana_tasks source_task
@@ -2995,7 +3014,6 @@ async function workerAssignments(date) {
         on template.task_record_id = resolved_template.task_record_id
       left join reporting.task_template_bom bom
         on bom.task_record_id = template.task_record_id
-      where assignment.assigned_on = $1::date
       order by
         assignment.worker_name nulls last,
         assignment.completed,
@@ -4263,22 +4281,38 @@ async function assignedWorkerTaskForWrite(employee, date, taskId, authActor = nu
   // performs reporting enrichment and automatic-study maintenance.
   const assignmentResult = await pool.query(
     `
+      with scoped_assignments as (
+        select distinct on (coalesce(assignment.asana_task_gid, assignment.task_instance_id::text))
+          assignment.*,
+          (assignment.assigned_on < $1::date) as is_carryover
+        from reporting.hawley_worker_page_assignments assignment
+        where assignment.asana_task_gid = $2
+          and (
+            assignment.assigned_on = $1::date
+            or (
+              $3::boolean
+              and assignment.assigned_on < $1::date
+              and not assignment.completed
+            )
+          )
+        order by
+          coalesce(assignment.asana_task_gid, assignment.task_instance_id::text),
+          assignment.assigned_on desc
+      )
       select
         assignment.*,
         task_instance.asana_portfolio_name,
         task_instance.asana_project_name,
         task_instance.task_type,
         source_task.modified_at as asana_modified_at
-      from reporting.hawley_worker_page_assignments assignment
+      from scoped_assignments assignment
       left join hb.rev1_task_instances task_instance
         on task_instance.rev1_task_instance_id = assignment.task_instance_id
       left join raw.asana_tasks source_task
         on source_task.gid = assignment.asana_task_gid
-      where assignment.assigned_on = $1::date
-        and assignment.asana_task_gid = $2
       limit 2
     `,
-    [date, String(taskId)]
+    [date, String(taskId), date === todayIso()]
   );
   const row = assignmentResult.rows.find(candidate => (
     canonicalWorkerIdForWrites(slugifyWorker({

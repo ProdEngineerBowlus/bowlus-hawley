@@ -1549,6 +1549,7 @@
           <h3 class="task-title">${escapeHtml(task.title)}</h3>
           <div class="task-meta">
             <span class="chip blue">${escapeHtml(task.cycle || "Cycle")}</span>
+            ${task.carriedOver ? `<span class="chip yellow" title="Unfinished work assigned on an earlier day remains available today.">Carryover</span>` : ""}
             ${locked ? "" : `<span class="chip">${formatHours(task.assignedHours)}</span>`}
             ${locked ? "" : estimateChip}
             ${!locked && task.workedTimeRecovered ? `<span class="chip yellow">Worked this day</span>` : ""}
@@ -2219,8 +2220,9 @@
     const runs = worker ? allRuns.filter((run) => run.workerId === worker.id) : allRuns;
     const alerts = runs.filter((run) => run.overrun);
     const utilization = cnc.utilization || {};
-    if (!runs.length && (!worker || !cnc.enabled)) return "";
-    if (worker && !runs.length && !cnc.enabled) return "";
+    const hasAuthorizedMachineTask = Boolean(worker?.tasks?.some((task) => task?.cncMachine?.enabled));
+    if (worker && !hasAuthorizedMachineTask && !runs.length) return "";
+    if (!worker && !runs.length && !cnc.enabled) return "";
     const heading = worker ? "CNC machine runs" : "CNC machine watch";
     const detail = alerts.length
       ? `${alerts.length} run${alerts.length === 1 ? " is" : "s are"} past its alert limit.`

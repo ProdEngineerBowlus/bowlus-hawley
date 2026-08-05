@@ -223,13 +223,16 @@ requests remain DB-only.
 
 ### Worker assignment date source
 
-Worker and manager views are strictly date-based: a task appears for the
-selected shop day only when its Asana **Assigned On** value equals that day.
-Asana due dates remain cycle-boundary dates and are never used to place a task
-on a worker's daily page. Some legacy/template-created projects expose both a
-project-local and workspace-shared field named `Assigned On`; Hawley prefers
-the project-local field because that is the field managers edit for the daily
-plan.
+Historical worker and manager views are strictly date-based: a task appears for
+a selected prior shop day only when its Asana **Assigned On** value equals that
+day. On the live shop day only, an unfinished task assigned on an earlier day
+carries forward and is marked **Carryover** on the task card. This keeps active
+work accessible after midnight without rewriting or changing historical
+assignment snapshots. Asana due dates remain cycle-boundary dates and are never
+used to place a task on a worker's daily page. Some legacy/template-created
+projects expose both a project-local and workspace-shared field named `Assigned
+On`; Hawley prefers the project-local field because that is the field managers
+edit for the daily plan.
 
 ### Engineering Changes admin tracking
 
@@ -256,6 +259,10 @@ the machine begins cutting, not when he starts loading material. He may run up
 to three sheet cuts concurrently and use the ordinary Hawley timer for one
 manual task (deburr, assembly, setup, and so on). He pauses that manual timer
 before stopping a cut.
+
+The app determines this privilege from the configured CNC-operator email. The
+CNC run panel and cut controls do not render on other workers' pages, and the
+server independently rejects a non-CNC worker attempting a machine-run action.
 
 Only a currently running manual timer blocks starting another manual task.
 Paused tasks retain their recorded WIP and can be resumed later, but they do
