@@ -8,6 +8,7 @@
     "pg:health": "node ./apps/postgres-sync/src/health.js",
     "pg:migrate": "node ./apps/postgres-sync/src/migrate.js",
     "pg:pull:airtable": "node ./apps/postgres-sync/src/pull-airtable.js",
+    "pg:pull:airtable-current-assignments": "node ./apps/postgres-sync/src/pull-airtable-current-assignments.js",
     "pg:pull:asana": "node ./apps/postgres-sync/src/pull-asana.js",
     "pg:pull:asana-events": "node ./apps/postgres-sync/src/pull-asana-events.js",
     "pg:watch:asana-events": "node ./apps/postgres-sync/src/pull-asana-events.js --loop --interval-ms 60000",
@@ -19,6 +20,7 @@
     "pg:load:ops-hints": "node ./apps/postgres-sync/src/load-ops-owner-hints.js",
     "pg:refresh-worker-read-model": "npm run pg:pull:asana && npm run pg:build:hb",
     "pg:refresh-hawley-read-model": "npm run pg:pull:airtable && npm run pg:normalize && npm run pg:pull:asana && npm run pg:build:hb",
+    "pg:refresh:current-assignments": "npm run pg:pull:airtable-current-assignments && npm run pg:normalize && npm run pg:build:hb",
     "pg:refresh-legacy-airtable-bootstrap": "npm run pg:pull:airtable && npm run pg:normalize && npm run pg:build:hb",
     "pg:refresh-all": "npm run pg:refresh-hawley-read-model",
     "pg:bootstrap-cloud": "npm run pg:migrate && npm run pg:pull:airtable && npm run pg:normalize && npm run pg:pull:asana && npm run pg:build:hb",
@@ -33,5 +35,3 @@
     "pg": "^8.13.1"
   }
 }
-    "pg:pull:airtable-current-assignments": "node ./apps/postgres-sync/src/pull-airtable-current-assignments.js",
-    "pg:refresh:current-assignments": "npm run pg:pull:airtable-current-assignments && npm run pg:normalize && npm run pg:build:hb",
