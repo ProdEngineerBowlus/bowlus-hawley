@@ -117,6 +117,12 @@ events for the VIN/Fabrication scopes and Engineering Changes, fetches changed
 task rows, updates HB/Postgres, and rebuilds HB only when changed tasks are
 found. It does not write to Asana or Airtable.
 
+`pg:refresh:current-assignments` is the one-minute Airtable planning updater
+used by the production worker service. It mirrors only Task Instances whose
+`Assigned On` is the current shop date, then normalizes and rebuilds HB. This
+keeps same-day worker assignments fresh without repeatedly pulling the full
+Airtable archive; the nightly refresh remains the complete historical mirror.
+
 `pg:writeback:airtable-task-times` is dry-run by default. With its explicit
 source-write gates enabled, it publishes Hawley's canonical task actual to
 existing Airtable Task Instances, then updates the three task-template

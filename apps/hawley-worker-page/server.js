@@ -36,6 +36,7 @@ const WORKER_ACTUALS_WATCH_INTERVAL_MS = Number(process.env.HAWLEY_WORKER_ACTUAL
 const WORKER_ACTUALS_WATCH_RESTART_MS = Number(process.env.HAWLEY_WORKER_ACTUALS_WATCH_RESTART_MS || 30000);
 const AIRTABLE_TASK_TIME_WRITEBACK_INTERVAL_MS = Number(process.env.HAWLEY_AIRTABLE_TASK_TIME_WRITEBACK_INTERVAL_MS || 60000);
 const AIRTABLE_TASK_TIME_WRITEBACK_RESTART_MS = Number(process.env.HAWLEY_AIRTABLE_TASK_TIME_WRITEBACK_RESTART_MS || 30000);
+const AIRTABLE_CURRENT_ASSIGNMENTS_INTERVAL_MS = Number(process.env.HAWLEY_AIRTABLE_CURRENT_ASSIGNMENTS_INTERVAL_MS || 60000);
 const NIGHTLY_REFRESH_TIME = process.env.HAWLEY_NIGHTLY_REFRESH_TIME || "01:00";
 const NIGHTLY_REFRESH_TIME_ZONE = process.env.HAWLEY_NIGHTLY_REFRESH_TIME_ZONE || "America/Los_Angeles";
 const NIGHTLY_REFRESH_SCRIPT = process.env.HAWLEY_NIGHTLY_REFRESH_SCRIPT || "pg:refresh-hawley-read-model";
@@ -236,6 +237,23 @@ const airtableTaskTimeWritebackState = {
 let airtableTaskTimeWritebackProcess = null;
 let airtableTaskTimeWritebackRestartTimer = null;
 let airtableTaskTimeWritebackStopping = false;
+
+const airtableCurrentAssignmentsState = {
+  enabled: false,
+  requested: false,
+  running: false,
+  pid: null,
+  startedAt: "",
+  lastOutputAt: "",
+  lastExit: null,
+  lastError: "",
+  intervalMs: AIRTABLE_CURRENT_ASSIGNMENTS_INTERVAL_MS,
+  mode: "web-service-sidecar",
+  reason: ""
+};
+let airtableCurrentAssignmentsProcess = null;
+let airtableCurrentAssignmentsTimer = null;
+let airtableCurrentAssignmentsStopping = false;
 
 const nightlyRefreshState = {
   enabled: false,
@@ -489,6 +507,13 @@ function shouldStartAirtableTaskTimeWriteback() {
   return process.env.NODE_ENV === "production";
 }
 
+function shouldStartAirtableCurrentAssignmentsWatcher() {
+  if (process.env.HAWLEY_AIRTABLE_CURRENT_ASSIGNMENTS_WATCH_IN_WEB !== undefined) {
+    return booleanEnv("HAWLEY_AIRTABLE_CURRENT_ASSIGNMENTS_WATCH_IN_WEB", false);
+  }
+  return process.env.NODE_ENV === "production";
+}
+
 function shouldStartNightlyRefreshScheduler() {
   if (process.env.HAWLEY_NIGHTLY_REFRESH_ENABLED !== undefined) {
     return booleanEnv("HAWLEY_NIGHTLY_REFRESH_ENABLED", false);
@@ -530,6 +555,10 @@ function airtableTaskTimeWritebackStatus() {
   return { ...airtableTaskTimeWritebackState };
 }
 
+function airtableCurrentAssignmentsStatus() {
+  return { ...airtableCurrentAssignmentsState };
+}
+
 function nightlyRefreshStatus() {
   return { ...nightlyRefreshState };
 }
@@ -543,6 +572,7 @@ function watcherStatuses() {
     asanaEvents: asanaEventWatcherStatus(),
     workerDailyActuals: workerActualsWatcherStatus(),
     airtableTaskTimeWriteback: airtableTaskTimeWritebackStatus(),
+    airtableCurrentAssignments: airtableCurrentAssignmentsStatus(),
     nightlyRefresh: nightlyRefreshStatus(),
     nightlyAirtableBackfill: nightlyAirtableBackfillStatus()
   };
@@ -879,6 +909,105 @@ function stopAirtableTaskTimeWriteback(signal = "SIGTERM") {
   }
   if (airtableTaskTimeWritebackProcess && !airtableTaskTimeWritebackProcess.killed) {
     airtableTaskTimeWritebackProcess.kill(signal);
+  }
+}
+
+function logAirtableCurrentAssignmentsStream(streamName, chunk) {
+  const lines = String(chunk).split(/\r?\n/).filter(Boolean);
+  for (const line of lines) {
+    airtableCurrentAssignmentsState.lastOutputAt = new Date().toISOString();
+    if (streamName === "stderr") {
+      airtableCurrentAssignmentsState.lastError = line.slice(0, 1000);
+      console.error(`[hawley-airtable-current-assignments] ${line}`);
+    } else {
+      console.log(`[hawley-airtable-current-assignments] ${line}`);
+    }
+  }
+}
+
+function startAirtableCurrentAssignmentsWatcher() {
+  airtableCurrentAssignmentsState.requested = shouldStartAirtableCurrentAssignmentsWatcher();
+  airtableCurrentAssignmentsState.enabled = false;
+  airtableCurrentAssignmentsState.reason = "";
+  if (!airtableCurrentAssignmentsState.requested) {
+    airtableCurrentAssignmentsState.reason = "disabled";
+    return;
+  }
+  if (!process.env.AIRTABLE_PAT || !process.env.AIRTABLE_BASE) {
+    airtableCurrentAssignmentsState.reason = "missing AIRTABLE_PAT or AIRTABLE_BASE";
+    console.warn("Hawley current Airtable assignment watcher disabled: missing Airtable configuration.");
+    return;
+  }
+  if (!syncDatabaseConfigured()) {
+    airtableCurrentAssignmentsState.reason = "missing HAWLEY_SYNC_DATABASE_URL or HAWLEY_MIGRATION_DATABASE_URL";
+    console.warn("Hawley current Airtable assignment watcher disabled: missing sync database URL.");
+    return;
+  }
+  if (!Number.isFinite(AIRTABLE_CURRENT_ASSIGNMENTS_INTERVAL_MS) || AIRTABLE_CURRENT_ASSIGNMENTS_INTERVAL_MS < 15000) {
+    airtableCurrentAssignmentsState.reason = "invalid HAWLEY_AIRTABLE_CURRENT_ASSIGNMENTS_INTERVAL_MS";
+    console.warn("Hawley current Airtable assignment watcher disabled: interval must be at least 15000 ms.");
+    return;
+  }
+
+  airtableCurrentAssignmentsState.enabled = true;
+  airtableCurrentAssignmentsState.reason = "running";
+  refreshAirtableCurrentAssignments();
+  airtableCurrentAssignmentsTimer = setInterval(
+    refreshAirtableCurrentAssignments,
+    AIRTABLE_CURRENT_ASSIGNMENTS_INTERVAL_MS
+  );
+  airtableCurrentAssignmentsTimer.unref?.();
+}
+
+function refreshAirtableCurrentAssignments() {
+  if (
+    airtableCurrentAssignmentsStopping ||
+    !airtableCurrentAssignmentsState.enabled ||
+    airtableCurrentAssignmentsProcess ||
+    nightlyRefreshProcess
+  ) return;
+
+  const child = spawn(npmCommand(), ["run", "pg:refresh:current-assignments"], {
+    cwd: repoRoot,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true
+  });
+  airtableCurrentAssignmentsProcess = child;
+  airtableCurrentAssignmentsState.running = true;
+  airtableCurrentAssignmentsState.pid = child.pid || null;
+  airtableCurrentAssignmentsState.startedAt = new Date().toISOString();
+  airtableCurrentAssignmentsState.lastExit = null;
+  airtableCurrentAssignmentsState.lastError = "";
+  airtableCurrentAssignmentsState.reason = "running";
+  child.stdout.on("data", chunk => logAirtableCurrentAssignmentsStream("stdout", chunk));
+  child.stderr.on("data", chunk => logAirtableCurrentAssignmentsStream("stderr", chunk));
+  child.on("error", error => {
+    airtableCurrentAssignmentsState.lastError = error.message;
+    airtableCurrentAssignmentsState.reason = "spawn failed";
+    console.error(`Hawley current Airtable assignment refresh failed to start: ${error.message}`);
+  });
+  child.on("exit", (code, signal) => {
+    airtableCurrentAssignmentsProcess = null;
+    airtableCurrentAssignmentsState.running = false;
+    airtableCurrentAssignmentsState.pid = null;
+    airtableCurrentAssignmentsState.lastExit = { code, signal, at: new Date().toISOString() };
+    if (airtableCurrentAssignmentsStopping || !airtableCurrentAssignmentsState.enabled) {
+      airtableCurrentAssignmentsState.reason = "stopped";
+      return;
+    }
+    airtableCurrentAssignmentsState.reason = code === 0 ? "waiting" : "failed";
+  });
+}
+
+function stopAirtableCurrentAssignmentsWatcher(signal = "SIGTERM") {
+  airtableCurrentAssignmentsStopping = true;
+  if (airtableCurrentAssignmentsTimer) {
+    clearInterval(airtableCurrentAssignmentsTimer);
+    airtableCurrentAssignmentsTimer = null;
+  }
+  if (airtableCurrentAssignmentsProcess && !airtableCurrentAssignmentsProcess.killed) {
+    airtableCurrentAssignmentsProcess.kill(signal);
   }
 }
 
@@ -11953,6 +12082,7 @@ async function startServer() {
   startAsanaEventWatcher();
   startWorkerActualsWatcher();
   startAirtableTaskTimeWriteback();
+  startAirtableCurrentAssignmentsWatcher();
   startNightlyRefreshScheduler();
   server.listen(PORT, HOST, () => {
     console.log(`Hawley worker pilot listening on http://${HOST}:${PORT}`);
@@ -11983,6 +12113,7 @@ function shutdown(signal) {
   stopAsanaEventWatcher(signal);
   stopWorkerActualsWatcher(signal);
   stopAirtableTaskTimeWriteback(signal);
+  stopAirtableCurrentAssignmentsWatcher(signal);
   stopNightlyRefreshScheduler(signal);
   server.close(() => {
     Promise.all([

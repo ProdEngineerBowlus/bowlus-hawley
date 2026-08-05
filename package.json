@@ -33,3 +33,5 @@
     "pg": "^8.13.1"
   }
 }
+    "pg:pull:airtable-current-assignments": "node ./apps/postgres-sync/src/pull-airtable-current-assignments.js",
+    "pg:refresh:current-assignments": "npm run pg:pull:airtable-current-assignments && npm run pg:normalize && npm run pg:build:hb",

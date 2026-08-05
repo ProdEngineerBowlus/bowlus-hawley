@@ -329,6 +329,17 @@ For the DB-only worker page pilot, the repeatable freshness command is:
 npm run pg:refresh-worker-read-model
 ```
 
+For a quick, read-only refresh of only the current shop day's Airtable
+assignments, use:
+
+```powershell
+npm run pg:refresh:current-assignments
+```
+
+The production worker service runs this same command at a one-minute cadence.
+It only reads Task Instances whose `Assigned On` is today, then normalizes and
+rebuilds HB; the nightly refresh remains responsible for the full archive.
+
 That updates Airtable support tables, normalizes Hawley task rows, then mirrors
 the Daily Assignment Tracker snapshot and referenced source tasks. Use the
 broader command when the full Asana portfolio mirror also needs to be refreshed:
