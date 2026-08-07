@@ -2248,6 +2248,10 @@ button {
   text-align: center;
 }
 
+.admin-shell .empty-state {
+  background: rgba(24, 31, 24, 0.92);
+}
+
 .toast {
   position: fixed;
   right: 18px;

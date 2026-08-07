@@ -240,10 +240,15 @@ coverage, unmatched timer time, or unmapped tasks is labelled **Partial timer
 coverage**, not treated as a complete performance score.
 
 Managers can use the **Cycle** card in the reporting overview as a compact
-past-cycle chooser. Selecting a cycle opens its final workday while retaining
-the currently selected employee. Worker performance cards show every scheduled
-workday in the selected cycle; for the active cycle, today's in-progress day remains in the live
-Snapshot instead of the historical card row.
+current/past-cycle chooser. Selecting a completed cycle opens its final
+workday; selecting the active cycle opens its latest available workday rather
+than a future scheduled date. The chooser retains the currently selected
+employee and offers a direct **Current: C##** return while reviewing history.
+If a manager deliberately opens a date without assignments, the task canvas
+shows an explicit no-assignment message. Worker performance cards show every
+scheduled workday in the selected cycle; for the active cycle, today's
+in-progress day remains in the live Snapshot instead of the historical card
+row.
 
 Hawley source-task hours can intentionally differ from the legacy worker app
 when the Daily Assignment Tracker snapshot is stale. In that case, task IDs and

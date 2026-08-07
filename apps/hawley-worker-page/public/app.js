@@ -741,8 +741,23 @@
     const line = state.lineOverview;
     if (!line) return "";
     const activeCycle = line.cycle || "Current";
-    const cycleChoices = (Array.isArray(state.cycleDays?.cycles) ? state.cycleDays.cycles : [])
-      .filter((cycle) => cycle.cycle && cycle.cycle !== activeCycle && cycle.primaryDate && cycle.primaryDate < state.date)
+    const cycles = Array.isArray(state.cycleDays?.cycles) ? state.cycleDays.cycles : [];
+    const currentCycle = cycles.find((cycle) =>
+      cycle.cycle
+      && cycle.primaryDate
+      && cycle.firstDate <= today
+      && cycle.lastDate >= today
+    );
+    const currentCycleChoice = currentCycle && currentCycle.cycle !== activeCycle
+      ? `
+        <a class="cycle-shortcut-current" href="${escapeAttr(managerDateUrl(currentCycle.primaryDate))}">
+          <strong>Current: ${escapeHtml(currentCycle.cycle)}</strong>
+          <span>Return to ${escapeHtml(formatShortDate(currentCycle.primaryDate))}</span>
+        </a>
+      `
+      : "";
+    const cycleChoices = cycles
+      .filter((cycle) => cycle.cycle && cycle.cycle !== activeCycle && cycle.cycle !== currentCycle?.cycle && cycle.primaryDate && cycle.primaryDate < state.date)
       .map((cycle) => `
         <a href="${escapeAttr(managerDateUrl(cycle.primaryDate))}">
           <strong>${escapeHtml(cycle.cycle)}</strong>
@@ -758,12 +773,12 @@
         </div>
         <div class="panel-body metric-grid">
           <details class="metric cycle-shortcut">
-            <summary aria-label="Choose a past cycle">
-              <span>Cycle<small>View past cycles</small></span>
+            <summary aria-label="Choose a current or past cycle">
+              <span>Cycle<small>View current or past cycles</small></span>
               <strong>${escapeHtml(activeCycle)}</strong>
             </summary>
             <div class="cycle-shortcut-options">
-              ${cycleChoices || "<span>No completed prior cycles are available.</span>"}
+              ${currentCycleChoice}${cycleChoices || (currentCycleChoice ? "" : "<span>No completed prior cycles are available.</span>")}
             </div>
           </details>
           ${renderMetric("Assigned", formatHours(line.assignedHours))}
@@ -1439,7 +1454,12 @@
       <div class="grid assignment-grid">
         <section class="task-list">
           ${renderCncMachinePanel(worker)}
-          ${renderTaskCards(worker.tasks, false, managerControlEnabled())}
+          ${renderTaskCards(
+            worker.tasks,
+            false,
+            managerControlEnabled(),
+            `No tasks were assigned to ${escapeHtml(worker.name)} for ${escapeHtml(formatLongDate(state.date))}.`
+          )}
         </section>
         <aside class="panel">
           <div class="panel-header">
@@ -1680,11 +1700,11 @@
     `;
   }
 
-  function renderTaskCards(tasks, locked, canControl = locked) {
+  function renderTaskCards(tasks, locked, canControl = locked, emptyMessage = "") {
     const visibleTasks = locked ? openTasks(tasks) : tasks || [];
 
     if (!visibleTasks.length) {
-      return `<div class="empty-state">${locked ? "All assigned tasks are complete." : "No assigned task breakdown rows in this snapshot."}</div>`;
+      return `<div class="empty-state">${emptyMessage || (locked ? "All assigned tasks are complete." : "No assigned task breakdown rows in this snapshot.")}</div>`;
     }
 
     return visibleTasks

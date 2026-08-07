@@ -3046,7 +3046,15 @@ async function reportingCycleSummaries(selectedDate, selectedCycleName = "") {
       const holidays = holidayDatesFromField(row.holidays, row.start_date);
       const dates = cycleWorkdays(row.start_date, row.end_date, holidays, row.days_in_cycle);
       const dayCount = dates.length || Number(row.days_in_cycle || 0);
-      const primaryDate = dates[dates.length - 1] || row.end_date || row.start_date || selectedDate;
+      // For an active cycle, the final scheduled workday can still be in the
+      // future. Navigation must open the most recent available workday, not a
+      // future blank assignment canvas.
+      const availableDates = dates.filter(date => date <= currentDate);
+      const primaryDate = availableDates[availableDates.length - 1]
+        || dates[dates.length - 1]
+        || row.end_date
+        || row.start_date
+        || selectedDate;
       return {
         key,
         cycle,
