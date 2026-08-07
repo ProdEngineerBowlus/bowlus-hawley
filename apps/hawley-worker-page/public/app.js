@@ -1563,11 +1563,16 @@
     const timerBlocks = Array.isArray(data.timerBlocks) ? data.timerBlocks : [];
     const evidenceEntries = Array.isArray(data.evidenceEntries) ? data.evidenceEntries : timerBlocks.map((block) => ({ type: "timer", ...block }));
     const unloggedGaps = Array.isArray(data.unloggedGaps) ? data.unloggedGaps : [];
+    const gapColorByWindow = new Map(unloggedGaps.map((gap, index) => [
+      `${gap.startedAt}:${gap.stoppedAt}`,
+      index % 4
+    ]));
     const unloggedCompletions = unloggedGaps.flatMap((gap) => (
       (Array.isArray(gap.completedTasks) ? gap.completedTasks : []).map((task) => ({
         ...task,
         gapStartedAt: gap.startedAt,
-        gapStoppedAt: gap.stoppedAt
+        gapStoppedAt: gap.stoppedAt,
+        gapColor: gapColorByWindow.get(`${gap.startedAt}:${gap.stoppedAt}`) || 0
       }))
     ));
     const needsReview = data.confidence === "needs_review";
@@ -1578,7 +1583,7 @@
         <div class="worker-day-evidence-header">
           <div>
             <strong>${escapeHtml(formatLongDate(data.date || selectedDate))} logged-time evidence</strong>
-            <span>${needsReview ? `${escapeHtml(data.openIssueCount)} reported app issue${data.openIssueCount === 1 ? "" : "s"} — review before using this day as a performance discussion.` : partialCoverage ? "Recorded timer blocks are factual. Amber gaps are not labor; they show only an absence of Hawley timer data and any matching Asana completion evidence." : "Recorded timer blocks are factual. Amber gaps do not add or infer labor time."}</span>
+            <span>${needsReview ? `${escapeHtml(data.openIssueCount)} reported app issue${data.openIssueCount === 1 ? "" : "s"} — review before using this day as a performance discussion.` : partialCoverage ? "Recorded timer blocks are factual. Color-keyed gaps are not labor; they show only an absence of Hawley timer data and any matching Asana completion evidence." : "Recorded timer blocks are factual. Color-keyed gaps do not add or infer labor time."}</span>
           </div>
           <button class="btn ghost" type="button" data-action="close-day-evidence">Close</button>
         </div>
@@ -1592,16 +1597,17 @@
             <h3>Completed with no Hawley time</h3>
             <p class="evidence-panel-hint">Asana completion evidence only. These tasks did not have a matching Hawley timer block.</p>
             <ul class="worker-evidence-list completion-evidence">
-              ${unloggedCompletions.length ? unloggedCompletions.map((task) => `<li class="unlogged completion"><span><strong>${escapeHtml(task.taskName)}</strong><em>${escapeHtml(formatEvidenceRange(task.gapStartedAt, task.gapStoppedAt))} no-task-time block</em></span><small>Completed in Asana ${escapeHtml(formatEvidenceTime(task.completedAt))}</small></li>`).join("") : "<li class=\"empty\"><span>No Asana completions without a Hawley timer in the shown gaps.</span></li>"}
+              ${unloggedCompletions.length ? unloggedCompletions.map((task) => `<li class="unlogged completion gap-color-${task.gapColor}"><span><strong>${escapeHtml(task.taskName)}</strong><em>${escapeHtml(formatEvidenceRange(task.gapStartedAt, task.gapStoppedAt))} no-task-time block</em></span><small>Completed in Asana ${escapeHtml(formatEvidenceTime(task.completedAt))}</small></li>`).join("") : "<li class=\"empty\"><span>No Asana completions without a Hawley timer in the shown gaps.</span></li>"}
             </ul>
           </div>
           <div>
             <h3>Recorded time timeline</h3>
-            <p class="evidence-panel-hint">Chronological Hawley timer blocks and scheduled work gaps. Amber never adds labor time.</p>
+            <p class="evidence-panel-hint">Chronological Hawley timer blocks and scheduled work gaps. Colors link the two panels; they never add labor time.</p>
             <ul class="worker-evidence-list timeline">
               ${evidenceEntries.length ? evidenceEntries.map((entry) => {
                 if (entry.type === "unlogged_gap") {
-                  return `<li class="unlogged"><span><strong>${escapeHtml(formatEvidenceRange(entry.startedAt, entry.stoppedAt))}</strong> No task time logged</span><small>${escapeHtml(formatMinutes(entry.durationMinutes || 0))} without a Hawley timer</small></li>`;
+                  const gapColor = gapColorByWindow.get(`${entry.startedAt}:${entry.stoppedAt}`) || 0;
+                  return `<li class="unlogged gap-color-${gapColor}"><span><strong>${escapeHtml(formatEvidenceRange(entry.startedAt, entry.stoppedAt))}</strong> No task time logged</span><small>${escapeHtml(formatMinutes(entry.durationMinutes || 0))} without a Hawley timer</small></li>`;
                 }
                 return `<li class="${entry.matchedAssignment ? "matched" : "unmatched"}"><span><strong>${escapeHtml(formatEvidenceRange(entry.startedAt, entry.stoppedAt))}</strong> ${escapeHtml(entry.taskName)}</span><small>${escapeHtml(formatMinutes(entry.durationMinutes || 0))} logged · ${escapeHtml(entry.outcome)}${entry.matchedAssignment ? "" : " · recorded on a different task"}</small></li>`;
               }).join("") : "<li><span>No Hawley timer record for this day.</span></li>"}

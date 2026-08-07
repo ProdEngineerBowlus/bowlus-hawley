@@ -786,10 +786,26 @@ button {
 .worker-evidence-list li.unlogged {
   display: grid;
   justify-content: stretch;
-  border-left-color: var(--yellow);
-  background: rgba(220, 177, 45, 0.11);
+  border-left-color: var(--gap-color, var(--yellow));
+  background: var(--gap-surface, rgba(220, 177, 45, 0.11));
 }
-.worker-evidence-list li.unlogged small { color: var(--yellow); }
+.worker-evidence-list li.unlogged small { color: var(--gap-color, var(--yellow)); }
+.worker-evidence-list li.unlogged.gap-color-0 {
+  --gap-color: #ff7654;
+  --gap-surface: rgba(255, 118, 84, 0.12);
+}
+.worker-evidence-list li.unlogged.gap-color-1 {
+  --gap-color: #5fb7ff;
+  --gap-surface: rgba(95, 183, 255, 0.12);
+}
+.worker-evidence-list li.unlogged.gap-color-2 {
+  --gap-color: #cf8eff;
+  --gap-surface: rgba(207, 142, 255, 0.12);
+}
+.worker-evidence-list li.unlogged.gap-color-3 {
+  --gap-color: #9bd65b;
+  --gap-surface: rgba(155, 214, 91, 0.12);
+}
 .worker-evidence-list li.empty { color: var(--muted); }
 .worker-evidence-list li.completion { gap: 5px; }
 .worker-evidence-list li.completion span {
@@ -797,7 +813,7 @@ button {
   gap: 3px;
 }
 .worker-evidence-list li.completion em {
-  color: var(--yellow);
+  color: var(--gap-color, var(--yellow));
   font-size: 11px;
   font-style: normal;
 }
@@ -827,7 +843,7 @@ button {
   background: var(--primary);
   content: "";
 }
-.worker-evidence-list.timeline li.unlogged::before { background: var(--yellow); }
+.worker-evidence-list.timeline li.unlogged::before { background: var(--gap-color, var(--yellow)); }
 .worker-evidence-list.timeline li.unmatched::before { background: var(--accent); }
 
 .worker-issue-button {
