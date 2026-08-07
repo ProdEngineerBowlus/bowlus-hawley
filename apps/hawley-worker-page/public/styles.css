@@ -606,11 +606,16 @@ button {
   display: grid;
   align-content: start;
   gap: 13px;
+  width: 100%;
   border: 1px solid var(--line);
   border-top: 4px solid var(--line-strong);
   border-radius: 8px;
   background: var(--soft);
   padding: 12px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .worker-performance-day.good {
@@ -625,6 +630,17 @@ button {
   border-top-color: var(--accent);
 }
 
+.worker-performance-day.review {
+  border-top-color: var(--yellow);
+  background: rgba(220, 177, 45, 0.08);
+}
+
+.worker-performance-day:hover,
+.worker-performance-day:focus-visible {
+  border-color: var(--primary);
+  outline: none;
+}
+
 .worker-performance-day.empty {
   opacity: 0.7;
 }
@@ -635,6 +651,121 @@ button {
 .worker-performance-metrics span {
   display: grid;
   gap: 3px;
+}
+
+.worker-performance-confidence {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.worker-performance-confidence.needs-review {
+  color: var(--yellow);
+}
+
+.worker-day-evidence {
+  margin: 0 18px 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: rgba(7, 18, 12, 0.72);
+  overflow: hidden;
+}
+
+.worker-day-evidence.needs-review {
+  border-color: rgba(220, 177, 45, 0.65);
+}
+
+.worker-day-evidence.loading,
+.worker-day-evidence.error {
+  padding: 14px;
+}
+
+.worker-day-evidence.error {
+  color: var(--accent);
+}
+
+.worker-day-evidence-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.worker-day-evidence-header > div,
+.worker-day-evidence-header span {
+  display: grid;
+  gap: 3px;
+}
+
+.worker-day-evidence-header span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.worker-day-evidence-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+}
+
+.worker-day-evidence-summary span {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--soft);
+}
+
+.worker-day-evidence-summary small,
+.worker-evidence-list small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.worker-day-evidence-body {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(320px, 1.2fr);
+  gap: 16px;
+  padding: 14px;
+}
+
+.worker-day-evidence-body h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+
+.worker-evidence-list {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.worker-evidence-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 8px;
+  border-left: 3px solid var(--line-strong);
+  background: var(--soft);
+}
+
+.worker-evidence-list li.issue { border-left-color: var(--yellow); }
+.worker-evidence-list li.session { border-left-color: var(--primary); }
+.worker-evidence-list li.event { border-left-color: var(--muted); }
+
+.worker-issue-button {
+  width: calc(100% - 24px);
+  margin: 12px 12px 0;
+}
+
+.sidebar > .field-hint {
+  margin: 8px 12px 12px;
 }
 
 .worker-performance-date {
@@ -2501,6 +2632,16 @@ button {
 
   .split {
     grid-template-columns: 1fr;
+  }
+
+  .worker-day-evidence-summary,
+  .worker-day-evidence-body {
+    grid-template-columns: 1fr;
+  }
+
+  .worker-day-evidence-header {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .metric-grid {

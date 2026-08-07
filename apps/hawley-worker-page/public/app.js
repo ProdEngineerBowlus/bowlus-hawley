@@ -77,6 +77,7 @@
     refreshedAt: "",
     cycleDays: null,
     workerCyclePerformance: null,
+    workerDayEvidence: null,
     cncMachine: {
       enabled: false,
       maxActiveRuns: 3,
@@ -493,6 +494,27 @@
     render();
   }
 
+  async function loadWorkerDayEvidence(worker, date) {
+    if (!worker || workerPageLocked() || !date) return;
+    const key = `${worker.id}:${date}`;
+    state.workerDayEvidence = { key, loading: true, error: "", data: null };
+    render();
+    try {
+      const params = new URLSearchParams({ worker: worker.id, date, _: String(Date.now()) });
+      const response = await fetch(`/api/worker-day-evidence?${params.toString()}`);
+      if (!response.ok) throw new Error(`Daily evidence returned ${response.status}`);
+      const data = await response.json();
+      if (state.workerDayEvidence?.key === key) {
+        state.workerDayEvidence = { key, loading: false, error: "", data };
+      }
+    } catch (error) {
+      if (state.workerDayEvidence?.key === key) {
+        state.workerDayEvidence = { key, loading: false, error: "Could not load the daily evidence.", data: null };
+      }
+    }
+    render();
+  }
+
   function render() {
     const app = document.getElementById("app");
     const selectedWorker = getSelectedWorker();
@@ -709,6 +731,8 @@
           </div>
           <span class="count-pill">${openTasks(worker.tasks).length} open</span>
         </div>
+        <button class="btn ghost worker-issue-button" type="button" data-action="report-app-issue">Report app issue</button>
+        <p class="field-hint">Use this if a task is missing, a timer fails, or the page shows an error. It creates a manager review record; it does not change your time or task data.</p>
       </aside>
     `;
   }
@@ -1420,6 +1444,7 @@
   }
 
   function performanceTone(day) {
+    if (day?.confidence === "needs_review") return "review";
     if (!day?.hasData || !Number(day.scheduledMinutes || 0)) return "empty";
     const percent = Number(day.productiveUtilizationPercent || 0);
     if (percent >= 90) return "good";
@@ -1493,12 +1518,14 @@
               ? `${day.completedTaskCount}/${day.assignedTaskCount}`
               : "--";
             const logged = day.hasData ? formatMinutes(day.productiveMinutes) : "--";
+            const needsReview = day.confidence === "needs_review";
             return `
-              <article class="worker-performance-day ${escapeAttr(performanceTone(day))}">
+              <button class="worker-performance-day ${escapeAttr(performanceTone(day))}" type="button" data-action="view-day-evidence" data-day-date="${escapeAttr(day.date)}" title="View the records behind this day">
                 <div class="worker-performance-date">
                   <span>Day ${escapeHtml(day.dayNumber)}</span>
                   <strong>${escapeHtml(formatShortDate(day.date))}</strong>
                 </div>
+                <div class="worker-performance-confidence ${needsReview ? "needs-review" : ""}">${needsReview ? `Needs review · ${escapeHtml(day.openIssueCount)} app issue${day.openIssueCount === 1 ? "" : "s"}` : "Recorded data"}</div>
                 <div class="worker-performance-time">
                   <strong>${escapeHtml(logged)}</strong>
                   <span>${escapeHtml(day.hasData ? `logged / ${formatMinutes(day.scheduledMinutes)} capacity` : "no activity recorded")}</span>
@@ -1507,9 +1534,57 @@
                   <span><small>Task efficiency</small><strong>${escapeHtml(efficiency)}</strong></span>
                   <span><small>Tasks complete</small><strong>${escapeHtml(completed)}</strong></span>
                 </div>
-              </article>
+              </button>
             `;
           }).join("")}
+        </div>
+        ${renderWorkerDayEvidence(worker)}
+      </section>
+    `;
+  }
+
+  function renderWorkerDayEvidence(worker) {
+    const evidence = state.workerDayEvidence;
+    if (!evidence || !evidence.key.startsWith(`${worker.id}:`)) return "";
+    const selectedDate = evidence.key.split(":").slice(1).join(":");
+    if (evidence.loading) {
+      return `<div class="worker-day-evidence loading"><strong>Loading ${escapeHtml(formatShortDate(selectedDate))} evidence…</strong></div>`;
+    }
+    if (evidence.error) {
+      return `<div class="worker-day-evidence error"><strong>${escapeHtml(evidence.error)}</strong></div>`;
+    }
+    const data = evidence.data || {};
+    const timeline = Array.isArray(data.timeline) ? data.timeline : [];
+    const assignments = Array.isArray(data.assignments) ? data.assignments : [];
+    const needsReview = data.confidence === "needs_review";
+    return `
+      <section class="worker-day-evidence ${needsReview ? "needs-review" : ""}" aria-label="Daily performance evidence">
+        <div class="worker-day-evidence-header">
+          <div>
+            <strong>${escapeHtml(formatLongDate(data.date || selectedDate))} evidence</strong>
+            <span>${needsReview ? `${escapeHtml(data.openIssueCount)} reported app issue${data.openIssueCount === 1 ? "" : "s"} — review before using this day as a performance discussion.` : "Recorded task, timer, and event data for this day."}</span>
+          </div>
+          <button class="btn ghost" type="button" data-action="close-day-evidence">Close</button>
+        </div>
+        <div class="worker-day-evidence-summary">
+          <span><small>Assigned tasks</small><strong>${assignments.length}</strong></span>
+          <span><small>Timer sessions</small><strong>${Array.isArray(data.sessions) ? data.sessions.length : 0}</strong></span>
+          <span><small>Task events</small><strong>${Array.isArray(data.events) ? data.events.length : 0}</strong></span>
+          <span><small>Assignment read</small><strong>${data.freshness?.assignment_read_at ? formatRelativeTime(data.freshness.assignment_read_at) : "not recorded"}</strong></span>
+        </div>
+        <div class="worker-day-evidence-body">
+          <div>
+            <h3>Assignments</h3>
+            <ul class="worker-evidence-list">
+              ${assignments.length ? assignments.map((task) => `<li><span>${escapeHtml(task.taskName)}</span><small>${escapeHtml(formatMinutes(task.estimatedMinutes || 0))} · ${task.completed ? "complete" : "open"}</small></li>`).join("") : "<li><span>No assigned-task record</span></li>"}
+            </ul>
+          </div>
+          <div>
+            <h3>Activity timeline</h3>
+            <ul class="worker-evidence-list timeline">
+              ${timeline.length ? timeline.map((item) => `<li class="${escapeAttr(item.type || "event")}"><span><strong>${escapeHtml(formatEvidenceTime(item.at))}</strong> ${escapeHtml(item.title || "Activity")}</span><small>${escapeHtml(item.detail || "")}</small></li>`).join("") : "<li><span>No Hawley activity record for this day.</span></li>"}
+            </ul>
+          </div>
         </div>
       </section>
     `;
@@ -1825,6 +1900,24 @@
     document.querySelector("[data-action='copy-selected']")?.addEventListener("click", () => {
       const worker = getSelectedWorker();
       if (worker) copyText(employeeUrl(worker.id));
+    });
+
+    document.querySelectorAll("[data-action='view-day-evidence']").forEach((button) => {
+      button.addEventListener("click", () => {
+        const worker = getSelectedWorker();
+        if (worker && button.dataset.dayDate) void loadWorkerDayEvidence(worker, button.dataset.dayDate);
+      });
+    });
+    document.querySelector("[data-action='close-day-evidence']")?.addEventListener("click", () => {
+      state.workerDayEvidence = null;
+      render();
+    });
+    document.querySelector("[data-action='report-app-issue']")?.addEventListener("click", async () => {
+      const worker = getSelectedWorker();
+      if (!worker) return;
+      const detail = window.prompt("Briefly describe the Hawley problem (missing task, timer error, or screen error). This creates a manager review record.", "");
+      if (detail === null || !detail.trim()) return;
+      await reportWorkerAppIssue(worker.id, detail);
     });
 
     document.querySelectorAll("[data-action='start-timer']").forEach((button) => {
@@ -2208,6 +2301,22 @@
       state.actionTaskId = "";
       render();
       showToastError(error.message || "Could not end time study");
+    }
+  }
+
+  async function reportWorkerAppIssue(employee, detail) {
+    try {
+      const response = await postJsonWithPin("/api/worker-app-issue", {
+        employee,
+        date: state.date,
+        issueType: "app_issue",
+        detail,
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || `Issue report failed with ${response.status}`);
+      showToast(payload.message || "Issue recorded for manager review.", 5000);
+    } catch (error) {
+      showToastError(error.message || "Could not report the app issue");
     }
   }
 
@@ -2973,6 +3082,15 @@
     return new Intl.DateTimeFormat(undefined, {
       month: "short",
       day: "numeric",
+    }).format(date);
+  }
+
+  function formatEvidenceTime(value) {
+    const date = new Date(value || "");
+    if (Number.isNaN(date.getTime())) return "time not recorded";
+    return new Intl.DateTimeFormat(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
     }).format(date);
   }
 

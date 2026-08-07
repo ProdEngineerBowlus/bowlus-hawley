@@ -188,15 +188,25 @@ When a manager selects an employee, the top of the manager detail page includes
 a **Cycle daily performance** strip for the five completed workdays immediately
 before the selected date. Each card shows logged productive time against that
 worker's scheduled daily capacity, estimate-based task efficiency, and tasks
-completed out of tasks assigned. It is manager-only and read-only; worker pages
-do not receive this history. The endpoint is
-`/api/worker-cycle-performance`. It uses the Hawley-owned cycle calendar, the
-live `hb.worker_daily_task_actuals` ledger, and dated
+completed out of tasks assigned. It is manager-only; worker pages do not
+receive this history. The endpoint is `/api/worker-cycle-performance`. It uses
+the Hawley-owned cycle calendar, the live `hb.worker_daily_task_actuals` ledger,
+dated
 `hb.rev1_task_instances` directly rather than the larger utilization reporting
 view, so the manager detail remains responsive while the one-minute assignment
 mirror is rebuilding. The selected/current day remains in the existing live
 Snapshot so incomplete WIP is not presented as a finished-day performance
 result.
+
+Each performance card is clickable for managers. `/api/worker-day-evidence`
+returns the dated Rev1 assignments, Hawley timer sessions, task action events,
+and any worker-reported app issue behind that card. The worker rail includes a
+**Report app issue** action that writes an evidence-only row to
+`core.worker_app_issue_reports`; it never changes labor, capacity, completion,
+or efficiency values. An open or reviewed issue gives the corresponding
+manager-only card a **Needs review** status so the recorded values are not used
+as an unqualified performance discussion. Worker issue reports are intentionally
+simple at rollout; manager resolution/review workflows may be added later.
 
 Hawley source-task hours can intentionally differ from the legacy worker app
 when the Daily Assignment Tracker snapshot is stale. In that case, task IDs and

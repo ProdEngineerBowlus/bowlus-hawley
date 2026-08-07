@@ -320,7 +320,7 @@ function sendError(res, status, message, details = {}) {
 
 function publicErrorMessage(error) {
   const message = error.message || "";
-  if (/hawley_worker_page_assignments|hawley_cycle_calendar|hawley_reporting_day_summary|worker_daily_utilization|phase_cycle_load_rev1|phase_cycle_pace_overrides|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|task_templates|production_schedule|airtable_tasks|airtable_production|airtable_vins|airtable_models|airtable_cnc_sheets|cnc_parts_master|cnc_sheets|task_template_(part_links|cnc_sheet_links|materials|bom)|hb\.vins|hb\.models|project_creation_runs|jsonb_display_text|task_transition_events|time_sessions|task_time_studies|task_time_study_laps|transition_category_catalog|app_users|app_sessions|app_auth_events/.test(message)) {
+  if (/hawley_worker_page_assignments|hawley_cycle_calendar|hawley_reporting_day_summary|worker_daily_utilization|phase_cycle_load_rev1|phase_cycle_pace_overrides|task_work_area_inference|work_force_capability_levels|airtable_worker_daily_actuals|task_templates|production_schedule|airtable_tasks|airtable_production|airtable_vins|airtable_models|airtable_cnc_sheets|cnc_parts_master|cnc_sheets|task_template_(part_links|cnc_sheet_links|materials|bom)|hb\.vins|hb\.models|project_creation_runs|jsonb_display_text|task_transition_events|time_sessions|task_time_studies|task_time_study_laps|worker_app_issue_reports|transition_category_catalog|app_users|app_sessions|app_auth_events/.test(message)) {
     return {
       status: 503,
       message: "Hawley worker read model is not migrated yet. Run npm run pg:migrate."
@@ -3186,6 +3186,16 @@ async function configuredWorkers() {
   return result.rows;
 }
 
+async function configuredWorkerForId(workerId) {
+  const requestedWorkerId = canonicalWorkerIdForWrites(workerId || "");
+  if (!requestedWorkerId) return null;
+  const configured = await configuredWorkers();
+  return configured.find(row => canonicalWorkerIdForWrites(slugifyWorker({
+    workerEmail: row.worker_email,
+    workerName: row.worker_name
+  })) === requestedWorkerId) || null;
+}
+
 async function latestAssignmentDate() {
   const result = await pool.query(`
     select max(assigned_on)::text as latest_assignment_date
@@ -3244,11 +3254,7 @@ async function workerCyclePerformancePayload(url, authActor = null) {
   if (!isIsoDate(date)) throw actionError("Date must be YYYY-MM-DD.", 400);
   if (!requestedWorkerId) throw actionError("worker is required.", 400);
 
-  const configured = await configuredWorkers();
-  const worker = configured.find(row => canonicalWorkerIdForWrites(slugifyWorker({
-    workerEmail: row.worker_email,
-    workerName: row.worker_name
-  })) === requestedWorkerId);
+  const worker = await configuredWorkerForId(requestedWorkerId);
   if (!worker) throw actionError("Worker was not found in the active Work Force roster.", 404);
 
   const calendar = await cycleCalendar("", date);
@@ -3311,16 +3317,29 @@ async function workerCyclePerformancePayload(url, authActor = null) {
             or lower(coalesce(task_instance.worker_name, '')) = lower($4)
           )
         group by task_instance.assigned_on
+      ),
+      daily_issues as (
+        select
+          issues.work_date,
+          count(*) filter (where issues.status in ('open', 'reviewed'))::integer as open_issue_count,
+          count(*)::integer as issue_count
+        from core.worker_app_issue_reports issues
+        where issues.work_date = any($1::date[])
+          and issues.worker_key = $2
+        group by issues.work_date
       )
       select
         requested_days.work_date::text,
         daily_actuals.productive_task_minutes,
         daily_actuals.estimated_minutes,
         daily_assignments.assigned_task_count,
-        daily_assignments.completed_task_count
+        daily_assignments.completed_task_count,
+        daily_issues.open_issue_count,
+        daily_issues.issue_count
       from requested_days
       left join daily_actuals using (work_date)
       left join daily_assignments using (work_date)
+      left join daily_issues using (work_date)
       order by requested_days.work_date
     `,
     [historyDates, requestedWorkerId, worker.worker_email || "", worker.worker_name || "", LIVE_WORKER_SOURCE]
@@ -3341,6 +3360,7 @@ async function workerCyclePerformancePayload(url, authActor = null) {
       const taskEfficiencyPercent = productiveMinutes > 0 && estimatedMinutes > 0
         ? round((estimatedMinutes / productiveMinutes) * 100, 1)
         : null;
+      const openIssueCount = Number(row?.open_issue_count || 0);
       return {
         date: workDate,
         dayNumber: cycleDates.indexOf(workDate) + 1,
@@ -3350,6 +3370,9 @@ async function workerCyclePerformancePayload(url, authActor = null) {
         estimatedMinutes,
         productiveUtilizationPercent: scheduledMinutes ? round((productiveMinutes / scheduledMinutes) * 100, 1) : 0,
         taskEfficiencyPercent,
+        issueCount: Number(row?.issue_count || 0),
+        openIssueCount,
+        confidence: openIssueCount > 0 ? "needs_review" : (row ? "recorded" : "no_data"),
         assignedTaskCount: Number(row?.assigned_task_count || 0),
         completedTaskCount: Number(row?.completed_task_count || 0),
         completionPercent: Number(row?.assigned_task_count || 0)
@@ -3357,6 +3380,141 @@ async function workerCyclePerformancePayload(url, authActor = null) {
           : null
       };
     })
+  };
+}
+
+async function workerDayEvidencePayload(url, authActor = null) {
+  requireManagerActor(authActor);
+  const date = url.searchParams.get("date") || todayIso();
+  const workerId = canonicalWorkerIdForWrites(url.searchParams.get("worker") || "");
+  if (!isIsoDate(date)) throw actionError("Date must be YYYY-MM-DD.", 400);
+  if (!workerId) throw actionError("worker is required.", 400);
+
+  const worker = await configuredWorkerForId(workerId);
+  if (!worker) throw actionError("Worker was not found in the active Work Force roster.", 404);
+  const workerEmail = worker.worker_email || "";
+  const workerName = worker.worker_name || "";
+
+  const [assignmentsResult, sessionsResult, eventsResult, issuesResult, freshnessResult] = await Promise.all([
+    pool.query(
+      `
+        select
+          coalesce(task_instance.asana_task_gid, task_instance.rev1_task_instance_id::text) as task_id,
+          task_instance.task_name,
+          task_instance.task_completed,
+          task_instance.allocated_hours,
+          task_instance.source_synced_at::text
+        from hb.rev1_task_instances task_instance
+        where task_instance.assigned_on = $1::date
+          and (
+            lower(coalesce(task_instance.worker_email, '')) = lower($2)
+            or lower(coalesce(task_instance.assignee_email, '')) = lower($2)
+            or lower(coalesce(task_instance.worker_name, '')) = lower($3)
+          )
+        order by task_instance.task_completed, task_instance.task_name
+      `,
+      [date, workerEmail, workerName]
+    ),
+    pool.query(
+      `
+        select
+          time_session_id::text as id, task_name, asana_task_gid as task_id,
+          started_at::text, stopped_at::text, duration_minutes, stop_reason, source
+        from core.time_sessions
+        where work_date = $1::date and worker_key = $2
+        order by started_at
+      `,
+      [date, workerId]
+    ),
+    pool.query(
+      `
+        select
+          worker_task_event_id::text as id, task_name, asana_task_gid as task_id,
+          event_type, event_timestamp::text, duration_minutes, sync_status, notes
+        from core.worker_task_events
+        where work_date = $1::date and worker_key = $2
+        order by event_timestamp
+      `,
+      [date, workerId]
+    ),
+    pool.query(
+      `
+        select
+          worker_app_issue_report_id::text as id, issue_type, detail, status,
+          task_name, asana_task_gid as task_id, reported_at::text,
+          reported_by_email, resolution_note, resolved_at::text
+        from core.worker_app_issue_reports
+        where work_date = $1::date and worker_key = $2
+        order by reported_at
+      `,
+      [date, workerId]
+    ),
+    pool.query(
+      `
+        select max(source_synced_at)::text as assignment_read_at,
+               max(normalized_at)::text as assignment_normalized_at
+        from hb.rev1_task_instances
+        where assigned_on = $1::date
+          and (
+            lower(coalesce(worker_email, '')) = lower($2)
+            or lower(coalesce(assignee_email, '')) = lower($2)
+            or lower(coalesce(worker_name, '')) = lower($3)
+          )
+      `,
+      [date, workerEmail, workerName]
+    )
+  ]);
+
+  const sessions = sessionsResult.rows.map(row => ({
+    type: "session",
+    at: row.started_at,
+    title: row.task_name || "Timer session",
+    detail: row.stopped_at
+      ? `${Number(row.duration_minutes || 0)} minutes recorded${row.stop_reason ? ` · ${row.stop_reason}` : ""}`
+      : "Timer is still running",
+    taskId: row.task_id || "",
+    durationMinutes: Number(row.duration_minutes || 0),
+    closed: Boolean(row.stopped_at)
+  }));
+  const events = eventsResult.rows.map(row => ({
+    type: "event",
+    at: row.event_timestamp,
+    title: row.task_name || "Task event",
+    detail: `${row.event_type}${row.duration_minutes ? ` · ${row.duration_minutes} minutes` : ""}${row.sync_status ? ` · ${row.sync_status}` : ""}`,
+    taskId: row.task_id || ""
+  }));
+  const issues = issuesResult.rows.map(row => ({
+    type: "issue",
+    at: row.reported_at,
+    title: row.task_name || "Hawley app issue reported",
+    detail: row.detail || row.issue_type,
+    status: row.status,
+    taskId: row.task_id || "",
+    resolvedAt: row.resolved_at || "",
+    resolutionNote: row.resolution_note || ""
+  }));
+  const timeline = [...sessions, ...events, ...issues]
+    .filter(item => item.at)
+    .sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+  const openIssueCount = issues.filter(issue => ["open", "reviewed"].includes(issue.status)).length;
+
+  return {
+    worker: { id: workerId, name: workerName || "Worker", email: workerEmail },
+    date,
+    confidence: openIssueCount > 0 ? "needs_review" : (timeline.length ? "recorded" : "no_data"),
+    openIssueCount,
+    assignments: assignmentsResult.rows.map(row => ({
+      taskId: row.task_id || "",
+      taskName: row.task_name || "Untitled task",
+      completed: Boolean(row.task_completed),
+      estimatedMinutes: Math.round(Number(row.allocated_hours || 0) * 60),
+      sourceSyncedAt: row.source_synced_at || ""
+    })),
+    sessions: sessionsResult.rows,
+    events: eventsResult.rows,
+    issues: issuesResult.rows,
+    timeline,
+    freshness: freshnessResult.rows[0] || {}
   };
 }
 
@@ -6268,6 +6426,54 @@ async function handleTimeStudyLap(req) {
   } finally {
     client.release();
   }
+}
+
+function workerAppIssueType(value) {
+  const type = String(value || "app_issue").trim().toLowerCase();
+  return ["app_issue", "task_not_visible", "timer_failed", "assignment_mismatch", "other"].includes(type)
+    ? type
+    : "app_issue";
+}
+
+async function handleWorkerAppIssueReport(req) {
+  const body = await readJsonBody(req);
+  const employee = canonicalWorkerIdForWrites(body.employee || "");
+  const date = String(body.date || todayIso()).trim();
+  const detail = String(body.detail || "").trim().replace(/\s+/g, " ").slice(0, 800);
+  const issueType = workerAppIssueType(body.issueType);
+  const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  if (!employee || !isIsoDate(date)) throw actionError("Worker and work date are required.", 400);
+  requireWorkerAccess(authActor, employee);
+  if (!detail) throw actionError("Briefly describe what Hawley did or did not do.", 400);
+
+  const worker = await configuredWorkerForId(employee);
+  if (!worker) throw actionError("Worker was not found in the active Work Force roster.", 404);
+  const result = await writePool.query(
+    `
+      insert into core.worker_app_issue_reports (
+        issue_key, worker_key, worker_name, worker_email, work_date,
+        issue_type, detail, status, reported_by_email, source_payload
+      ) values ($1, $2, $3, $4, $5::date, $6, $7, 'open', $8, $9::jsonb)
+      returning issue_key, reported_at::text
+    `,
+    [
+      `issue:${crypto.randomUUID()}`,
+      employee,
+      worker.worker_name || "",
+      worker.worker_email || "",
+      date,
+      issueType,
+      detail,
+      normalizeEmail(authActor?.email || worker.worker_email || "") || null,
+      JSON.stringify({ actor: authActorSummary(authActor), reportedFrom: "hawley_worker_page" })
+    ]
+  );
+  return {
+    ok: true,
+    issueKey: result.rows[0].issue_key,
+    reportedAt: result.rows[0].reported_at,
+    message: "Issue recorded for manager review. It will not change your logged time or task data."
+  };
 }
 
 async function handleWorkerTaskAction(req) {
@@ -12078,6 +12284,12 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/worker-day-evidence" && req.method === "GET") {
+      const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+      sendJson(res, 200, await workerDayEvidencePayload(url, authActor));
+      return;
+    }
+
     if (url.pathname === "/api/utilization-report" && req.method === "GET") {
       const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
       requireManagerActor(authActor);
@@ -12150,6 +12362,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/worker-task-action" && req.method === "POST") {
       sendJson(res, 200, await handleWorkerTaskAction(req));
+      return;
+    }
+
+    if (url.pathname === "/api/worker-app-issue" && req.method === "POST") {
+      sendJson(res, 200, await handleWorkerAppIssueReport(req));
       return;
     }
 
