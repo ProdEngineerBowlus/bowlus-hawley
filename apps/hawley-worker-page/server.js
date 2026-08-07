@@ -1594,6 +1594,49 @@ function scheduledWorkWindowsForDate(workDate) {
     .filter(window => window.start && window.end && window.end > window.start);
 }
 
+// Evidence gaps are a manager-facing cue, not labor.  Keep short gaps out of
+// the ledger so a normal transition between timer sessions is not presented as
+// a missing-time incident.
+const EVIDENCE_MIN_UNLOGGED_GAP_MINUTES = 15;
+
+function unloggedScheduledEvidenceGaps(workDate, timerBlocks) {
+  const currentWorkDate = todayIso();
+  // Do not present an in-progress or future day as missing time.  This review
+  // is deliberately a completed-day evidence aid.
+  if (workDate >= currentWorkDate) return [];
+  const now = new Date();
+  const intervals = (Array.isArray(timerBlocks) ? timerBlocks : [])
+    .map(block => {
+      const start = new Date(block.startedAt);
+      const end = block.stoppedAt ? new Date(block.stoppedAt) : now;
+      return Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start ? null : { start, end };
+    })
+    .filter(Boolean);
+
+  const gaps = [];
+  for (const window of scheduledWorkWindowsForDate(workDate)) {
+    const windowEnd = window.end;
+    const overlapping = intervals
+      .map(interval => ({
+        start: new Date(Math.max(interval.start.getTime(), window.start.getTime())),
+        end: new Date(Math.min(interval.end.getTime(), windowEnd.getTime()))
+      }))
+      .filter(interval => interval.end > interval.start)
+      .sort((left, right) => left.start - right.start);
+    let cursor = window.start;
+    for (const interval of overlapping) {
+      if ((interval.start.getTime() - cursor.getTime()) / 60000 >= EVIDENCE_MIN_UNLOGGED_GAP_MINUTES) {
+        gaps.push({ start: cursor, end: interval.start });
+      }
+      if (interval.end > cursor) cursor = interval.end;
+    }
+    if ((windowEnd.getTime() - cursor.getTime()) / 60000 >= EVIDENCE_MIN_UNLOGGED_GAP_MINUTES) {
+      gaps.push({ start: cursor, end: windowEnd });
+    }
+  }
+  return gaps;
+}
+
 function scheduledWorkMinutesBetween(startValue, endValue, workDate = "") {
   const startedAt = startValue instanceof Date ? startValue : new Date(startValue);
   const stoppedAt = endValue instanceof Date ? endValue : new Date(endValue);
@@ -3462,8 +3505,11 @@ async function workerDayEvidencePayload(url, authActor = null) {
           task_instance.allocated_hours,
           task_instance.tasks_record_id,
           task_instance.source_system,
-          task_instance.source_synced_at::text
+          task_instance.source_synced_at::text,
+          source_task.completed_at::text as asana_completed_at
         from hb.rev1_task_instances task_instance
+        left join raw.asana_tasks source_task
+          on source_task.gid = task_instance.asana_task_gid
         where task_instance.assigned_on = $1::date
           and (
             lower(coalesce(task_instance.worker_email, '')) = lower($2)
@@ -3570,6 +3616,7 @@ async function workerDayEvidencePayload(url, authActor = null) {
       estimatedMinutes: Math.round(Number(row.allocated_hours || 0) * 60),
       timerMinutes,
       timerBlockCount: timerBlocksForTask.length,
+      completedAt: row.asana_completed_at || "",
       unmappedTask: !row.tasks_record_id,
       sourceSystem: row.source_system || "",
       sourceSyncedAt: row.source_synced_at || ""
@@ -3588,6 +3635,32 @@ async function workerDayEvidencePayload(url, authActor = null) {
   const openIssueCount = issues.filter(issue => ["open", "reviewed"].includes(issue.status)).length;
   const linkedTimerTaskCount = assignments.filter(task => task.timerMinutes > 0).length;
   const unmatchedTimerBlocks = timerBlocks.filter(block => !block.matchedAssignment);
+  const unloggedGaps = unloggedScheduledEvidenceGaps(date, timerBlocks).map(gap => ({
+    type: "unlogged_gap",
+    startedAt: gap.start.toISOString(),
+    stoppedAt: gap.end.toISOString(),
+    durationMinutes: Math.round((gap.end.getTime() - gap.start.getTime()) / 60000),
+    // Completion is shown here only when Hawley has no timer for that task.
+    // It is timestamp evidence from Asana, never a substituted time entry.
+    completedTasks: assignments
+      .filter(task => task.completedAt && task.timerMinutes <= 0)
+      .filter(task => {
+        const completedAt = new Date(task.completedAt);
+        return !Number.isNaN(completedAt.getTime())
+          && isoDateInTimeZone(completedAt) === date
+          && completedAt >= gap.start
+          && completedAt < gap.end;
+      })
+      .map(task => ({
+        taskId: task.taskId,
+        taskName: task.taskName,
+        completedAt: task.completedAt
+      }))
+  }));
+  const evidenceEntries = [
+    ...timerBlocks.map(block => ({ type: "timer", ...block })),
+    ...unloggedGaps
+  ].sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt));
 
   return {
     worker: { id: workerId, name: workerName || "Worker", email: workerEmail },
@@ -3600,6 +3673,8 @@ async function workerDayEvidencePayload(url, authActor = null) {
     events: eventsResult.rows,
     issues: issuesResult.rows,
     timerBlocks,
+    unloggedGaps,
+    evidenceEntries,
     unmatchedTimerBlocks,
     freshness: freshnessResult.rows[0] || {}
   };

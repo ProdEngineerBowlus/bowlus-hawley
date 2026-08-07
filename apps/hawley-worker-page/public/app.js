@@ -1561,6 +1561,8 @@
     }
     const data = evidence.data || {};
     const timerBlocks = Array.isArray(data.timerBlocks) ? data.timerBlocks : [];
+    const evidenceEntries = Array.isArray(data.evidenceEntries) ? data.evidenceEntries : timerBlocks.map((block) => ({ type: "timer", ...block }));
+    const unloggedGaps = Array.isArray(data.unloggedGaps) ? data.unloggedGaps : [];
     const unmatchedTimerBlocks = Array.isArray(data.unmatchedTimerBlocks) ? data.unmatchedTimerBlocks : [];
     const needsReview = data.confidence === "needs_review";
     const partialCoverage = data.confidence === "partial";
@@ -1570,20 +1572,29 @@
         <div class="worker-day-evidence-header">
           <div>
             <strong>${escapeHtml(formatLongDate(data.date || selectedDate))} logged-time evidence</strong>
-            <span>${needsReview ? `${escapeHtml(data.openIssueCount)} reported app issue${data.openIssueCount === 1 ? "" : "s"} — review before using this day as a performance discussion.` : partialCoverage ? "This is a time ledger only. A recorded block on another task is identified below but does not alter the task-pace metric." : "This is the Hawley time ledger for the day."}</span>
+            <span>${needsReview ? `${escapeHtml(data.openIssueCount)} reported app issue${data.openIssueCount === 1 ? "" : "s"} — review before using this day as a performance discussion.` : partialCoverage ? "Recorded timer blocks are factual. Amber gaps are not labor; they show only an absence of Hawley timer data and any matching Asana completion evidence." : "Recorded timer blocks are factual. Amber gaps do not add or infer labor time."}</span>
           </div>
           <button class="btn ghost" type="button" data-action="close-day-evidence">Close</button>
         </div>
         <div class="worker-day-evidence-summary">
           <span><small>Logged time</small><strong>${escapeHtml(formatMinutes(loggedMinutes))}</strong></span>
           <span><small>Timer blocks</small><strong>${timerBlocks.length}</strong></span>
-          <span><small>Other-task blocks</small><strong>${unmatchedTimerBlocks.length}</strong></span>
+          <span><small>No-time gaps</small><strong>${unloggedGaps.length}</strong></span>
         </div>
         <div class="worker-day-evidence-body logged-time-only">
           <div>
-            <h3>Recorded timer blocks</h3>
+            <h3>Recorded timer blocks and completion evidence</h3>
             <ul class="worker-evidence-list timeline">
-              ${timerBlocks.length ? timerBlocks.map((block) => `<li class="${block.matchedAssignment ? "matched" : "unmatched"}"><span><strong>${escapeHtml(formatEvidenceRange(block.startedAt, block.stoppedAt))}</strong> ${escapeHtml(block.taskName)}</span><small>${escapeHtml(formatMinutes(block.durationMinutes || 0))} logged · ${escapeHtml(block.outcome)}${block.matchedAssignment ? "" : " · recorded on a different task"}</small></li>`).join("") : "<li><span>No Hawley timer record for this day.</span></li>"}
+              ${evidenceEntries.length ? evidenceEntries.map((entry) => {
+                if (entry.type === "unlogged_gap") {
+                  const completedTasks = Array.isArray(entry.completedTasks) ? entry.completedTasks : [];
+                  const completions = completedTasks.length
+                    ? ` · Completed in Asana: ${completedTasks.map((task) => `${escapeHtml(task.taskName)} (${escapeHtml(formatEvidenceTime(task.completedAt))})`).join(", ")}`
+                    : "";
+                  return `<li class="unlogged"><span><strong>${escapeHtml(formatEvidenceRange(entry.startedAt, entry.stoppedAt))}</strong> No task time logged</span><small>${escapeHtml(formatMinutes(entry.durationMinutes || 0))} without a Hawley timer${completions}</small></li>`;
+                }
+                return `<li class="${entry.matchedAssignment ? "matched" : "unmatched"}"><span><strong>${escapeHtml(formatEvidenceRange(entry.startedAt, entry.stoppedAt))}</strong> ${escapeHtml(entry.taskName)}</span><small>${escapeHtml(formatMinutes(entry.durationMinutes || 0))} logged · ${escapeHtml(entry.outcome)}${entry.matchedAssignment ? "" : " · recorded on a different task"}</small></li>`;
+              }).join("") : "<li><span>No Hawley timer record for this day.</span></li>"}
             </ul>
           </div>
         </div>

@@ -214,6 +214,12 @@ then presents managers a **logged-time-only** list of timer blocks with their
 start/end window and human-readable outcome. Dated-assignment and estimate
 details remain out of the visible evidence ledger so planned work is never
 mistaken for recorded labor.
+For completed historical days, the ledger also shows amber **No task time
+logged** bands for scheduled work windows with at least 15 minutes not covered
+by a Hawley timer. If a dated assignment was completed in Asana inside one of
+those bands *and has no Hawley timer record*, its task name and Asana completion
+timestamp appear in the same amber band. These are completion-evidence cues
+only: they never create labor time, alter task pace, or count toward efficiency.
 A timer block that belongs to a different or historical Asana task is explicitly
 marked **unmatched** rather than silently changing a day's task-pace value.
 Likewise, an Asana task without an Airtable Task Template link is marked

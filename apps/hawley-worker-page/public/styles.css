@@ -775,6 +775,13 @@ button {
 .worker-evidence-list li.missing-timer { border-left-color: var(--yellow); }
 .worker-evidence-list li.unmatched,
 .worker-evidence-list li.unmapped { border-left-color: var(--accent); }
+.worker-evidence-list li.unlogged {
+  display: grid;
+  justify-content: stretch;
+  border-left-color: var(--yellow);
+  background: rgba(220, 177, 45, 0.11);
+}
+.worker-evidence-list li.unlogged small { color: var(--yellow); }
 
 .worker-issue-button {
   width: calc(100% - 24px);
