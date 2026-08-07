@@ -185,10 +185,12 @@ the current worker app. Add `includeNoWork=true`, or set
 needed.
 
 When a manager selects an employee, the top of the manager detail page includes
-a **Cycle daily performance** strip for the five completed workdays immediately
-before the selected date. Each card shows logged productive time against that
-worker's scheduled daily capacity, estimate-based task efficiency, and tasks
-completed out of tasks assigned. It is manager-only; worker pages do not
+a **Cycle daily performance** strip for every scheduled workday in the selected
+cycle through the selected historical date. Each card shows logged productive
+time against that worker's scheduled daily capacity, a **Time at work**
+percentage (logged productive time divided by scheduled capacity), and tasks
+completed out of tasks assigned. Task estimates do not affect this displayed
+percentage. It is manager-only; worker pages do not
 receive this history. The endpoint is `/api/worker-cycle-performance`. It uses
 the Hawley-owned cycle calendar, the live `hb.worker_daily_task_actuals` ledger,
 dated
@@ -237,9 +239,9 @@ coverage, unmatched timer time, or unmapped tasks is labelled **Partial timer
 coverage**, not treated as a complete performance score.
 
 Managers can use the **Cycle** card in the reporting overview as a compact
-past-cycle chooser. Selecting a cycle opens its final workday in the manager
-view. Worker performance cards show every scheduled workday in the selected
-cycle; for the active cycle, today's in-progress day remains in the live
+past-cycle chooser. Selecting a cycle opens its final workday while retaining
+the currently selected employee. Worker performance cards show every scheduled
+workday in the selected cycle; for the active cycle, today's in-progress day remains in the live
 Snapshot instead of the historical card row.
 
 Hawley source-task hours can intentionally differ from the legacy worker app

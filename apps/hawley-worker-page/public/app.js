@@ -1525,14 +1525,14 @@
         <div class="panel-header dashboard-header">
           <div>
             <h2 class="panel-title">${escapeHtml(heading)} daily performance</h2>
-            <p class="summary-line">${days.length} workday${days.length === 1 ? "" : "s"} in this cycle — logged time, task efficiency, and task completion</p>
+            <p class="summary-line">${days.length} workday${days.length === 1 ? "" : "s"} in this cycle — logged time, time at work, and task completion</p>
           </div>
         </div>
         <div class="worker-performance-grid">
           ${days.map((day) => {
-            const efficiency = day.taskEfficiencyPercent === null || day.taskEfficiencyPercent === undefined
+            const timeAtWork = day.productiveUtilizationPercent === null || day.productiveUtilizationPercent === undefined
               ? "--"
-              : `${formatNumber(day.taskEfficiencyPercent)}%`;
+              : `${formatNumber(day.productiveUtilizationPercent)}%`;
             const completed = day.assignedTaskCount
               ? `${day.completedTaskCount}/${day.assignedTaskCount}`
               : "--";
@@ -1555,7 +1555,7 @@
                   <span>${escapeHtml(day.hasData ? `logged / ${formatMinutes(day.scheduledMinutes)} capacity` : "no activity recorded")}</span>
                 </div>
                 <div class="worker-performance-metrics">
-                  <span><small>Task pace${partialCoverage ? " (timed work)" : ""}</small><strong>${escapeHtml(efficiency)}</strong></span>
+                  <span><small>Time at work</small><strong>${escapeHtml(timeAtWork)}</strong></span>
                   <span><small>Tasks complete</small><strong>${escapeHtml(completed)}</strong></span>
                 </div>
               </button>
@@ -2943,9 +2943,15 @@
   }
 
   function managerDateUrl(date) {
-    const url = new URL(baseUrl(), window.location.origin);
+    // Retain the manager's selected worker when using a cycle shortcut. This
+    // is intentionally different from the manager-dashboard action, which
+    // explicitly clears `selected`.
+    const url = new URL(window.location.href);
+    url.searchParams.delete("employee");
     if (date && date !== today) {
       url.searchParams.set("date", date);
+    } else {
+      url.searchParams.delete("date");
     }
     return `${url.pathname}${url.search}`;
   }
