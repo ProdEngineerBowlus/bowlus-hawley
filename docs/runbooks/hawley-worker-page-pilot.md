@@ -190,10 +190,13 @@ before the selected date. Each card shows logged productive time against that
 worker's scheduled daily capacity, estimate-based task efficiency, and tasks
 completed out of tasks assigned. It is manager-only and read-only; worker pages
 do not receive this history. The endpoint is
-`/api/worker-cycle-performance` and reads Hawley's
-`reporting.worker_daily_utilization` view using the Hawley-owned cycle calendar.
-The selected/current day remains in the existing live Snapshot so incomplete
-WIP is not presented as a finished-day performance result.
+`/api/worker-cycle-performance`. It uses the Hawley-owned cycle calendar, the
+live `hb.worker_daily_task_actuals` ledger, and dated
+`hb.rev1_task_instances` directly rather than the larger utilization reporting
+view, so the manager detail remains responsive while the one-minute assignment
+mirror is rebuilding. The selected/current day remains in the existing live
+Snapshot so incomplete WIP is not presented as a finished-day performance
+result.
 
 Hawley source-task hours can intentionally differ from the legacy worker app
 when the Daily Assignment Tracker snapshot is stale. In that case, task IDs and

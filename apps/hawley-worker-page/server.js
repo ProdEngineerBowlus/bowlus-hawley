@@ -3270,26 +3270,60 @@ async function workerCyclePerformancePayload(url, authActor = null) {
 
   const result = await pool.query(
     `
+      -- Keep this manager-detail query independent from the broad utilization
+      -- view.  That view is intentionally rich, but can be rebuilding during
+      -- the one-minute Airtable assignment refresh.  Five historical cards
+      -- only need the live timer ledger plus the dated task instances below.
+      with requested_days as (
+        select unnest($1::date[])::date as work_date
+      ),
+      daily_actuals as (
+        select
+          actuals.work_date,
+          sum(greatest(
+            coalesce(actuals.actual_minutes, 0),
+            coalesce(actuals.timer_minutes, 0),
+            coalesce(actuals.asana_posted_minutes, 0)
+          ))::integer as productive_task_minutes,
+          sum(round(coalesce(actuals.allocated_hours, actuals.assigned_hours, 0) * 60))::integer as estimated_minutes
+        from hb.worker_daily_task_actuals actuals
+        where actuals.work_date = any($1::date[])
+          and actuals.source_system = $5
+          and not actuals.daily_summary
+          and (
+            actuals.worker_key = $2
+            or lower(coalesce(actuals.worker_email, '')) = lower($3)
+            or lower(coalesce(actuals.worker_name, '')) = lower($4)
+          )
+        group by actuals.work_date
+      ),
+      daily_assignments as (
+        select
+          task_instance.assigned_on as work_date,
+          count(distinct coalesce(task_instance.asana_task_gid, task_instance.rev1_task_instance_id::text))::integer as assigned_task_count,
+          count(distinct coalesce(task_instance.asana_task_gid, task_instance.rev1_task_instance_id::text))
+            filter (where task_instance.task_completed)::integer as completed_task_count
+        from hb.rev1_task_instances task_instance
+        where task_instance.assigned_on = any($1::date[])
+          and (
+            lower(coalesce(task_instance.worker_email, '')) = lower($3)
+            or lower(coalesce(task_instance.assignee_email, '')) = lower($3)
+            or lower(coalesce(task_instance.worker_name, '')) = lower($4)
+          )
+        group by task_instance.assigned_on
+      )
       select
-        work_date::text,
-        scheduled_hours,
-        productive_task_minutes,
-        estimated_minutes,
-        productive_utilization_percent,
-        task_efficiency_percent,
-        assigned_task_count,
-        completed_task_count,
-        assigned_vs_completed_percent
-      from reporting.worker_daily_utilization
-      where work_date = any($1::date[])
-        and (
-          worker_key = $2
-          or lower(coalesce(worker_email, '')) = lower($3)
-          or lower(coalesce(worker_name, '')) = lower($4)
-        )
-      order by work_date
+        requested_days.work_date::text,
+        daily_actuals.productive_task_minutes,
+        daily_actuals.estimated_minutes,
+        daily_assignments.assigned_task_count,
+        daily_assignments.completed_task_count
+      from requested_days
+      left join daily_actuals using (work_date)
+      left join daily_assignments using (work_date)
+      order by requested_days.work_date
     `,
-    [historyDates, requestedWorkerId, worker.worker_email || "", worker.worker_name || ""]
+    [historyDates, requestedWorkerId, worker.worker_email || "", worker.worker_name || "", LIVE_WORKER_SOURCE]
   );
   const byDate = new Map(result.rows.map(row => [String(row.work_date).slice(0, 10), row]));
 
@@ -3304,23 +3338,23 @@ async function workerCyclePerformancePayload(url, authActor = null) {
         : defaultScheduledMinutes;
       const productiveMinutes = Math.round(Number(row?.productive_task_minutes || 0));
       const estimatedMinutes = Math.round(Number(row?.estimated_minutes || 0));
-      const taskEfficiencyPercent = row?.task_efficiency_percent === null || row?.task_efficiency_percent === undefined
-        ? null
-        : round(row.task_efficiency_percent, 1);
+      const taskEfficiencyPercent = productiveMinutes > 0 && estimatedMinutes > 0
+        ? round((estimatedMinutes / productiveMinutes) * 100, 1)
+        : null;
       return {
         date: workDate,
         dayNumber: cycleDates.indexOf(workDate) + 1,
-        hasData: Boolean(row),
+        hasData: Boolean(row && (productiveMinutes > 0 || Number(row.assigned_task_count || 0) > 0)),
         scheduledMinutes,
         productiveMinutes,
         estimatedMinutes,
-        productiveUtilizationPercent: row ? round(row.productive_utilization_percent, 1) : 0,
+        productiveUtilizationPercent: scheduledMinutes ? round((productiveMinutes / scheduledMinutes) * 100, 1) : 0,
         taskEfficiencyPercent,
         assignedTaskCount: Number(row?.assigned_task_count || 0),
         completedTaskCount: Number(row?.completed_task_count || 0),
-        completionPercent: row?.assigned_vs_completed_percent === null || row?.assigned_vs_completed_percent === undefined
-          ? null
-          : round(row.assigned_vs_completed_percent, 1)
+        completionPercent: Number(row?.assigned_task_count || 0)
+          ? round((Number(row.completed_task_count || 0) / Number(row.assigned_task_count || 0)) * 100, 1)
+          : null
       };
     })
   };
