@@ -1,6 +1,6 @@
 # Hawley Worker Page Pilot
 
-Last updated: 2026-07-24
+Last updated: 2026-08-07
 
 The Hawley worker page is a pilot clone of the Daily Worker App. It uses
 Hawley/Postgres instead of live Airtable and live Asana reads.
@@ -183,6 +183,17 @@ only workers with visible work for the selected day so manager output matches
 the current worker app. Add `includeNoWork=true`, or set
 `HAWLEY_WORKER_INCLUDE_NO_WORK=true`, when a full active-roster health check is
 needed.
+
+When a manager selects an employee, the top of the manager detail page includes
+a **Cycle daily performance** strip for the five completed workdays immediately
+before the selected date. Each card shows logged productive time against that
+worker's scheduled daily capacity, estimate-based task efficiency, and tasks
+completed out of tasks assigned. It is manager-only and read-only; worker pages
+do not receive this history. The endpoint is
+`/api/worker-cycle-performance` and reads Hawley's
+`reporting.worker_daily_utilization` view using the Hawley-owned cycle calendar.
+The selected/current day remains in the existing live Snapshot so incomplete
+WIP is not presented as a finished-day performance result.
 
 Hawley source-task hours can intentionally differ from the legacy worker app
 when the Daily Assignment Tracker snapshot is stale. In that case, task IDs and

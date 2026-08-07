@@ -76,6 +76,7 @@
     latestRuns: {},
     refreshedAt: "",
     cycleDays: null,
+    workerCyclePerformance: null,
     cncMachine: {
       enabled: false,
       maxActiveRuns: 3,
@@ -366,6 +367,8 @@
       if (!response.ok) throw new Error(`Asana API returned ${response.status}`);
       const payload = await response.json();
       applyAssignments(payload, "asana");
+      const selectedWorker = !workerPageLocked() ? getSelectedWorker() : null;
+      if (selectedWorker) void loadWorkerCyclePerformance(selectedWorker, { force: !silent });
     } catch (error) {
       if (silent) {
         state.error = "Could not refresh live worker assignments. Reload the page or ask a manager to check the Daily Assignment app server.";
@@ -466,6 +469,28 @@
     const lockedWorkerId = lockedWorkerIdForPage();
     state.workers = lockedWorkerId ? workers.filter((worker) => worker.id === lockedWorkerId) : workers;
     state.error = payload.error || "";
+  }
+
+  async function loadWorkerCyclePerformance(worker, options = {}) {
+    if (!worker || workerPageLocked()) return;
+    const key = `${worker.id}:${state.date}`;
+    if (!options.force && state.workerCyclePerformance?.key === key) return;
+    state.workerCyclePerformance = { key, loading: true, error: "", data: null };
+    render();
+    try {
+      const params = new URLSearchParams({ worker: worker.id, date: state.date, _: String(Date.now()) });
+      const response = await fetch(`/api/worker-cycle-performance?${params.toString()}`);
+      if (!response.ok) throw new Error(`Performance history returned ${response.status}`);
+      const data = await response.json();
+      if (state.workerCyclePerformance?.key === key) {
+        state.workerCyclePerformance = { key, loading: false, error: "", data };
+      }
+    } catch (error) {
+      if (state.workerCyclePerformance?.key === key) {
+        state.workerCyclePerformance = { key, loading: false, error: "Could not load cycle performance.", data: null };
+      }
+    }
+    render();
   }
 
   function render() {
@@ -1368,6 +1393,7 @@
     }
 
     return `
+      ${renderWorkerCyclePerformance(worker)}
       <div class="grid assignment-grid">
         <section class="task-list">
           ${renderCncMachinePanel(worker)}
@@ -1390,6 +1416,102 @@
           </div>
         </aside>
       </div>
+    `;
+  }
+
+  function performanceTone(day) {
+    if (!day?.hasData || !Number(day.scheduledMinutes || 0)) return "empty";
+    const percent = Number(day.productiveUtilizationPercent || 0);
+    if (percent >= 90) return "good";
+    if (percent >= 70) return "warn";
+    return "risk";
+  }
+
+  function renderWorkerCyclePerformance(worker) {
+    const key = `${worker.id}:${state.date}`;
+    const history = state.workerCyclePerformance;
+    const payload = history?.key === key ? history : null;
+    const heading = payload?.data?.cycle || worker.cycle || "Cycle";
+
+    if (payload?.loading || !payload) {
+      return `
+        <section class="panel worker-cycle-performance" aria-label="Worker cycle performance">
+          <div class="panel-header dashboard-header">
+            <div>
+              <h2 class="panel-title">${escapeHtml(heading)} daily performance</h2>
+              <p class="summary-line">Loading the five completed workdays before today</p>
+            </div>
+          </div>
+          <div class="worker-performance-grid loading" aria-hidden="true">
+            ${Array.from({ length: 5 }, () => `<div class="worker-performance-day"></div>`).join("")}
+          </div>
+        </section>
+      `;
+    }
+
+    if (payload.error) {
+      return `
+        <section class="panel worker-cycle-performance">
+          <div class="panel-header dashboard-header">
+            <div>
+              <h2 class="panel-title">${escapeHtml(heading)} daily performance</h2>
+              <p class="summary-line">${escapeHtml(payload.error)}</p>
+            </div>
+          </div>
+        </section>
+      `;
+    }
+
+    const days = Array.isArray(payload.data?.days) ? payload.data.days : [];
+    if (!days.length) {
+      return `
+        <section class="panel worker-cycle-performance">
+          <div class="panel-header dashboard-header">
+            <div>
+              <h2 class="panel-title">${escapeHtml(heading)} daily performance</h2>
+              <p class="summary-line">No completed workdays in this cycle yet.</p>
+            </div>
+          </div>
+        </section>
+      `;
+    }
+
+    return `
+      <section class="panel worker-cycle-performance" aria-label="${escapeAttr(heading)} daily performance for ${escapeAttr(worker.name)}">
+        <div class="panel-header dashboard-header">
+          <div>
+            <h2 class="panel-title">${escapeHtml(heading)} daily performance</h2>
+            <p class="summary-line">Last ${days.length} completed workday${days.length === 1 ? "" : "s"} — logged time, task efficiency, and task completion</p>
+          </div>
+        </div>
+        <div class="worker-performance-grid">
+          ${days.map((day) => {
+            const efficiency = day.taskEfficiencyPercent === null || day.taskEfficiencyPercent === undefined
+              ? "--"
+              : `${formatNumber(day.taskEfficiencyPercent)}%`;
+            const completed = day.assignedTaskCount
+              ? `${day.completedTaskCount}/${day.assignedTaskCount}`
+              : "--";
+            const logged = day.hasData ? formatMinutes(day.productiveMinutes) : "--";
+            return `
+              <article class="worker-performance-day ${escapeAttr(performanceTone(day))}">
+                <div class="worker-performance-date">
+                  <span>Day ${escapeHtml(day.dayNumber)}</span>
+                  <strong>${escapeHtml(formatShortDate(day.date))}</strong>
+                </div>
+                <div class="worker-performance-time">
+                  <strong>${escapeHtml(logged)}</strong>
+                  <span>${escapeHtml(day.hasData ? `logged / ${formatMinutes(day.scheduledMinutes)} capacity` : "no activity recorded")}</span>
+                </div>
+                <div class="worker-performance-metrics">
+                  <span><small>Task efficiency</small><strong>${escapeHtml(efficiency)}</strong></span>
+                  <span><small>Tasks complete</small><strong>${escapeHtml(completed)}</strong></span>
+                </div>
+              </article>
+            `;
+          }).join("")}
+        </div>
+      </section>
     `;
   }
 
@@ -1668,6 +1790,8 @@
         const nextUrl = new URL(window.location.href);
         nextUrl.searchParams.set("selected", button.dataset.worker);
         history.replaceState(null, "", nextUrl);
+        const worker = state.workers.find((item) => item.id === button.dataset.worker);
+        if (worker) void loadWorkerCyclePerformance(worker, { force: true });
         render();
       });
     });
@@ -1677,6 +1801,7 @@
         const nextUrl = new URL(window.location.href);
         nextUrl.searchParams.delete("selected");
         history.replaceState(null, "", nextUrl);
+        state.workerCyclePerformance = null;
         render();
       });
     });

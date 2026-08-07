@@ -3237,6 +3237,95 @@ async function cycleCalendar(cycleName, selectedDate) {
   };
 }
 
+async function workerCyclePerformancePayload(url, authActor = null) {
+  requireManagerActor(authActor);
+  const date = url.searchParams.get("date") || todayIso();
+  const requestedWorkerId = canonicalWorkerIdForWrites(url.searchParams.get("worker") || "");
+  if (!isIsoDate(date)) throw actionError("Date must be YYYY-MM-DD.", 400);
+  if (!requestedWorkerId) throw actionError("worker is required.", 400);
+
+  const configured = await configuredWorkers();
+  const worker = configured.find(row => canonicalWorkerIdForWrites(slugifyWorker({
+    workerEmail: row.worker_email,
+    workerName: row.worker_name
+  })) === requestedWorkerId);
+  if (!worker) throw actionError("Worker was not found in the active Work Force roster.", 404);
+
+  const calendar = await cycleCalendar("", date);
+  const cycleDates = calendar?.dates || [];
+  // This is deliberately history-only: the detail page's Snapshot retains the
+  // live current-day values, while these cards give a manager five comparable,
+  // finished workdays leading into today.
+  const historyDates = cycleDates.filter(workDate => workDate < date).slice(-5);
+  const standardDailyHours = Number(worker.hours_per_day || SHOP_DAILY_AVAILABLE_HOURS);
+  const defaultScheduledMinutes = Math.round(standardDailyHours * 60);
+  if (!historyDates.length) {
+    return {
+      cycle: calendar?.cycle || "Current",
+      selectedDate: date,
+      worker: { id: requestedWorkerId, name: worker.worker_name || "Worker", email: worker.worker_email || "" },
+      days: []
+    };
+  }
+
+  const result = await pool.query(
+    `
+      select
+        work_date::text,
+        scheduled_hours,
+        productive_task_minutes,
+        estimated_minutes,
+        productive_utilization_percent,
+        task_efficiency_percent,
+        assigned_task_count,
+        completed_task_count,
+        assigned_vs_completed_percent
+      from reporting.worker_daily_utilization
+      where work_date = any($1::date[])
+        and (
+          worker_key = $2
+          or lower(coalesce(worker_email, '')) = lower($3)
+          or lower(coalesce(worker_name, '')) = lower($4)
+        )
+      order by work_date
+    `,
+    [historyDates, requestedWorkerId, worker.worker_email || "", worker.worker_name || ""]
+  );
+  const byDate = new Map(result.rows.map(row => [String(row.work_date).slice(0, 10), row]));
+
+  return {
+    cycle: calendar?.cycle || "Current",
+    selectedDate: date,
+    worker: { id: requestedWorkerId, name: worker.worker_name || "Worker", email: worker.worker_email || "" },
+    days: historyDates.map((workDate) => {
+      const row = byDate.get(workDate);
+      const scheduledMinutes = row
+        ? Math.round(Number(row.scheduled_hours || standardDailyHours) * 60)
+        : defaultScheduledMinutes;
+      const productiveMinutes = Math.round(Number(row?.productive_task_minutes || 0));
+      const estimatedMinutes = Math.round(Number(row?.estimated_minutes || 0));
+      const taskEfficiencyPercent = row?.task_efficiency_percent === null || row?.task_efficiency_percent === undefined
+        ? null
+        : round(row.task_efficiency_percent, 1);
+      return {
+        date: workDate,
+        dayNumber: cycleDates.indexOf(workDate) + 1,
+        hasData: Boolean(row),
+        scheduledMinutes,
+        productiveMinutes,
+        estimatedMinutes,
+        productiveUtilizationPercent: row ? round(row.productive_utilization_percent, 1) : 0,
+        taskEfficiencyPercent,
+        assignedTaskCount: Number(row?.assigned_task_count || 0),
+        completedTaskCount: Number(row?.completed_task_count || 0),
+        completionPercent: row?.assigned_vs_completed_percent === null || row?.assigned_vs_completed_percent === undefined
+          ? null
+          : round(row.assigned_vs_completed_percent, 1)
+      };
+    })
+  };
+}
+
 async function cycleDays(date) {
   const dateCalendar = await cycleCalendar("", date);
   const calendarCycle = dateCalendar?.cycle || null;
@@ -11946,6 +12035,12 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/api/daily-assignments" || url.pathname === "/api/assignments") {
       const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
       sendJson(res, 200, await dailyAssignmentsPayload(url, authActor));
+      return;
+    }
+
+    if (url.pathname === "/api/worker-cycle-performance" && req.method === "GET") {
+      const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+      sendJson(res, 200, await workerCyclePerformancePayload(url, authActor));
       return;
     }
 

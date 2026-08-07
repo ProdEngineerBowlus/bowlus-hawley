@@ -588,6 +588,103 @@ button {
   gap: 14px;
 }
 
+.worker-cycle-performance {
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+
+.worker-performance-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(150px, 1fr));
+  gap: 10px;
+  padding: 0 18px 18px;
+  overflow-x: auto;
+}
+
+.worker-performance-day {
+  min-height: 158px;
+  display: grid;
+  align-content: start;
+  gap: 13px;
+  border: 1px solid var(--line);
+  border-top: 4px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--soft);
+  padding: 12px;
+}
+
+.worker-performance-day.good {
+  border-top-color: var(--primary);
+}
+
+.worker-performance-day.warn {
+  border-top-color: var(--yellow);
+}
+
+.worker-performance-day.risk {
+  border-top-color: var(--accent);
+}
+
+.worker-performance-day.empty {
+  opacity: 0.7;
+}
+
+.worker-performance-date,
+.worker-performance-time,
+.worker-performance-metrics,
+.worker-performance-metrics span {
+  display: grid;
+  gap: 3px;
+}
+
+.worker-performance-date {
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+}
+
+.worker-performance-date span,
+.worker-performance-time span,
+.worker-performance-metrics small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.worker-performance-date strong {
+  font-size: 13px;
+}
+
+.worker-performance-time strong {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.worker-performance-time span {
+  line-height: 1.25;
+}
+
+.worker-performance-metrics {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-top: 1px solid var(--line);
+  padding-top: 9px;
+}
+
+.worker-performance-metrics strong {
+  font-size: 14px;
+}
+
+.worker-performance-grid.loading .worker-performance-day {
+  min-height: 126px;
+  opacity: 0.45;
+  background: linear-gradient(110deg, var(--soft) 25%, rgba(255,255,255,0.06) 40%, var(--soft) 55%);
+  background-size: 200% 100%;
+  animation: worker-performance-loading 1.3s linear infinite;
+}
+
+@keyframes worker-performance-loading {
+  to { background-position-x: -200%; }
+}
+
 .freshness-panel {
   overflow: hidden;
 }
