@@ -3283,15 +3283,15 @@ async function workerCyclePerformancePayload(url, authActor = null) {
       with requested_days as (
         select unnest($1::date[])::date as work_date
       ),
-      daily_actuals as (
+      daily_actual_tasks as (
         select
           actuals.work_date,
-          sum(greatest(
+          actuals.asana_task_gid as task_id,
+          greatest(
             coalesce(actuals.actual_minutes, 0),
             coalesce(actuals.timer_minutes, 0),
             coalesce(actuals.asana_posted_minutes, 0)
-          ))::integer as productive_task_minutes,
-          sum(round(coalesce(actuals.allocated_hours, actuals.assigned_hours, 0) * 60))::integer as estimated_minutes
+          )::integer as productive_minutes
         from hb.worker_daily_task_actuals actuals
         where actuals.work_date = any($1::date[])
           and actuals.source_system = $5
@@ -3301,14 +3301,19 @@ async function workerCyclePerformancePayload(url, authActor = null) {
             or lower(coalesce(actuals.worker_email, '')) = lower($3)
             or lower(coalesce(actuals.worker_name, '')) = lower($4)
           )
-        group by actuals.work_date
       ),
-      daily_assignments as (
+      daily_actuals as (
+        select work_date, sum(productive_minutes)::integer as productive_task_minutes
+        from daily_actual_tasks
+        group by work_date
+      ),
+      assignment_tasks as (
         select
           task_instance.assigned_on as work_date,
-          count(distinct coalesce(task_instance.asana_task_gid, task_instance.rev1_task_instance_id::text))::integer as assigned_task_count,
-          count(distinct coalesce(task_instance.asana_task_gid, task_instance.rev1_task_instance_id::text))
-            filter (where task_instance.task_completed)::integer as completed_task_count
+          coalesce(task_instance.asana_task_gid, task_instance.rev1_task_instance_id::text) as task_id,
+          coalesce(task_instance.allocated_hours, 0) * 60 as estimated_minutes,
+          task_instance.task_completed,
+          task_instance.tasks_record_id is null as unmapped_task
         from hb.rev1_task_instances task_instance
         where task_instance.assigned_on = any($1::date[])
           and (
@@ -3316,7 +3321,39 @@ async function workerCyclePerformancePayload(url, authActor = null) {
             or lower(coalesce(task_instance.assignee_email, '')) = lower($3)
             or lower(coalesce(task_instance.worker_name, '')) = lower($4)
           )
-        group by task_instance.assigned_on
+      ),
+      daily_assignments as (
+        select
+          assignments.work_date,
+          count(distinct assignments.task_id)::integer as assigned_task_count,
+          count(distinct assignments.task_id) filter (where assignments.task_completed)::integer as completed_task_count,
+          count(distinct assignments.task_id) filter (where assignments.unmapped_task)::integer as unmapped_task_count
+        from assignment_tasks assignments
+        group by assignments.work_date
+      ),
+      task_pace as (
+        select
+          assignments.work_date,
+          count(distinct assignments.task_id) filter (where actuals.task_id is not null and actuals.productive_minutes > 0)::integer as timer_linked_task_count,
+          sum(assignments.estimated_minutes) filter (where actuals.task_id is not null and actuals.productive_minutes > 0)::integer as timer_linked_estimated_minutes,
+          sum(actuals.productive_minutes) filter (where actuals.task_id is not null and actuals.productive_minutes > 0)::integer as timer_linked_actual_minutes
+        from assignment_tasks assignments
+        left join daily_actual_tasks actuals
+          on actuals.work_date = assignments.work_date
+         and actuals.task_id = assignments.task_id
+        group by assignments.work_date
+      ),
+      unmatched_timer_time as (
+        select
+          actuals.work_date,
+          count(*) filter (where actuals.productive_minutes > 0)::integer as unmatched_timer_task_count,
+          sum(actuals.productive_minutes) filter (where actuals.productive_minutes > 0)::integer as unmatched_timer_minutes
+        from daily_actual_tasks actuals
+        left join assignment_tasks assignments
+          on assignments.work_date = actuals.work_date
+         and assignments.task_id = actuals.task_id
+        where assignments.task_id is null
+        group by actuals.work_date
       ),
       daily_issues as (
         select
@@ -3331,14 +3368,21 @@ async function workerCyclePerformancePayload(url, authActor = null) {
       select
         requested_days.work_date::text,
         daily_actuals.productive_task_minutes,
-        daily_actuals.estimated_minutes,
         daily_assignments.assigned_task_count,
         daily_assignments.completed_task_count,
+        daily_assignments.unmapped_task_count,
+        task_pace.timer_linked_task_count,
+        task_pace.timer_linked_estimated_minutes,
+        task_pace.timer_linked_actual_minutes,
+        unmatched_timer_time.unmatched_timer_task_count,
+        unmatched_timer_time.unmatched_timer_minutes,
         daily_issues.open_issue_count,
         daily_issues.issue_count
       from requested_days
       left join daily_actuals using (work_date)
       left join daily_assignments using (work_date)
+      left join task_pace using (work_date)
+      left join unmatched_timer_time using (work_date)
       left join daily_issues using (work_date)
       order by requested_days.work_date
     `,
@@ -3356,24 +3400,37 @@ async function workerCyclePerformancePayload(url, authActor = null) {
         ? Math.round(Number(row.scheduled_hours || standardDailyHours) * 60)
         : defaultScheduledMinutes;
       const productiveMinutes = Math.round(Number(row?.productive_task_minutes || 0));
-      const estimatedMinutes = Math.round(Number(row?.estimated_minutes || 0));
-      const taskEfficiencyPercent = productiveMinutes > 0 && estimatedMinutes > 0
-        ? round((estimatedMinutes / productiveMinutes) * 100, 1)
+      const timerLinkedMinutes = Math.round(Number(row?.timer_linked_actual_minutes || 0));
+      const timerLinkedEstimatedMinutes = Math.round(Number(row?.timer_linked_estimated_minutes || 0));
+      const timerLinkedTaskCount = Number(row?.timer_linked_task_count || 0);
+      const assignedTaskCount = Number(row?.assigned_task_count || 0);
+      const taskEfficiencyPercent = timerLinkedMinutes > 0 && timerLinkedEstimatedMinutes > 0
+        ? round((timerLinkedEstimatedMinutes / timerLinkedMinutes) * 100, 1)
         : null;
       const openIssueCount = Number(row?.open_issue_count || 0);
+      const unmatchedTimerMinutes = Math.round(Number(row?.unmatched_timer_minutes || 0));
+      const unmappedTaskCount = Number(row?.unmapped_task_count || 0);
+      const partialTimerCoverage = assignedTaskCount > 0 && (
+        timerLinkedTaskCount < assignedTaskCount || unmatchedTimerMinutes > 0 || unmappedTaskCount > 0
+      );
       return {
         date: workDate,
         dayNumber: cycleDates.indexOf(workDate) + 1,
         hasData: Boolean(row && (productiveMinutes > 0 || Number(row.assigned_task_count || 0) > 0)),
         scheduledMinutes,
         productiveMinutes,
-        estimatedMinutes,
+        timerLinkedMinutes,
+        timerLinkedEstimatedMinutes,
+        timerLinkedTaskCount,
+        unmatchedTimerMinutes,
+        unmatchedTimerTaskCount: Number(row?.unmatched_timer_task_count || 0),
+        unmappedTaskCount,
         productiveUtilizationPercent: scheduledMinutes ? round((productiveMinutes / scheduledMinutes) * 100, 1) : 0,
         taskEfficiencyPercent,
         issueCount: Number(row?.issue_count || 0),
         openIssueCount,
-        confidence: openIssueCount > 0 ? "needs_review" : (row ? "recorded" : "no_data"),
-        assignedTaskCount: Number(row?.assigned_task_count || 0),
+        confidence: openIssueCount > 0 ? "needs_review" : (partialTimerCoverage ? "partial" : (row ? "recorded" : "no_data")),
+        assignedTaskCount,
         completedTaskCount: Number(row?.completed_task_count || 0),
         completionPercent: Number(row?.assigned_task_count || 0)
           ? round((Number(row.completed_task_count || 0) / Number(row.assigned_task_count || 0)) * 100, 1)
@@ -3403,6 +3460,8 @@ async function workerDayEvidencePayload(url, authActor = null) {
           task_instance.task_name,
           task_instance.task_completed,
           task_instance.allocated_hours,
+          task_instance.tasks_record_id,
+          task_instance.source_system,
           task_instance.source_synced_at::text
         from hb.rev1_task_instances task_instance
         where task_instance.assigned_on = $1::date
@@ -3465,24 +3524,57 @@ async function workerDayEvidencePayload(url, authActor = null) {
     )
   ]);
 
-  const sessions = sessionsResult.rows.map(row => ({
-    type: "session",
-    at: row.started_at,
-    title: row.task_name || "Timer session",
-    detail: row.stopped_at
-      ? `${Number(row.duration_minutes || 0)} minutes recorded${row.stop_reason ? ` · ${row.stop_reason}` : ""}`
-      : "Timer is still running",
-    taskId: row.task_id || "",
-    durationMinutes: Number(row.duration_minutes || 0),
-    closed: Boolean(row.stopped_at)
-  }));
-  const events = eventsResult.rows.map(row => ({
-    type: "event",
-    at: row.event_timestamp,
-    title: row.task_name || "Task event",
-    detail: `${row.event_type}${row.duration_minutes ? ` · ${row.duration_minutes} minutes` : ""}${row.sync_status ? ` · ${row.sync_status}` : ""}`,
-    taskId: row.task_id || ""
-  }));
+  const assignmentIds = new Set(assignmentsResult.rows.map(row => String(row.task_id || "")).filter(Boolean));
+  const eventsByTask = new Map();
+  for (const row of eventsResult.rows) {
+    const taskId = String(row.task_id || "");
+    const entries = eventsByTask.get(taskId) || [];
+    entries.push(row);
+    eventsByTask.set(taskId, entries);
+  }
+  const timerBlocks = sessionsResult.rows.map(row => {
+    const taskId = String(row.task_id || "");
+    const taskEvents = eventsByTask.get(taskId) || [];
+    const completion = taskEvents.find(event => event.event_type === "complete" && (!row.stopped_at || Date.parse(event.event_timestamp) >= Date.parse(row.stopped_at)));
+    const scheduledStop = row.stop_reason === "scheduled_pause";
+    return {
+      taskId,
+      taskName: row.task_name || "Timer session",
+      startedAt: row.started_at,
+      stoppedAt: row.stopped_at || "",
+      durationMinutes: Number(row.duration_minutes || 0),
+      matchedAssignment: assignmentIds.has(taskId),
+      outcome: completion
+        ? "Task completed"
+        : scheduledStop
+          ? "Stopped automatically for the shop schedule"
+          : row.stopped_at
+            ? "Timer stopped"
+            : "Timer running"
+    };
+  });
+  const timerBlocksByTask = new Map();
+  for (const block of timerBlocks) {
+    const entries = timerBlocksByTask.get(block.taskId) || [];
+    entries.push(block);
+    timerBlocksByTask.set(block.taskId, entries);
+  }
+  const assignments = assignmentsResult.rows.map(row => {
+    const taskId = String(row.task_id || "");
+    const timerBlocksForTask = timerBlocksByTask.get(taskId) || [];
+    const timerMinutes = timerBlocksForTask.reduce((total, block) => total + Number(block.durationMinutes || 0), 0);
+    return {
+      taskId,
+      taskName: row.task_name || "Untitled task",
+      completed: Boolean(row.task_completed),
+      estimatedMinutes: Math.round(Number(row.allocated_hours || 0) * 60),
+      timerMinutes,
+      timerBlockCount: timerBlocksForTask.length,
+      unmappedTask: !row.tasks_record_id,
+      sourceSystem: row.source_system || "",
+      sourceSyncedAt: row.source_synced_at || ""
+    };
+  });
   const issues = issuesResult.rows.map(row => ({
     type: "issue",
     at: row.reported_at,
@@ -3493,27 +3585,22 @@ async function workerDayEvidencePayload(url, authActor = null) {
     resolvedAt: row.resolved_at || "",
     resolutionNote: row.resolution_note || ""
   }));
-  const timeline = [...sessions, ...events, ...issues]
-    .filter(item => item.at)
-    .sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
   const openIssueCount = issues.filter(issue => ["open", "reviewed"].includes(issue.status)).length;
+  const linkedTimerTaskCount = assignments.filter(task => task.timerMinutes > 0).length;
+  const unmatchedTimerBlocks = timerBlocks.filter(block => !block.matchedAssignment);
 
   return {
     worker: { id: workerId, name: workerName || "Worker", email: workerEmail },
     date,
-    confidence: openIssueCount > 0 ? "needs_review" : (timeline.length ? "recorded" : "no_data"),
+    confidence: openIssueCount > 0 ? "needs_review" : (assignments.length && linkedTimerTaskCount < assignments.length ? "partial" : (timerBlocks.length ? "recorded" : "no_data")),
     openIssueCount,
-    assignments: assignmentsResult.rows.map(row => ({
-      taskId: row.task_id || "",
-      taskName: row.task_name || "Untitled task",
-      completed: Boolean(row.task_completed),
-      estimatedMinutes: Math.round(Number(row.allocated_hours || 0) * 60),
-      sourceSyncedAt: row.source_synced_at || ""
-    })),
+    linkedTimerTaskCount,
+    assignments,
     sessions: sessionsResult.rows,
     events: eventsResult.rows,
     issues: issuesResult.rows,
-    timeline,
+    timerBlocks,
+    unmatchedTimerBlocks,
     freshness: freshnessResult.rows[0] || {}
   };
 }

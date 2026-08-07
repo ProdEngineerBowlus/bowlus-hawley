@@ -635,6 +635,11 @@ button {
   background: rgba(220, 177, 45, 0.08);
 }
 
+.worker-performance-day.partial {
+  border-top-color: var(--yellow);
+  background: rgba(220, 177, 45, 0.05);
+}
+
 .worker-performance-day:hover,
 .worker-performance-day:focus-visible {
   border-color: var(--primary);
@@ -662,6 +667,10 @@ button {
 }
 
 .worker-performance-confidence.needs-review {
+  color: var(--yellow);
+}
+
+.worker-performance-confidence.partial {
   color: var(--yellow);
 }
 
@@ -758,6 +767,10 @@ button {
 .worker-evidence-list li.issue { border-left-color: var(--yellow); }
 .worker-evidence-list li.session { border-left-color: var(--primary); }
 .worker-evidence-list li.event { border-left-color: var(--muted); }
+.worker-evidence-list li.matched { border-left-color: var(--primary); }
+.worker-evidence-list li.missing-timer { border-left-color: var(--yellow); }
+.worker-evidence-list li.unmatched,
+.worker-evidence-list li.unmapped { border-left-color: var(--accent); }
 
 .worker-issue-button {
   width: calc(100% - 24px);

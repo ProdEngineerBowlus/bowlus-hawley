@@ -1445,6 +1445,7 @@
 
   function performanceTone(day) {
     if (day?.confidence === "needs_review") return "review";
+    if (day?.confidence === "partial") return "partial";
     if (!day?.hasData || !Number(day.scheduledMinutes || 0)) return "empty";
     const percent = Number(day.productiveUtilizationPercent || 0);
     if (percent >= 90) return "good";
@@ -1519,19 +1520,24 @@
               : "--";
             const logged = day.hasData ? formatMinutes(day.productiveMinutes) : "--";
             const needsReview = day.confidence === "needs_review";
+            const partialCoverage = day.confidence === "partial";
+            const timerCoverage = day.assignedTaskCount
+              ? `${day.timerLinkedTaskCount || 0}/${day.assignedTaskCount} timer-linked`
+              : "no assigned tasks";
+            const coverageDetail = `${timerCoverage}${day.unmatchedTimerMinutes ? ` · ${formatMinutes(day.unmatchedTimerMinutes)} unmatched` : ""}${day.unmappedTaskCount ? ` · ${day.unmappedTaskCount} unmapped` : ""}`;
             return `
               <button class="worker-performance-day ${escapeAttr(performanceTone(day))}" type="button" data-action="view-day-evidence" data-day-date="${escapeAttr(day.date)}" title="View the records behind this day">
                 <div class="worker-performance-date">
                   <span>Day ${escapeHtml(day.dayNumber)}</span>
                   <strong>${escapeHtml(formatShortDate(day.date))}</strong>
                 </div>
-                <div class="worker-performance-confidence ${needsReview ? "needs-review" : ""}">${needsReview ? `Needs review · ${escapeHtml(day.openIssueCount)} app issue${day.openIssueCount === 1 ? "" : "s"}` : "Recorded data"}</div>
+                <div class="worker-performance-confidence ${needsReview ? "needs-review" : partialCoverage ? "partial" : ""}">${needsReview ? `Needs review · ${escapeHtml(day.openIssueCount)} app issue${day.openIssueCount === 1 ? "" : "s"}` : partialCoverage ? `Partial timer coverage · ${escapeHtml(coverageDetail)}` : "Recorded data"}</div>
                 <div class="worker-performance-time">
                   <strong>${escapeHtml(logged)}</strong>
                   <span>${escapeHtml(day.hasData ? `logged / ${formatMinutes(day.scheduledMinutes)} capacity` : "no activity recorded")}</span>
                 </div>
                 <div class="worker-performance-metrics">
-                  <span><small>Task efficiency</small><strong>${escapeHtml(efficiency)}</strong></span>
+                  <span><small>Task pace${partialCoverage ? " (timed work)" : ""}</small><strong>${escapeHtml(efficiency)}</strong></span>
                   <span><small>Tasks complete</small><strong>${escapeHtml(completed)}</strong></span>
                 </div>
               </button>
@@ -1554,35 +1560,37 @@
       return `<div class="worker-day-evidence error"><strong>${escapeHtml(evidence.error)}</strong></div>`;
     }
     const data = evidence.data || {};
-    const timeline = Array.isArray(data.timeline) ? data.timeline : [];
+    const timerBlocks = Array.isArray(data.timerBlocks) ? data.timerBlocks : [];
+    const unmatchedTimerBlocks = Array.isArray(data.unmatchedTimerBlocks) ? data.unmatchedTimerBlocks : [];
     const assignments = Array.isArray(data.assignments) ? data.assignments : [];
     const needsReview = data.confidence === "needs_review";
+    const partialCoverage = data.confidence === "partial";
     return `
       <section class="worker-day-evidence ${needsReview ? "needs-review" : ""}" aria-label="Daily performance evidence">
         <div class="worker-day-evidence-header">
           <div>
             <strong>${escapeHtml(formatLongDate(data.date || selectedDate))} evidence</strong>
-            <span>${needsReview ? `${escapeHtml(data.openIssueCount)} reported app issue${data.openIssueCount === 1 ? "" : "s"} — review before using this day as a performance discussion.` : "Recorded task, timer, and event data for this day."}</span>
+            <span>${needsReview ? `${escapeHtml(data.openIssueCount)} reported app issue${data.openIssueCount === 1 ? "" : "s"} — review before using this day as a performance discussion.` : partialCoverage ? "Timer records do not cover every dated assignment. Unmatched timer blocks are kept separate below." : "Timer records match this day’s dated assignments."}</span>
           </div>
           <button class="btn ghost" type="button" data-action="close-day-evidence">Close</button>
         </div>
         <div class="worker-day-evidence-summary">
           <span><small>Assigned tasks</small><strong>${assignments.length}</strong></span>
-          <span><small>Timer sessions</small><strong>${Array.isArray(data.sessions) ? data.sessions.length : 0}</strong></span>
-          <span><small>Task events</small><strong>${Array.isArray(data.events) ? data.events.length : 0}</strong></span>
-          <span><small>Assignment read</small><strong>${data.freshness?.assignment_read_at ? formatRelativeTime(data.freshness.assignment_read_at) : "not recorded"}</strong></span>
+          <span><small>Timer-linked tasks</small><strong>${data.linkedTimerTaskCount || 0}/${assignments.length}</strong></span>
+          <span><small>Unmatched timer blocks</small><strong>${unmatchedTimerBlocks.length}</strong></span>
+          <span><small>Unmapped Asana tasks</small><strong>${assignments.filter(task => task.unmappedTask).length}</strong></span>
         </div>
         <div class="worker-day-evidence-body">
           <div>
-            <h3>Assignments</h3>
+            <h3>Assigned work</h3>
             <ul class="worker-evidence-list">
-              ${assignments.length ? assignments.map((task) => `<li><span>${escapeHtml(task.taskName)}</span><small>${escapeHtml(formatMinutes(task.estimatedMinutes || 0))} · ${task.completed ? "complete" : "open"}</small></li>`).join("") : "<li><span>No assigned-task record</span></li>"}
+              ${assignments.length ? assignments.map((task) => `<li class="${task.unmappedTask ? "unmapped" : task.timerMinutes ? "matched" : "missing-timer"}"><span>${escapeHtml(task.taskName)}</span><small>${escapeHtml(formatMinutes(task.estimatedMinutes || 0))} planned · ${task.timerMinutes ? `${escapeHtml(formatMinutes(task.timerMinutes))} Hawley time` : "no matching Hawley timer"}${task.unmappedTask ? " · unmapped Asana task" : ""}</small></li>`).join("") : "<li><span>No assigned-task record</span></li>"}
             </ul>
           </div>
           <div>
-            <h3>Activity timeline</h3>
+            <h3>Recorded timer blocks</h3>
             <ul class="worker-evidence-list timeline">
-              ${timeline.length ? timeline.map((item) => `<li class="${escapeAttr(item.type || "event")}"><span><strong>${escapeHtml(formatEvidenceTime(item.at))}</strong> ${escapeHtml(item.title || "Activity")}</span><small>${escapeHtml(item.detail || "")}</small></li>`).join("") : "<li><span>No Hawley activity record for this day.</span></li>"}
+              ${timerBlocks.length ? timerBlocks.map((block) => `<li class="${block.matchedAssignment ? "matched" : "unmatched"}"><span><strong>${escapeHtml(formatEvidenceRange(block.startedAt, block.stoppedAt))}</strong> ${escapeHtml(block.taskName)}</span><small>${escapeHtml(formatMinutes(block.durationMinutes || 0))} · ${escapeHtml(block.outcome)}${block.matchedAssignment ? "" : " · does not match a dated assignment"}</small></li>`).join("") : "<li><span>No Hawley timer record for this day.</span></li>"}
             </ul>
           </div>
         </div>
@@ -3092,6 +3100,11 @@
       hour: "numeric",
       minute: "2-digit",
     }).format(date);
+  }
+
+  function formatEvidenceRange(startedAt, stoppedAt) {
+    const start = formatEvidenceTime(startedAt);
+    return stoppedAt ? `${start} – ${formatEvidenceTime(stoppedAt)}` : `${start} – running`;
   }
 
   function actualTimeLabel() {

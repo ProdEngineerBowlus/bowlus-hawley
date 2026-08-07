@@ -208,6 +208,18 @@ manager-only card a **Needs review** status so the recorded values are not used
 as an unqualified performance discussion. Worker issue reports are intentionally
 simple at rollout; manager resolution/review workflows may be added later.
 
+The evidence panel reconciles by Asana task GID. It presents each dated
+assignment with its planned time and any matching Hawley timer time, then shows
+timer blocks separately with their start/end window and human-readable outcome.
+A timer block that belongs to a different or historical Asana task is explicitly
+marked **unmatched** rather than silently changing a day's task-pace value.
+Likewise, an Asana task without an Airtable Task Template link is marked
+**unmapped** for manager review. The daily task-pace number therefore uses only
+timer-backed assignments with matching task IDs; productive time still includes
+all Hawley timer work for the capacity record. A card with incomplete task/timer
+coverage, unmatched timer time, or unmapped tasks is labelled **Partial timer
+coverage**, not treated as a complete performance score.
+
 Hawley source-task hours can intentionally differ from the legacy worker app
 when the Daily Assignment Tracker snapshot is stale. In that case, task IDs and
 completion state should be compared first; DAT-only assigned-hour differences
