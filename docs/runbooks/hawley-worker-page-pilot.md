@@ -223,8 +223,9 @@ those bands *and has no Hawley timer record*, its task name and Asana completion
 timestamp appear in the matching colored panel. These are completion-evidence cues
 only: they never create labor time, alter task pace, or count toward efficiency.
 The manager evidence layout keeps this distinction visible with two panels:
-the right-side chronological timeline contains recorded timer blocks and color-keyed
-no-time bands, while the left-side list contains only Asana completions that
+the right-side chronological timeline renders every recorded timer block in the
+same green treatment and reserves color-keyed bands for no-time gaps. The
+left-side list contains only Asana completions that
 occurred in one of those color-keyed bands without a matching Hawley timer. The list
 uses the same visual key as its related timeline band. Consecutive no-time
 bands use a coral, blue, violet, then green cycle solely to link the panels;

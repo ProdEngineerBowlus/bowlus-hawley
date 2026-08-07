@@ -1627,7 +1627,7 @@
                   const gapColor = gapColorByWindow.get(`${entry.startedAt}:${entry.stoppedAt}`) || 0;
                   return `<li class="unlogged gap-color-${gapColor}"><span><strong>${escapeHtml(formatEvidenceRange(entry.startedAt, entry.stoppedAt))}</strong> No task time logged</span><small>${escapeHtml(formatMinutes(entry.durationMinutes || 0))} without a Hawley timer</small></li>`;
                 }
-                return `<li class="${entry.matchedAssignment ? "matched" : "unmatched"}"><span><strong>${escapeHtml(formatEvidenceRange(entry.startedAt, entry.stoppedAt))}</strong> ${escapeHtml(entry.taskName)}</span><small>${escapeHtml(formatMinutes(entry.durationMinutes || 0))} logged · ${escapeHtml(entry.outcome)}${entry.matchedAssignment ? "" : " · recorded on a different task"}</small></li>`;
+                return `<li class="logged"><span><strong>${escapeHtml(formatEvidenceRange(entry.startedAt, entry.stoppedAt))}</strong> ${escapeHtml(entry.taskName)}</span><small>${escapeHtml(formatMinutes(entry.durationMinutes || 0))} logged · ${escapeHtml(entry.outcome)}${entry.matchedAssignment ? "" : " · recorded on a different task"}</small></li>`;
               }).join("") : "<li><span>No Hawley timer record for this day.</span></li>"}
             </ul>
           </div>

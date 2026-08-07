@@ -832,6 +832,10 @@ button {
   content: "";
 }
 .worker-evidence-list.timeline li { position: relative; }
+.worker-evidence-list.timeline li.logged {
+  border-left-color: var(--primary);
+  background: rgba(51, 196, 141, 0.11);
+}
 .worker-evidence-list.timeline li::before {
   position: absolute;
   top: 12px;
@@ -843,6 +847,7 @@ button {
   background: var(--primary);
   content: "";
 }
+.worker-evidence-list.timeline li.logged::before { background: var(--primary); }
 .worker-evidence-list.timeline li.unlogged::before { background: var(--gap-color, var(--yellow)); }
 .worker-evidence-list.timeline li.unmatched::before { background: var(--accent); }
 
