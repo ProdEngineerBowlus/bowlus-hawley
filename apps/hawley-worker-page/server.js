@@ -3302,10 +3302,12 @@ async function workerCyclePerformancePayload(url, authActor = null) {
 
   const calendar = await cycleCalendar("", date);
   const cycleDates = calendar?.dates || [];
-  // This is deliberately history-only: the detail page's Snapshot retains the
-  // live current-day values, while these cards give a manager five comparable,
-  // finished workdays leading into today.
-  const historyDates = cycleDates.filter(workDate => workDate < date).slice(-5);
+  // Preserve the live current-day split: the Snapshot owns today's in-progress
+  // values, while the cards show the full completed portion of the selected
+  // cycle. A manager reviewing a closed historical cycle also sees its final
+  // selected day, rather than losing it to the live-day exclusion.
+  const historicalSelection = date < todayIso();
+  const historyDates = cycleDates.filter(workDate => workDate < date || (historicalSelection && workDate === date));
   const standardDailyHours = Number(worker.hours_per_day || SHOP_DAILY_AVAILABLE_HOURS);
   const defaultScheduledMinutes = Math.round(standardDailyHours * 60);
   if (!historyDates.length) {
@@ -3320,8 +3322,8 @@ async function workerCyclePerformancePayload(url, authActor = null) {
   const result = await pool.query(
     `
       -- Keep this manager-detail query independent from the broad utilization
-      -- view.  That view is intentionally rich, but can be rebuilding during
-      -- the one-minute Airtable assignment refresh.  Five historical cards
+      -- view. That view is intentionally rich, but can be rebuilding during
+      -- the one-minute Airtable assignment refresh. The completed cycle cards
       -- only need the live timer ledger plus the dated task instances below.
       with requested_days as (
         select unnest($1::date[])::date as work_date

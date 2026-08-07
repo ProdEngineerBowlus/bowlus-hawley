@@ -236,6 +236,12 @@ all Hawley timer work for the capacity record. A card with incomplete task/timer
 coverage, unmatched timer time, or unmapped tasks is labelled **Partial timer
 coverage**, not treated as a complete performance score.
 
+Managers can use the **Cycle** card in the reporting overview as a compact
+past-cycle chooser. Selecting a cycle opens its final workday in the manager
+view. Worker performance cards show every scheduled workday in the selected
+cycle; for the active cycle, today's in-progress day remains in the live
+Snapshot instead of the historical card row.
+
 Hawley source-task hours can intentionally differ from the legacy worker app
 when the Daily Assignment Tracker snapshot is stale. In that case, task IDs and
 completion state should be compared first; DAT-only assigned-hour differences

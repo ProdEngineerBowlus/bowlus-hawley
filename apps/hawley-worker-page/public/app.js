@@ -740,6 +740,16 @@
   function renderLineOverview() {
     const line = state.lineOverview;
     if (!line) return "";
+    const activeCycle = line.cycle || "Current";
+    const cycleChoices = (Array.isArray(state.cycleDays?.cycles) ? state.cycleDays.cycles : [])
+      .filter((cycle) => cycle.cycle && cycle.cycle !== activeCycle && cycle.primaryDate && cycle.primaryDate < state.date)
+      .map((cycle) => `
+        <a href="${escapeAttr(managerDateUrl(cycle.primaryDate))}">
+          <strong>${escapeHtml(cycle.cycle)}</strong>
+          <span>${escapeHtml(cycle.firstDate && cycle.lastDate ? `${formatShortDate(cycle.firstDate)} to ${formatShortDate(cycle.lastDate)}` : formatShortDate(cycle.primaryDate))}</span>
+        </a>
+      `)
+      .join("");
 
     return `
       <section class="panel">
@@ -747,7 +757,15 @@
           <h2 class="panel-title">Reporting overview</h2>
         </div>
         <div class="panel-body metric-grid">
-          ${renderMetric("Cycle", line.cycle || "Current")}
+          <details class="metric cycle-shortcut">
+            <summary aria-label="Choose a past cycle">
+              <span>Cycle<small>View past cycles</small></span>
+              <strong>${escapeHtml(activeCycle)}</strong>
+            </summary>
+            <div class="cycle-shortcut-options">
+              ${cycleChoices || "<span>No completed prior cycles are available.</span>"}
+            </div>
+          </details>
           ${renderMetric("Assigned", formatHours(line.assignedHours))}
           ${renderMetric("Remaining", formatHours(line.remainingHours))}
           ${renderMetric("Complete", `${formatNumber(line.completionPercent)}%`)}
@@ -1465,7 +1483,7 @@
           <div class="panel-header dashboard-header">
             <div>
               <h2 class="panel-title">${escapeHtml(heading)} daily performance</h2>
-              <p class="summary-line">Loading the five completed workdays before today</p>
+              <p class="summary-line">Loading cycle workdays</p>
             </div>
           </div>
           <div class="worker-performance-grid loading" aria-hidden="true">
@@ -1507,7 +1525,7 @@
         <div class="panel-header dashboard-header">
           <div>
             <h2 class="panel-title">${escapeHtml(heading)} daily performance</h2>
-            <p class="summary-line">Last ${days.length} completed workday${days.length === 1 ? "" : "s"} — logged time, task efficiency, and task completion</p>
+            <p class="summary-line">${days.length} workday${days.length === 1 ? "" : "s"} in this cycle — logged time, task efficiency, and task completion</p>
           </div>
         </div>
         <div class="worker-performance-grid">
