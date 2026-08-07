@@ -1562,35 +1562,28 @@
     const data = evidence.data || {};
     const timerBlocks = Array.isArray(data.timerBlocks) ? data.timerBlocks : [];
     const unmatchedTimerBlocks = Array.isArray(data.unmatchedTimerBlocks) ? data.unmatchedTimerBlocks : [];
-    const assignments = Array.isArray(data.assignments) ? data.assignments : [];
     const needsReview = data.confidence === "needs_review";
     const partialCoverage = data.confidence === "partial";
+    const loggedMinutes = timerBlocks.reduce((total, block) => total + Number(block.durationMinutes || 0), 0);
     return `
       <section class="worker-day-evidence ${needsReview ? "needs-review" : ""}" aria-label="Daily performance evidence">
         <div class="worker-day-evidence-header">
           <div>
-            <strong>${escapeHtml(formatLongDate(data.date || selectedDate))} evidence</strong>
-            <span>${needsReview ? `${escapeHtml(data.openIssueCount)} reported app issue${data.openIssueCount === 1 ? "" : "s"} — review before using this day as a performance discussion.` : partialCoverage ? "Timer records do not cover every dated assignment. Unmatched timer blocks are kept separate below." : "Timer records match this day’s dated assignments."}</span>
+            <strong>${escapeHtml(formatLongDate(data.date || selectedDate))} logged-time evidence</strong>
+            <span>${needsReview ? `${escapeHtml(data.openIssueCount)} reported app issue${data.openIssueCount === 1 ? "" : "s"} — review before using this day as a performance discussion.` : partialCoverage ? "This is a time ledger only. A recorded block on another task is identified below but does not alter the task-pace metric." : "This is the Hawley time ledger for the day."}</span>
           </div>
           <button class="btn ghost" type="button" data-action="close-day-evidence">Close</button>
         </div>
         <div class="worker-day-evidence-summary">
-          <span><small>Assigned tasks</small><strong>${assignments.length}</strong></span>
-          <span><small>Timer-linked tasks</small><strong>${data.linkedTimerTaskCount || 0}/${assignments.length}</strong></span>
-          <span><small>Unmatched timer blocks</small><strong>${unmatchedTimerBlocks.length}</strong></span>
-          <span><small>Unmapped Asana tasks</small><strong>${assignments.filter(task => task.unmappedTask).length}</strong></span>
+          <span><small>Logged time</small><strong>${escapeHtml(formatMinutes(loggedMinutes))}</strong></span>
+          <span><small>Timer blocks</small><strong>${timerBlocks.length}</strong></span>
+          <span><small>Other-task blocks</small><strong>${unmatchedTimerBlocks.length}</strong></span>
         </div>
-        <div class="worker-day-evidence-body">
-          <div>
-            <h3>Assigned work</h3>
-            <ul class="worker-evidence-list">
-              ${assignments.length ? assignments.map((task) => `<li class="${task.unmappedTask ? "unmapped" : task.timerMinutes ? "matched" : "missing-timer"}"><span>${escapeHtml(task.taskName)}</span><small>${escapeHtml(formatMinutes(task.estimatedMinutes || 0))} planned · ${task.timerMinutes ? `${escapeHtml(formatMinutes(task.timerMinutes))} Hawley time` : "no matching Hawley timer"}${task.unmappedTask ? " · unmapped Asana task" : ""}</small></li>`).join("") : "<li><span>No assigned-task record</span></li>"}
-            </ul>
-          </div>
+        <div class="worker-day-evidence-body logged-time-only">
           <div>
             <h3>Recorded timer blocks</h3>
             <ul class="worker-evidence-list timeline">
-              ${timerBlocks.length ? timerBlocks.map((block) => `<li class="${block.matchedAssignment ? "matched" : "unmatched"}"><span><strong>${escapeHtml(formatEvidenceRange(block.startedAt, block.stoppedAt))}</strong> ${escapeHtml(block.taskName)}</span><small>${escapeHtml(formatMinutes(block.durationMinutes || 0))} · ${escapeHtml(block.outcome)}${block.matchedAssignment ? "" : " · does not match a dated assignment"}</small></li>`).join("") : "<li><span>No Hawley timer record for this day.</span></li>"}
+              ${timerBlocks.length ? timerBlocks.map((block) => `<li class="${block.matchedAssignment ? "matched" : "unmatched"}"><span><strong>${escapeHtml(formatEvidenceRange(block.startedAt, block.stoppedAt))}</strong> ${escapeHtml(block.taskName)}</span><small>${escapeHtml(formatMinutes(block.durationMinutes || 0))} logged · ${escapeHtml(block.outcome)}${block.matchedAssignment ? "" : " · recorded on a different task"}</small></li>`).join("") : "<li><span>No Hawley timer record for this day.</span></li>"}
             </ul>
           </div>
         </div>

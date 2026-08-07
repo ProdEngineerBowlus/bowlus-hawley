@@ -742,6 +742,10 @@ button {
   padding: 14px;
 }
 
+.worker-day-evidence-body.logged-time-only {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .worker-day-evidence-body h3 {
   margin: 0 0 8px;
   font-size: 12px;

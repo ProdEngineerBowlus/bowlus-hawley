@@ -209,8 +209,11 @@ as an unqualified performance discussion. Worker issue reports are intentionally
 simple at rollout; manager resolution/review workflows may be added later.
 
 The evidence panel reconciles by Asana task GID. It presents each dated
-assignment with its planned time and any matching Hawley timer time, then shows
-timer blocks separately with their start/end window and human-readable outcome.
+assignment with its planned time and any matching Hawley timer time internally,
+then presents managers a **logged-time-only** list of timer blocks with their
+start/end window and human-readable outcome. Dated-assignment and estimate
+details remain out of the visible evidence ledger so planned work is never
+mistaken for recorded labor.
 A timer block that belongs to a different or historical Asana task is explicitly
 marked **unmatched** rather than silently changing a day's task-pace value.
 Likewise, an Asana task without an Airtable Task Template link is marked
