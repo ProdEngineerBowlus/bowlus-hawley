@@ -37,6 +37,11 @@ const WORKER_ACTUALS_WATCH_RESTART_MS = Number(process.env.HAWLEY_WORKER_ACTUALS
 const AIRTABLE_TASK_TIME_WRITEBACK_INTERVAL_MS = Number(process.env.HAWLEY_AIRTABLE_TASK_TIME_WRITEBACK_INTERVAL_MS || 60000);
 const AIRTABLE_TASK_TIME_WRITEBACK_RESTART_MS = Number(process.env.HAWLEY_AIRTABLE_TASK_TIME_WRITEBACK_RESTART_MS || 30000);
 const AIRTABLE_CURRENT_ASSIGNMENTS_INTERVAL_MS = Number(process.env.HAWLEY_AIRTABLE_CURRENT_ASSIGNMENTS_INTERVAL_MS || 60000);
+// Bending is a focused study, not labor time.  Keep its readiness in sync
+// independently of browser traffic so a worker does not need a manager to
+// visit their page before the lap control appears.
+const AUTOMATIC_BENDING_STUDY_WATCH_INTERVAL_MS = Number(process.env.HAWLEY_AUTOMATIC_BENDING_STUDY_INTERVAL_MS || 60000);
+const AUTOMATIC_BENDING_TEMPLATE_REFRESH_INTERVAL_MS = Number(process.env.HAWLEY_AUTOMATIC_BENDING_TEMPLATE_REFRESH_INTERVAL_MS || 300000);
 const NIGHTLY_REFRESH_TIME = process.env.HAWLEY_NIGHTLY_REFRESH_TIME || "01:00";
 const NIGHTLY_REFRESH_TIME_ZONE = process.env.HAWLEY_NIGHTLY_REFRESH_TIME_ZONE || "America/Los_Angeles";
 const NIGHTLY_REFRESH_SCRIPT = process.env.HAWLEY_NIGHTLY_REFRESH_SCRIPT || "pg:refresh-hawley-read-model";
@@ -254,6 +259,22 @@ const airtableCurrentAssignmentsState = {
 let airtableCurrentAssignmentsProcess = null;
 let airtableCurrentAssignmentsTimer = null;
 let airtableCurrentAssignmentsStopping = false;
+
+const automaticBendingStudyState = {
+  enabled: false,
+  running: false,
+  lastStartedAt: "",
+  lastFinishedAt: "",
+  lastInserted: 0,
+  lastTemplateRefreshAt: "",
+  lastTemplateRefreshChanged: 0,
+  lastError: "",
+  intervalMs: AUTOMATIC_BENDING_STUDY_WATCH_INTERVAL_MS,
+  templateRefreshIntervalMs: AUTOMATIC_BENDING_TEMPLATE_REFRESH_INTERVAL_MS,
+  reason: ""
+};
+let automaticBendingStudyTimer = null;
+let automaticBendingStudyStopping = false;
 
 const nightlyRefreshState = {
   enabled: false,
@@ -573,6 +594,7 @@ function watcherStatuses() {
     workerDailyActuals: workerActualsWatcherStatus(),
     airtableTaskTimeWriteback: airtableTaskTimeWritebackStatus(),
     airtableCurrentAssignments: airtableCurrentAssignmentsStatus(),
+    automaticBendingStudies: automaticBendingStudyStatus(),
     nightlyRefresh: nightlyRefreshStatus(),
     nightlyAirtableBackfill: nightlyAirtableBackfillStatus()
   };
@@ -1009,6 +1031,83 @@ function stopAirtableCurrentAssignmentsWatcher(signal = "SIGTERM") {
   if (airtableCurrentAssignmentsProcess && !airtableCurrentAssignmentsProcess.killed) {
     airtableCurrentAssignmentsProcess.kill(signal);
   }
+}
+
+function automaticBendingStudyStatus() {
+  return { ...automaticBendingStudyState };
+}
+
+function automaticBendingTemplateRefreshDue(now = Date.now()) {
+  const lastRefresh = Date.parse(automaticBendingStudyState.lastTemplateRefreshAt || "");
+  return !Number.isFinite(lastRefresh) || now - lastRefresh >= AUTOMATIC_BENDING_TEMPLATE_REFRESH_INTERVAL_MS;
+}
+
+async function reconcileAutomaticBendingStudies() {
+  const date = todayIso();
+  const [rows, configuredRows] = await Promise.all([
+    workerAssignments(date),
+    configuredWorkers()
+  ]);
+  const workers = ensureLivePilotWorkers(
+    mergeConfiguredWorkers(buildWorkers(rows), configuredRows)
+  );
+  return ensureAutomaticBendingStudies(workers, date);
+}
+
+async function refreshAutomaticBendingStudies() {
+  if (automaticBendingStudyStopping || automaticBendingStudyState.running) return;
+  automaticBendingStudyState.running = true;
+  automaticBendingStudyState.lastStartedAt = new Date().toISOString();
+  automaticBendingStudyState.lastError = "";
+  try {
+    if (automaticBendingTemplateRefreshDue()) {
+      const templateRefresh = await refreshBendingTemplateFlagsFromAirtable();
+      automaticBendingStudyState.lastTemplateRefreshAt = new Date().toISOString();
+      automaticBendingStudyState.lastTemplateRefreshChanged = Number(templateRefresh?.changed || 0);
+    }
+    automaticBendingStudyState.lastInserted = await reconcileAutomaticBendingStudies();
+    automaticBendingStudyState.reason = "waiting";
+  } catch (error) {
+    automaticBendingStudyState.lastError = error.message || String(error);
+    automaticBendingStudyState.reason = "failed";
+    console.error(`[hawley-bending-study] automatic reconciliation failed: ${automaticBendingStudyState.lastError}`);
+  } finally {
+    automaticBendingStudyState.running = false;
+    automaticBendingStudyState.lastFinishedAt = new Date().toISOString();
+  }
+}
+
+function startAutomaticBendingStudyWatcher() {
+  automaticBendingStudyState.enabled = false;
+  automaticBendingStudyState.reason = "";
+  if (!Number.isFinite(AUTOMATIC_BENDING_STUDY_WATCH_INTERVAL_MS) || AUTOMATIC_BENDING_STUDY_WATCH_INTERVAL_MS < 15000) {
+    automaticBendingStudyState.reason = "invalid HAWLEY_AUTOMATIC_BENDING_STUDY_INTERVAL_MS";
+    console.warn("Hawley automatic Bending study watcher disabled: interval must be at least 15000 ms.");
+    return;
+  }
+  if (!Number.isFinite(AUTOMATIC_BENDING_TEMPLATE_REFRESH_INTERVAL_MS) || AUTOMATIC_BENDING_TEMPLATE_REFRESH_INTERVAL_MS < AUTOMATIC_BENDING_STUDY_WATCH_INTERVAL_MS) {
+    automaticBendingStudyState.reason = "invalid HAWLEY_AUTOMATIC_BENDING_TEMPLATE_REFRESH_INTERVAL_MS";
+    console.warn("Hawley automatic Bending template refresh disabled: interval must be at least the study interval.");
+    return;
+  }
+
+  automaticBendingStudyState.enabled = true;
+  automaticBendingStudyState.reason = "starting";
+  void refreshAutomaticBendingStudies();
+  automaticBendingStudyTimer = setInterval(() => {
+    void refreshAutomaticBendingStudies();
+  }, AUTOMATIC_BENDING_STUDY_WATCH_INTERVAL_MS);
+  automaticBendingStudyTimer.unref?.();
+}
+
+function stopAutomaticBendingStudyWatcher() {
+  automaticBendingStudyStopping = true;
+  if (automaticBendingStudyTimer) {
+    clearInterval(automaticBendingStudyTimer);
+    automaticBendingStudyTimer = null;
+  }
+  automaticBendingStudyState.enabled = false;
+  automaticBendingStudyState.reason = "stopped";
 }
 
 function parseNightlyRefreshTime(value) {
@@ -4148,7 +4247,10 @@ async function dailyAssignmentsPayload(url, authActor = null) {
 
   const workers = visibleWorkersForRequest(allWorkers, employee, includeNoWork);
   await attachWorkerTaskActualHistory(workers);
-  await ensureAutomaticBendingStudies(workers, date);
+  // This is also reconciled by the server-side watcher.  Using the unfiltered
+  // set here keeps an employee-detail visit from limiting automatic studies to
+  // only the worker currently on screen.
+  await ensureAutomaticBendingStudies(allWorkers, date);
   await attachWorkerTaskTimeStudies(workers, date);
   const cncMachine = await attachCncMachineRunData(workers, date);
   const managerLineOverview = employee
@@ -4212,7 +4314,10 @@ function isFabBendingTask(task) {
 }
 
 async function ensureAutomaticBendingStudies(workers, date) {
-  if (!isIsoDate(date) || date < todayIso()) return 0;
+  // Automatic studies are readiness controls for the active workday.  They
+  // must never manufacture historical observations, nor pre-stage a future
+  // day before the assignment is live.
+  if (!isIsoDate(date) || date !== todayIso()) return 0;
   const candidates = (workers || []).flatMap(worker => (worker.tasks || [])
     .filter(task => task.hasBending && isFabBendingTask(task) && !task.completed && task.id)
     .map(task => ({ worker, task })));
@@ -12601,6 +12706,7 @@ async function startServer() {
   startWorkerActualsWatcher();
   startAirtableTaskTimeWriteback();
   startAirtableCurrentAssignmentsWatcher();
+  startAutomaticBendingStudyWatcher();
   startNightlyRefreshScheduler();
   server.listen(PORT, HOST, () => {
     console.log(`Hawley worker pilot listening on http://${HOST}:${PORT}`);
@@ -12632,6 +12738,7 @@ function shutdown(signal) {
   stopWorkerActualsWatcher(signal);
   stopAirtableTaskTimeWriteback(signal);
   stopAirtableCurrentAssignmentsWatcher(signal);
+  stopAutomaticBendingStudyWatcher();
   stopNightlyRefreshScheduler(signal);
   server.close(() => {
     Promise.all([

@@ -141,10 +141,13 @@ pacing, or capacity.
 ### Template-driven Bending study
 
 `Tasks → Has Bending?` in Airtable is the source flag for the `Bending` study.
-Hawley refreshes just this flag at startup and carries it through the normal
-nightly Airtable refresh. It automatically adds a ready Bending lap control
+Hawley refreshes this flag at startup and every five minutes. A server-side
+reconciliation then checks open assignments every minute and adds a ready
+Bending lap control
 only to open **FAB** assignments (`FAB`, `FAB-A/B`, or `FAB 1–3`) for a checked
-template on the current or a future workday. This is not automatic time
+template on the current workday. The reconciliation does not depend on a
+manager or worker page being open, and it never creates, infers, or backfills
+study time for a previous day. This is not automatic time
 capture: the worker still starts and stops the Bending lap while the normal
 task timer is running. The flag can be changed in Airtable without an app code
 change. Ending an auto-created study keeps it ended for that worker, task, and
