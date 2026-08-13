@@ -1,9 +1,10 @@
 # Asana Portfolio Import
 
-Hawley mirrors the same 2026 Asana scope that `Task Instances Rev1` imports:
+Hawley mirrors the production Asana scope used for worker assignment tracking:
 
 - `Fabrication - 2026` (`1212620750946278`)
 - `VINs - 2026` (`1212620750946276`)
+- `VINs - 2025` (`1209131297411860`)
 
 It also mirrors the standalone `Engineering Changes` project
 (`1212721039355237`). Engineering Changes is a direct project scope rather
@@ -27,6 +28,8 @@ Useful scoped checks:
 ```powershell
 npm run pg:pull:asana -- --portfolio fabrication --limit-projects 1
 npm run pg:pull:asana -- --portfolio vin --skip-subtasks
+npm run pg:pull:asana -- --portfolio vin2025
+npm run pg:pull:asana -- --portfolio vins
 npm run pg:pull:asana -- --portfolio engineering
 ```
 
@@ -54,7 +57,7 @@ we build the faster worker page.
 The existing Shop Ops Rev1 bootstrap script maps these portfolios this way:
 
 - Fabrication portfolio -> `Cycle Project`
-- VIN portfolio -> `VIN Project`
+- VINs - 2026 and VINs - 2025 portfolios -> `VIN Project`
 - Engineering Changes direct project -> `Engineering Change`
 
 Hawley stores that `task_type` on `raw.asana_portfolio_projects` so the later
@@ -90,6 +93,18 @@ top-level project tasks plus first-level subtasks by default. Increase
 becomes operationally important there. The direct Engineering Changes mirror
 is intentionally different: it follows the full subtask tree so administrative
 tracking work is not omitted by nesting depth.
+
+### VINs - 2025 tracking boundary
+
+VINs - 2025 is imported as a permanent Hawley VIN source so its open tasks can
+be assigned with `Assigned On` and tracked in the worker app. The import does
+not by itself place legacy projects into current production pacing; a task only
+appears in a worker's daily assignment list when it is assigned to that worker
+for that date (or remains unfinished carryover).
+
+`vin` refreshes only VINs - 2026 for a targeted project/event refresh.
+`vin2025` refreshes only VINs - 2025, while `vins` (and the default `both`)
+refreshes both VIN portfolios.
 
 ## First Import Baseline
 

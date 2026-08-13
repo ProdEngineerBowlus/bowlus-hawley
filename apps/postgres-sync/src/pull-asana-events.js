@@ -707,6 +707,7 @@ function runFullAsanaRecrawl(scopedPortfolio = "") {
 function portfolioScopeForProject(project) {
   const portfolioName = String(project.portfolio_name || "").trim().toLowerCase();
   if (portfolioName.includes("engineering")) return "engineering";
+  if (portfolioName.includes("vin") && portfolioName.includes("2025")) return "vin2025";
   if (portfolioName.includes("vin")) return "vin";
   return "fabrication";
 }

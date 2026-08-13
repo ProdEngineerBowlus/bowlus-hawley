@@ -92,6 +92,12 @@ const ASANA_PORTFOLIOS = Object.freeze([
     gidEnv: "HAWLEY_ASANA_VIN_PORTFOLIO_GID",
     defaultGid: "1212620750946276",
     expectedName: "VINs - 2026"
+  },
+  {
+    key: "vin2025",
+    gidEnv: "HAWLEY_ASANA_VINS_2025_PORTFOLIO_GID",
+    defaultGid: "1209131297411860",
+    expectedName: "VINs - 2025"
   }
 ]);
 

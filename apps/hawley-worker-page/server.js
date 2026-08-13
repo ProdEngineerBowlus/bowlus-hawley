@@ -207,6 +207,20 @@ let asanaEventWatcherProcess = null;
 let asanaEventWatcherRestartTimer = null;
 let asanaEventWatcherStopping = false;
 
+// VINs - 2025 was added after the original Hawley portfolio bootstrap. Keep
+// this visible in health so an initial mirror is auditable without exposing
+// credentials or requiring a worker-page request.
+const vin2025InitialMirrorState = {
+  enabled: true,
+  running: false,
+  startedAt: "",
+  finishedAt: "",
+  projectCount: 0,
+  requiredProjectCount: 20,
+  lastError: "",
+  reason: "pending"
+};
+
 const workerActualsWatcherState = {
   enabled: false,
   requested: false,
@@ -568,6 +582,10 @@ function asanaEventWatcherStatus() {
   return { ...asanaEventWatcherState };
 }
 
+function vin2025InitialMirrorStatus() {
+  return { ...vin2025InitialMirrorState };
+}
+
 function workerActualsWatcherStatus() {
   return { ...workerActualsWatcherState };
 }
@@ -591,6 +609,7 @@ function nightlyAirtableBackfillStatus() {
 function watcherStatuses() {
   return {
     asanaEvents: asanaEventWatcherStatus(),
+    vin2025InitialMirror: vin2025InitialMirrorStatus(),
     workerDailyActuals: workerActualsWatcherStatus(),
     airtableTaskTimeWriteback: airtableTaskTimeWritebackStatus(),
     airtableCurrentAssignments: airtableCurrentAssignmentsStatus(),
@@ -12076,6 +12095,57 @@ async function refreshEngineeringChangesProjectScope() {
   }
 }
 
+async function refreshVin2025PortfolioScope() {
+  const portfolioGid = process.env.HAWLEY_ASANA_VINS_2025_PORTFOLIO_GID || "1209131297411860";
+  if (!process.env.ASANA_PAT || !syncDatabaseConfigured()) {
+    vin2025InitialMirrorState.enabled = false;
+    vin2025InitialMirrorState.reason = "disabled: Asana or sync database is not configured";
+    return;
+  }
+
+  vin2025InitialMirrorState.running = true;
+  vin2025InitialMirrorState.startedAt = new Date().toISOString();
+  vin2025InitialMirrorState.finishedAt = "";
+  vin2025InitialMirrorState.lastError = "";
+  vin2025InitialMirrorState.reason = "checking mirrored project count";
+  try {
+    const existing = await writePool.query(`
+      select count(*)::integer as project_count
+      from raw.asana_portfolio_projects
+      where portfolio_gid = $1
+    `, [portfolioGid]);
+    const projectCount = Number(existing.rows[0]?.project_count || 0);
+    vin2025InitialMirrorState.projectCount = projectCount;
+
+    if (projectCount >= vin2025InitialMirrorState.requiredProjectCount) {
+      vin2025InitialMirrorState.reason = "already mirrored";
+      return;
+    }
+
+    vin2025InitialMirrorState.reason = `mirroring VINs - 2025 (${projectCount}/${vin2025InitialMirrorState.requiredProjectCount} projects present)`;
+    await runAsanaScopeMirrorSync("vin2025");
+    await runAdminProjectDownstreamRebuild();
+
+    const refreshed = await writePool.query(`
+      select count(*)::integer as project_count
+      from raw.asana_portfolio_projects
+      where portfolio_gid = $1
+    `, [portfolioGid]);
+    vin2025InitialMirrorState.projectCount = Number(refreshed.rows[0]?.project_count || 0);
+    vin2025InitialMirrorState.reason = vin2025InitialMirrorState.projectCount >= vin2025InitialMirrorState.requiredProjectCount
+      ? "initial mirror completed"
+      : `mirror completed with ${vin2025InitialMirrorState.projectCount}/${vin2025InitialMirrorState.requiredProjectCount} projects`;
+    console.log("[hawley-vin-2025]", JSON.stringify(vin2025InitialMirrorState));
+  } catch (error) {
+    vin2025InitialMirrorState.lastError = error.message || String(error);
+    vin2025InitialMirrorState.reason = "initial mirror failed; nightly refresh will retry";
+    console.error(`[hawley-vin-2025] initial mirror failed: ${vin2025InitialMirrorState.lastError}`);
+  } finally {
+    vin2025InitialMirrorState.running = false;
+    vin2025InitialMirrorState.finishedAt = new Date().toISOString();
+  }
+}
+
 async function registerUnmirroredAdminProjects() {
   const result = await writePool.query(`
     select run.project_creation_run_id, run.project_type, run.project_name, run.asana_project_gid
@@ -12729,7 +12799,12 @@ async function startServer() {
     // Engineering Changes is a direct Asana project (not a portfolio). Seed
     // it once after deploy; the normal one-minute event watcher takes over
     // once its project row and cursor exist.
-    setTimeout(() => refreshEngineeringChangesProjectScope(), 1500).unref?.();
+    setTimeout(() => {
+      // Keep startup imports serial. Both use the same Asana token and rebuild
+      // the same read model, while worker pages remain available throughout.
+      refreshEngineeringChangesProjectScope()
+        .finally(() => refreshVin2025PortfolioScope());
+    }, 1500).unref?.();
   });
 }
 

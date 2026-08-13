@@ -18,6 +18,17 @@ const PORTFOLIOS = Object.freeze({
     expectedName: "VINs - 2026",
     taskType: "VIN Project"
   },
+  vin2025: {
+    // Keep active legacy VIN work in the same Hawley task-tracking scope as
+    // current VINs.  These are not production-line pacing inputs unless their
+    // tasks are explicitly scheduled and assigned for a workday.
+    gid: process.env.HAWLEY_ASANA_VINS_2025_PORTFOLIO_GID || "1209131297411860",
+    expectedName: "VINs - 2025",
+    taskType: "VIN Project",
+    // Legacy VIN work has been organized at different nested depths over
+    // time. Keep every assigned task eligible for Hawley tracking.
+    fullSubtaskTree: true
+  },
   engineeringChanges: {
     // Engineering work is intentionally a first-class Hawley mirror source,
     // while the read model keeps it out of production pacing because it has
@@ -32,13 +43,17 @@ const PORTFOLIOS = Object.freeze({
 });
 
 const PORTFOLIO_ALIASES = Object.freeze({
-  both: ["fabrication", "vin", "engineeringChanges"],
-  all: ["fabrication", "vin", "engineeringChanges"],
+  both: ["fabrication", "vin", "vin2025", "engineeringChanges"],
+  all: ["fabrication", "vin", "vin2025", "engineeringChanges"],
   cycle: ["fabrication"],
   fabrication: ["fabrication"],
   fab: ["fabrication"],
+  // Keep the existing `vin` scope precise for project-level refreshes.  The
+  // all/both scopes include both VIN portfolios for recurring full refreshes.
   vin: ["vin"],
-  vins: ["vin"],
+  vins: ["vin", "vin2025"],
+  vin2025: ["vin2025"],
+  vins2025: ["vin2025"],
   engineering: ["engineeringChanges"],
   engineeringchanges: ["engineeringChanges"],
   engineering_changes: ["engineeringChanges"],
@@ -135,7 +150,7 @@ function parseArgs(argv) {
         "Usage: npm run pg:pull:asana -- [options]",
         "",
         "Options:",
-        "  --portfolio both|fabrication|cycle|vin|engineering",
+        "  --portfolio both|fabrication|cycle|vin|vin2025|engineering",
         "  --project GID          Pull one project under the selected portfolio context.",
         "  --limit-projects N     Limit project count for testing.",
         "  --skip-subtasks        Pull top-level project tasks only.",
@@ -149,7 +164,7 @@ function parseArgs(argv) {
   }
 
   if (!PORTFOLIO_ALIASES[args.portfolio]) {
-    throw new Error("--portfolio must be both, fabrication, cycle, vin, or engineering.");
+    throw new Error("--portfolio must be both, fabrication, cycle, vin, vin2025, or engineering.");
   }
   if (args.projectGid && args.limitProjects > 0) {
     throw new Error("--project and --limit-projects cannot be combined.");
@@ -603,7 +618,7 @@ function projectSubtaskDepth(args, config) {
   // frequently nested under an ECO and then a function/work-package task.
   // Follow its full tree so an Assigned On value is never lost solely because
   // of its organizational depth.
-  return config.scopeType === "project" ? Infinity : args.subtaskDepth;
+  return config.scopeType === "project" || config.fullSubtaskTree ? Infinity : args.subtaskDepth;
 }
 
 // A task can be present in more than one project. When Asana returns its
