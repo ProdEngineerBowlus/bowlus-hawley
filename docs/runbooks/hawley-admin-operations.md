@@ -220,6 +220,9 @@ return its GID. Hawley marks each create request in the project notes with its
 creation-run ID, then checks that marker for a short, bounded period before
 returning an error. It never sends a second project-create request after that
 ambiguous response, so an Asana timeout cannot create duplicate projects.
+The initial create request has a shorter internal timeout than the DigitalOcean
+App Platform request limit, which leaves Hawley enough time to perform that
+check and return a readable application error instead of a gateway 504 page.
 
 Safety gate:
 

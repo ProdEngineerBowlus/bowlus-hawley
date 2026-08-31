@@ -10739,23 +10739,38 @@ async function handleAdminPhaseCyclePaceOverride(req) {
   };
 }
 
-async function adminAsanaRequest(token, pathOrUrl, method = "GET", body = null, retry = 0) {
+async function adminAsanaRequest(token, pathOrUrl, method = "GET", body = null, retry = 0, timeoutMs = 0) {
   const url = pathOrUrl.startsWith("http") ? pathOrUrl : `https://app.asana.com/api/1.0${pathOrUrl}`;
-  const response = await fetch(url, {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json"
-    },
-    body: body ? JSON.stringify({ data: body }) : null
-  });
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timeout = controller
+    ? setTimeout(() => controller.abort(), timeoutMs)
+    : null;
+  let response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: body ? JSON.stringify({ data: body }) : null,
+      ...(controller ? { signal: controller.signal } : {})
+    });
+  } catch (error) {
+    if (controller?.signal.aborted) {
+      throw actionError(`Asana ${method} request timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`, 504);
+    }
+    throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 
   const text = await response.text();
   if (response.status === 429 && retry < 5) {
     const retryAfter = Number(response.headers.get("retry-after") || 0);
     const waitMs = retryAfter ? retryAfter * 1000 : 1000 * Math.pow(2, retry);
     await new Promise(resolve => setTimeout(resolve, waitMs));
-    return adminAsanaRequest(token, pathOrUrl, method, body, retry + 1);
+    return adminAsanaRequest(token, pathOrUrl, method, body, retry + 1, timeoutMs);
   }
   if (!response.ok) throw actionError(`Asana ${method} failed: ${text}`, response.status);
   return text ? JSON.parse(text).data : null;
@@ -10778,11 +10793,15 @@ async function adminFindProjectCreatedForRun(token, projectName, runId) {
   // display name can never be mistaken for this run.
   const candidates = await adminAsanaRequest(
     token,
-    `/workspaces/${ADMIN_ASANA_WORKSPACE_GID}/typeahead?resource_type=project&query=${encodeURIComponent(projectName)}`
+    `/workspaces/${ADMIN_ASANA_WORKSPACE_GID}/typeahead?resource_type=project&query=${encodeURIComponent(projectName)}`,
+    "GET",
+    null,
+    0,
+    3000
   );
   for (const candidate of candidates || []) {
     if (String(candidate?.name || "").trim() !== projectName) continue;
-    const project = await adminAsanaRequest(token, `/projects/${candidate.gid}?opt_fields=gid,name,notes`);
+    const project = await adminAsanaRequest(token, `/projects/${candidate.gid}?opt_fields=gid,name,notes`, "GET", null, 0, 3000);
     if (String(project?.notes || "").includes(marker)) return project;
   }
   return null;
@@ -10799,7 +10818,10 @@ async function createAdminAsanaProject(token, projectName, runId = "") {
   };
 
   try {
-    const project = await adminAsanaRequest(token, "/projects", "POST", body);
+    // This must return well before App Platform's request deadline. A fetch
+    // abort does not imply Asana discarded the request, so the catch path
+    // reconciles the creation-run marker rather than issuing another POST.
+    const project = await adminAsanaRequest(token, "/projects", "POST", body, 0, 12000);
     if (!project?.gid) throw actionError("Asana did not return a project GID.", 502);
     return project.gid;
   } catch (error) {
@@ -10808,7 +10830,13 @@ async function createAdminAsanaProject(token, projectName, runId = "") {
     // A 5xx response to a create is ambiguous: Asana may have completed the
     // write but failed before returning its GID. Poll only the read-side
     // reconciliation here. A second POST could create a duplicate project.
-    for (const waitMs of [1500, 3000, 5000]) {
+    console.warn("[hawley-project-creator]", JSON.stringify({
+      runId,
+      projectName,
+      statusCode: error?.statusCode || null,
+      reason: "asana_create_ambiguous_response_reconciling"
+    }));
+    for (const waitMs of [750, 1250, 2000]) {
       await new Promise(resolve => setTimeout(resolve, waitMs));
       const recovered = await adminFindProjectCreatedForRun(token, projectName, runId);
       if (recovered?.gid) {
