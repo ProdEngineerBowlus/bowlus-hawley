@@ -214,6 +214,13 @@ As soon as template instantiation returns an Asana project GID, Hawley records
 that GID on the creation run before adding tasks. This preserves partial-project
 evidence if a later Asana request fails and prevents an unsafe duplicate retry.
 
+If Asana returns a 5xx response while creating the initial project shell, the
+result is ambiguous: the project may have been created even though Asana did not
+return its GID. Hawley marks each create request in the project notes with its
+creation-run ID, then checks that marker for a short, bounded period before
+returning an error. It never sends a second project-create request after that
+ambiguous response, so an Asana timeout cannot create duplicate projects.
+
 Safety gate:
 
 ```text

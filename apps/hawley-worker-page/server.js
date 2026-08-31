@@ -10761,15 +10761,73 @@ async function adminAsanaRequest(token, pathOrUrl, method = "GET", body = null, 
   return text ? JSON.parse(text).data : null;
 }
 
-async function createAdminAsanaProject(token, projectName) {
-  const project = await adminAsanaRequest(token, "/projects", "POST", {
+function adminProjectCreationMarker(runId) {
+  return runId ? `Hawley project creator run ${runId}` : "";
+}
+
+function adminAsanaRetryableCreateError(error) {
+  return [500, 502, 503, 504].includes(Number(error?.statusCode || 0));
+}
+
+async function adminFindProjectCreatedForRun(token, projectName, runId) {
+  const marker = adminProjectCreationMarker(runId);
+  if (!marker || !ADMIN_ASANA_WORKSPACE_GID) return null;
+
+  // Typeahead keeps this reconciliation request small. The marker is written
+  // into the project notes at create time, so an old project with the same
+  // display name can never be mistaken for this run.
+  const candidates = await adminAsanaRequest(
+    token,
+    `/workspaces/${ADMIN_ASANA_WORKSPACE_GID}/typeahead?resource_type=project&query=${encodeURIComponent(projectName)}`
+  );
+  for (const candidate of candidates || []) {
+    if (String(candidate?.name || "").trim() !== projectName) continue;
+    const project = await adminAsanaRequest(token, `/projects/${candidate.gid}?opt_fields=gid,name,notes`);
+    if (String(project?.notes || "").includes(marker)) return project;
+  }
+  return null;
+}
+
+async function createAdminAsanaProject(token, projectName, runId = "") {
+  const marker = adminProjectCreationMarker(runId);
+  const body = {
     name: projectName,
     workspace: ADMIN_ASANA_WORKSPACE_GID,
     team: ADMIN_ASANA_TEAM_GID,
-    default_view: "list"
-  });
-  if (!project?.gid) throw actionError("Asana did not return a project GID.", 502);
-  return project.gid;
+    default_view: "list",
+    ...(marker ? { notes: marker } : {})
+  };
+
+  try {
+    const project = await adminAsanaRequest(token, "/projects", "POST", body);
+    if (!project?.gid) throw actionError("Asana did not return a project GID.", 502);
+    return project.gid;
+  } catch (error) {
+    if (!runId || !adminAsanaRetryableCreateError(error)) throw error;
+
+    // A 5xx response to a create is ambiguous: Asana may have completed the
+    // write but failed before returning its GID. Poll only the read-side
+    // reconciliation here. A second POST could create a duplicate project.
+    for (const waitMs of [1500, 3000, 5000]) {
+      await new Promise(resolve => setTimeout(resolve, waitMs));
+      const recovered = await adminFindProjectCreatedForRun(token, projectName, runId);
+      if (recovered?.gid) {
+        console.warn("[hawley-project-creator]", JSON.stringify({
+          runId,
+          projectName,
+          recoveredAsanaProjectGid: recovered.gid,
+          reason: "asana_create_timeout_reconciled"
+        }));
+        return recovered.gid;
+      }
+    }
+
+    throw actionError(
+      "Asana did not confirm the project create. Hawley did not issue a second create request, so a duplicate cannot be created. Try again after Asana recovers.",
+      503,
+      { code: "ASANA_PROJECT_CREATE_UNCONFIRMED", originalStatusCode: error?.statusCode || null }
+    );
+  }
 }
 
 async function adminAttachProjectCustomFields(token, projectGid) {
@@ -11743,7 +11801,7 @@ async function createAdminAsanaProjectFromPreview(token, preview, projectName, r
   // Airtable attachment URLs are temporary. Refresh them before the Asana
   // project exists so a stale cached URL cannot leave another project shell.
   const freshAttachmentsByRecordId = await adminFreshTaskAttachmentsByRecordId(preview.tasks);
-  const projectGid = await createAdminAsanaProject(token, projectName);
+  const projectGid = await createAdminAsanaProject(token, projectName, runId);
   if (runId) {
     await updateAdminProjectCreationResult(runId, "project_created", {
       asanaProjectGid: projectGid
