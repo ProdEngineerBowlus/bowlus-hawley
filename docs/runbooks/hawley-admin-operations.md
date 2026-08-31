@@ -228,6 +228,12 @@ selecting the same scope again resumes that failed run against its recorded
 Asana project GID. Hawley does not create a second project shell for a resumed
 run.
 
+Project creation is queued after Hawley validates the preview. This keeps the
+browser request short even when a project contains hundreds of tasks. Hawley
+saves each Asana task GID as it is created; a resumed run skips those linked
+tasks and creates only the remaining work. Root task chains are created with a
+small bounded concurrency to reduce elapsed time without flooding Asana.
+
 Safety gate:
 
 ```text

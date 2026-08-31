@@ -11825,6 +11825,32 @@ async function updateAdminProjectTaskAsanaLinks(createdTasks, projectGid, projec
   }
 }
 
+async function adminProjectCreationTaskLinks(runId) {
+  if (!runId) return new Map();
+  const result = await writePool.query(
+    `
+      select fields_json ->> 'nativeKey' as native_key, asana_task_gid, parent_asana_task_gid
+      from hb.rev1_task_instances
+      where source_system = 'hawley_project_creator'
+        and fields_json ->> 'projectCreationRunId' = $1
+        and nullif(asana_task_gid, '') is not null
+    `,
+    [runId]
+  );
+  return new Map(result.rows.map(row => [String(row.native_key || ""), row]));
+}
+
+async function adminForEachWithConcurrency(items, limit, action) {
+  const queue = [...items];
+  const workerCount = Math.min(Math.max(1, Number(limit) || 1), queue.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      if (item) await action(item);
+    }
+  }));
+}
+
 async function createAdminAsanaProjectFromPreview(token, preview, projectName, runId = "", existingProjectGid = "") {
   // Airtable attachment URLs are temporary. Refresh them before the Asana
   // project exists so a stale cached URL cannot leave another project shell.
@@ -11881,35 +11907,39 @@ async function createAdminAsanaProjectFromPreview(token, preview, projectName, r
 
   const createdTasks = [];
   const attachmentWarnings = [];
+  const existingTaskLinks = await adminProjectCreationTaskLinks(runId);
   let rootTaskCount = 0;
   let subtaskCount = 0;
 
   async function createTree(task, parentGid = null) {
-    const sectionGid = sectionByLabel[projectCreatorNormalizeKey(task.asanaSection || task.phaseLabel || "Unassigned")];
-    const asanaTask = await adminCreateAsanaTask(token, projectGid, sectionGid, parentGid, task, preview, registry, userGidsByEmail);
-    const createdTask = {
-      nativeKey: task.nativeKey,
-      asanaTaskGid: asanaTask.gid,
-      parentAsanaTaskGid: parentGid
-    };
-    createdTasks.push(createdTask);
-    // Save each link immediately so any later failure remains visible and recoverable.
-    await updateAdminProjectTaskAsanaLink(createdTask, projectGid, projectName);
-    const attachments = freshAttachmentsByRecordId.has(task.task_record_id)
-      ? freshAttachmentsByRecordId.get(task.task_record_id)
-      : (task.attachment_files_json || []);
-    const warnings = await adminUploadTaskAttachments(token, asanaTask.gid, attachments);
-    attachmentWarnings.push(...warnings.map(warning => ({ taskName: task.task_name, ...warning })));
+    const existing = existingTaskLinks.get(String(task.nativeKey || ""));
+    let asanaTaskGid = existing?.asana_task_gid || "";
+    if (!asanaTaskGid) {
+      const sectionGid = sectionByLabel[projectCreatorNormalizeKey(task.asanaSection || task.phaseLabel || "Unassigned")];
+      const asanaTask = await adminCreateAsanaTask(token, projectGid, sectionGid, parentGid, task, preview, registry, userGidsByEmail);
+      asanaTaskGid = asanaTask.gid;
+      const createdTask = {
+        nativeKey: task.nativeKey,
+        asanaTaskGid,
+        parentAsanaTaskGid: parentGid
+      };
+      createdTasks.push(createdTask);
+      // Save each link immediately so any later failure remains visible and recoverable.
+      await updateAdminProjectTaskAsanaLink(createdTask, projectGid, projectName);
+      const attachments = freshAttachmentsByRecordId.has(task.task_record_id)
+        ? freshAttachmentsByRecordId.get(task.task_record_id)
+        : (task.attachment_files_json || []);
+      const warnings = await adminUploadTaskAttachments(token, asanaTaskGid, attachments);
+      attachmentWarnings.push(...warnings.map(warning => ({ taskName: task.task_name, ...warning })));
+    }
     if (parentGid) subtaskCount += 1;
     else rootTaskCount += 1;
     for (const child of childrenByParentKey.get(task.nativeKey) || []) {
-      await createTree(child, asanaTask.gid);
+      await createTree(child, asanaTaskGid);
     }
   }
 
-  for (const task of rootTasks) {
-    await createTree(task);
-  }
+  await adminForEachWithConcurrency(rootTasks, 3, task => createTree(task));
 
   return {
     asanaProjectGid: projectGid,
@@ -11925,7 +11955,7 @@ async function createAdminAsanaProjectFromPreview(token, preview, projectName, r
 async function adminRecoverableProjectCreationRun(preview, projectName) {
   const schedule = preview?.schedule || {};
   const criteria = [
-    "status = 'failed'",
+    "status in ('started', 'project_created', 'failed')",
     "project_name = $1",
     "project_type = $2",
     "nullif(asana_project_gid, '') is not null"
@@ -11949,6 +11979,54 @@ async function adminRecoverableProjectCreationRun(preview, projectName) {
     values
   );
   return result.rows[0] || null;
+}
+
+async function runAdminProjectCreation({ token, preview, projectName, projectType, runId, existingProjectGid = "" }) {
+  try {
+    const result = await createAdminAsanaProjectFromPreview(
+      token,
+      preview,
+      projectName,
+      runId,
+      existingProjectGid
+    );
+    await updateAdminProjectTaskAsanaLinks(result.createdTasks, result.asanaProjectGid, projectName);
+    let asanaMirror = { ok: true };
+    try {
+      asanaMirror = await runAdminProjectAsanaMirrorSync(projectType, result.asanaProjectGid);
+    } catch (error) {
+      asanaMirror = { ok: false, error: error.message || String(error) };
+    }
+    let downstreamRebuild = { ok: true };
+    try {
+      downstreamRebuild = await runAdminProjectDownstreamRebuild();
+    } catch (error) {
+      downstreamRebuild = { ok: false, error: error.message || String(error) };
+    }
+    const completedResult = { ...result, asanaMirror, downstreamRebuild };
+    await updateAdminProjectCreationResult(runId, "success", completedResult);
+    console.log("[hawley-project-creator]", JSON.stringify({
+      runId,
+      projectName,
+      status: "success",
+      rootTaskCount: result.rootTaskCount,
+      subtaskCount: result.subtaskCount
+    }));
+    return completedResult;
+  } catch (error) {
+    const failure = {
+      errorMessage: error.message || "Project creation failed.",
+      statusCode: error.statusCode || 500
+    };
+    console.error("[hawley-project-creator]", JSON.stringify({
+      runId,
+      projectName,
+      statusCode: failure.statusCode,
+      error: failure.errorMessage
+    }));
+    await updateAdminProjectCreationResult(runId, "failed", failure);
+    throw error;
+  }
 }
 
 async function handleAdminProjectCreate(req) {
@@ -12003,10 +12081,10 @@ async function handleAdminProjectCreate(req) {
     vin: selectedVin,
     cycleNumber
   });
-  const recoverableRun = preview.existingNativePendingTasks
+  const recoverableRun = (preview.existingNativePendingTasks || preview.existingSyncedTasks || preview.existingLinkedScheduleRows)
     ? await adminRecoverableProjectCreationRun(preview, projectName)
     : null;
-  if (preview.existingSyncedTasks) {
+  if (preview.existingSyncedTasks && !recoverableRun) {
     throw actionError("This project scope already has Asana-linked task instances. Pick an unsynced future VIN/cycle scope for the test create.", 409, {
       code: "PROJECT_TASKS_ALREADY_SYNCED",
       existingSyncedTasks: preview.existingSyncedTasks
@@ -12018,7 +12096,7 @@ async function handleAdminProjectCreate(req) {
       existingLegacyTasks: preview.existingLegacyTasks
     });
   }
-  if (preview.existingLinkedScheduleRows) {
+  if (preview.existingLinkedScheduleRows && !recoverableRun) {
     throw actionError("At least one selected Production row already has Task Instances Rev1 links. The current project creator treats the whole scope as already instantiated.", 409, {
       code: "PROJECT_SCHEDULE_ALREADY_INSTANTIATED",
       existingLinkedScheduleRows: preview.existingLinkedScheduleRows
@@ -12035,6 +12113,13 @@ async function handleAdminProjectCreate(req) {
   if (!recoverableRun) {
     await insertAdminProjectCreationRows(preview, runId, projectName, actor, body);
   } else {
+    await writePool.query(`
+      update hb.project_creation_runs
+      set status = 'started',
+          error_message = null,
+          completed_at = null
+      where project_creation_run_id = $1
+    `, [runId]);
     console.warn("[hawley-project-creator]", JSON.stringify({
       runId,
       projectName,
@@ -12043,49 +12128,26 @@ async function handleAdminProjectCreate(req) {
     }));
   }
 
-  try {
-    const result = await createAdminAsanaProjectFromPreview(
+  // Project creation can involve hundreds of Asana tasks. Queue the work after
+  // the response is sent so an App Platform request deadline cannot leave the
+  // user staring at a gateway error while durable task links continue to save.
+  setImmediate(() => {
+    runAdminProjectCreation({
       token,
       preview,
       projectName,
+      projectType,
       runId,
-      recoverableRun?.asana_project_gid || ""
-    );
-    await updateAdminProjectTaskAsanaLinks(result.createdTasks, result.asanaProjectGid, projectName);
-    let asanaMirror = { ok: true };
-    try {
-      asanaMirror = await runAdminProjectAsanaMirrorSync(projectType, result.asanaProjectGid);
-    } catch (error) {
-      asanaMirror = { ok: false, error: error.message || String(error) };
-    }
-    let downstreamRebuild = { ok: true };
-    try {
-      downstreamRebuild = await runAdminProjectDownstreamRebuild();
-    } catch (error) {
-      downstreamRebuild = { ok: false, error: error.message || String(error) };
-    }
-    const completedResult = { ...result, asanaMirror, downstreamRebuild };
-    await updateAdminProjectCreationResult(runId, "success", completedResult);
-    return {
+      existingProjectGid: recoverableRun?.asana_project_gid || ""
+    }).catch(() => {});
+  });
+  return {
       ok: true,
-      message: `${recoverableRun ? "Resumed" : "Created"} Asana test project ${projectName}.`,
+      queued: true,
+      message: `${recoverableRun ? "Resuming" : "Creating"} ${projectName} in the background. Reload Project Creator to see its progress.`,
       runId,
-      ...completedResult
-    };
-  } catch (error) {
-    const failure = {
-      errorMessage: error.message || "Project creation failed.",
-      statusCode: error.statusCode || 500
-    };
-    console.error("[hawley-project-creator]", JSON.stringify({
-      runId,
-      projectName,
-      statusCode: failure.statusCode,
-      error: failure.errorMessage
-    }));
-    await updateAdminProjectCreationResult(runId, "failed", failure);
-    throw error;
-  }
+      asanaProjectGid: recoverableRun?.asana_project_gid || ""
+  };
 }
 
 async function handleAdminProjectCreationCleanup(req) {
