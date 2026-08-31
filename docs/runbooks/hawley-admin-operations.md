@@ -223,6 +223,10 @@ ambiguous response, so an Asana timeout cannot create duplicate projects.
 The initial create request has a shorter internal timeout than the DigitalOcean
 App Platform request limit, which leaves Hawley enough time to perform that
 check and return a readable application error instead of a gateway 504 page.
+If the initial project shell was confirmed but a later Asana step failed,
+selecting the same scope again resumes that failed run against its recorded
+Asana project GID. Hawley does not create a second project shell for a resumed
+run.
 
 Safety gate:
 

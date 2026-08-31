@@ -11825,11 +11825,11 @@ async function updateAdminProjectTaskAsanaLinks(createdTasks, projectGid, projec
   }
 }
 
-async function createAdminAsanaProjectFromPreview(token, preview, projectName, runId = "") {
+async function createAdminAsanaProjectFromPreview(token, preview, projectName, runId = "", existingProjectGid = "") {
   // Airtable attachment URLs are temporary. Refresh them before the Asana
   // project exists so a stale cached URL cannot leave another project shell.
   const freshAttachmentsByRecordId = await adminFreshTaskAttachmentsByRecordId(preview.tasks);
-  const projectGid = await createAdminAsanaProject(token, projectName, runId);
+  const projectGid = String(existingProjectGid || "").trim() || await createAdminAsanaProject(token, projectName, runId);
   if (runId) {
     await updateAdminProjectCreationResult(runId, "project_created", {
       asanaProjectGid: projectGid
@@ -11922,6 +11922,35 @@ async function createAdminAsanaProjectFromPreview(token, preview, projectName, r
   };
 }
 
+async function adminRecoverableProjectCreationRun(preview, projectName) {
+  const schedule = preview?.schedule || {};
+  const criteria = [
+    "status = 'failed'",
+    "project_name = $1",
+    "project_type = $2",
+    "nullif(asana_project_gid, '') is not null"
+  ];
+  const values = [projectName, preview?.projectType || ""];
+  if (preview?.projectType === "VIN" && preview?.selectedVin !== null && preview?.selectedVin !== undefined) {
+    values.push(String(preview.selectedVin));
+    criteria.push(`vin = $${values.length}`);
+  } else if (schedule.cycle_record_id) {
+    values.push(schedule.cycle_record_id);
+    criteria.push(`cycle_record_id = $${values.length}`);
+  }
+  const result = await writePool.query(
+    `
+      select project_creation_run_id, asana_project_gid
+      from hb.project_creation_runs
+      where ${criteria.join(" and ")}
+      order by created_at desc
+      limit 1
+    `,
+    values
+  );
+  return result.rows[0] || null;
+}
+
 async function handleAdminProjectCreate(req) {
   const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
   requireAdminActor(actor);
@@ -11970,6 +11999,13 @@ async function handleAdminProjectCreate(req) {
       skipped: preview?.skipped || {}
     });
   }
+  const projectName = requestedProjectName || preview.projectName || adminProjectNameForPreview(projectType, {
+    vin: selectedVin,
+    cycleNumber
+  });
+  const recoverableRun = preview.existingNativePendingTasks
+    ? await adminRecoverableProjectCreationRun(preview, projectName)
+    : null;
   if (preview.existingSyncedTasks) {
     throw actionError("This project scope already has Asana-linked task instances. Pick an unsynced future VIN/cycle scope for the test create.", 409, {
       code: "PROJECT_TASKS_ALREADY_SYNCED",
@@ -11988,22 +12024,33 @@ async function handleAdminProjectCreate(req) {
       existingLinkedScheduleRows: preview.existingLinkedScheduleRows
     });
   }
-  if (preview.existingNativePendingTasks) {
+  if (preview.existingNativePendingTasks && !recoverableRun) {
     throw actionError("This project scope has a pending or failed Hawley creation run. Inspect the latest run before retrying so an Asana project is not duplicated.", 409, {
       code: "PROJECT_CREATE_PENDING_REVIEW",
       existingNativePendingTasks: preview.existingNativePendingTasks
     });
   }
 
-  const projectName = requestedProjectName || preview.projectName || adminProjectNameForPreview(projectType, {
-    vin: selectedVin,
-    cycleNumber
-  });
-  const runId = crypto.randomUUID();
-  await insertAdminProjectCreationRows(preview, runId, projectName, actor, body);
+  const runId = recoverableRun?.project_creation_run_id || crypto.randomUUID();
+  if (!recoverableRun) {
+    await insertAdminProjectCreationRows(preview, runId, projectName, actor, body);
+  } else {
+    console.warn("[hawley-project-creator]", JSON.stringify({
+      runId,
+      projectName,
+      recoveredAsanaProjectGid: recoverableRun.asana_project_gid,
+      reason: "resuming_failed_project_creation_run"
+    }));
+  }
 
   try {
-    const result = await createAdminAsanaProjectFromPreview(token, preview, projectName, runId);
+    const result = await createAdminAsanaProjectFromPreview(
+      token,
+      preview,
+      projectName,
+      runId,
+      recoverableRun?.asana_project_gid || ""
+    );
     await updateAdminProjectTaskAsanaLinks(result.createdTasks, result.asanaProjectGid, projectName);
     let asanaMirror = { ok: true };
     try {
@@ -12021,7 +12068,7 @@ async function handleAdminProjectCreate(req) {
     await updateAdminProjectCreationResult(runId, "success", completedResult);
     return {
       ok: true,
-      message: `Created Asana test project ${projectName}.`,
+      message: `${recoverableRun ? "Resumed" : "Created"} Asana test project ${projectName}.`,
       runId,
       ...completedResult
     };
