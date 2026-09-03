@@ -383,6 +383,13 @@ function publicErrorMessage(error) {
     };
   }
 
+  if (error.code === "57014" || /statement timeout|canceling statement/i.test(message)) {
+    return {
+      status: 503,
+      message: "Hawley is temporarily busy. Please retry in a moment."
+    };
+  }
+
   return {
     status: error.statusCode || 500,
     message: message || "Unexpected server error."
@@ -4732,6 +4739,16 @@ async function prepareAuthClient(client) {
   await client.query("set statement_timeout = 5000");
 }
 
+async function releaseAuthClient(client) {
+  try {
+    await client.query("reset statement_timeout");
+    client.release();
+  } catch (error) {
+    // A pooled connection with auth-only session settings must never be reused.
+    client.release(error);
+  }
+}
+
 async function seedInactiveAuthUsersFromWorkForce() {
   if (!APP_AUTH_SEED_ROSTER_ON_START || !syncDatabaseConfigured()) return;
   const client = new pg.Client(getDatabaseConfig({ useSyncUrl: true }));
@@ -4920,7 +4937,7 @@ async function authActorFromRequest(req) {
     authRuntimeState.lastSessionCheckError = error.message || String(error);
     throw error;
   } finally {
-    client.release();
+    await releaseAuthClient(client);
   }
 }
 
@@ -7796,7 +7813,7 @@ async function handleAuthLogin(req, res) {
     authRuntimeState.lastLoginError = error.message || String(error);
     throw error;
   } finally {
-    client.release();
+    await releaseAuthClient(client);
   }
 }
 
@@ -7817,7 +7834,7 @@ async function handleAuthLogout(req, res) {
         userAgent: String(req.headers["user-agent"] || "")
       });
     } finally {
-      client.release();
+      await releaseAuthClient(client);
     }
   }
 
