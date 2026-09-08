@@ -1,5 +1,16 @@
 import pg from "pg";
 import { getDatabaseConfig } from "./config.js";
+import {
+  buildCycleIndex,
+  dateValue,
+  fabricationProjectCycleLabel,
+  findCycleByReference,
+  parseCycleReference,
+  qualifyCycleReference,
+  resolveAsanaCompletion,
+  resolveCycleAttachment,
+  splitTaskHours
+} from "./hb-calculation-rules.js";
 
 const { Client } = pg;
 
@@ -62,14 +73,6 @@ function booleanValue(value) {
   if (typeof raw === "number") return raw !== 0;
   const normalized = String(raw).trim().toLowerCase();
   return ["true", "1", "yes", "y", "checked", "complete", "completed"].includes(normalized);
-}
-
-function dateValue(value) {
-  const raw = firstValue(value);
-  if (!raw) return null;
-  if (typeof raw === "object") return dateValue(raw.value ?? raw.name ?? raw.date);
-  const normalized = String(raw).trim();
-  return /^\d{4}-\d{2}-\d{2}/.test(normalized) ? normalized.slice(0, 10) : null;
 }
 
 function timestampValue(value) {
@@ -252,6 +255,9 @@ async function rawAsanaPortfolioTaskRows(client) {
       task.assignee_email,
       task.completed,
       task.completed_at,
+      parent_task.completed as parent_completed,
+      parent_task.completed_at as parent_completed_at,
+      parent_task.name as parent_name,
       task.due_on,
       task.due_at,
       task.start_on,
@@ -271,6 +277,7 @@ async function rawAsanaPortfolioTaskRows(client) {
       membership_data.memberships_json
     from raw.asana_tasks task
     join raw.asana_portfolio_projects portfolio_project on portfolio_project.project_gid = task.project_gid
+    left join raw.asana_tasks parent_task on parent_task.gid = task.parent_gid
     left join raw.asana_projects project on project.gid = task.project_gid
     left join lateral (
       select jsonb_agg(
@@ -383,8 +390,7 @@ function phaseCycleKey(phaseId, cycleId) {
 }
 
 function cycleNumberFromText(value) {
-  const match = String(value || "").match(/\bC?\s*(\d{1,3})\b/i);
-  return match ? Number(match[1]) : null;
+  return parseCycleReference(value)?.number ?? null;
 }
 
 function addNormalizedLookup(map, key, value) {
@@ -398,8 +404,7 @@ function buildLookups(workers, cycles, phases) {
     workersByEmail: new Map(),
     workersByName: new Map(),
     cycles: new Map(cycles.map(row => [row.cycle_record_id, row])),
-    cyclesByLabel: new Map(),
-    cyclesByNumber: new Map(),
+    cycleIndex: buildCycleIndex(cycles),
     phases: new Map(phases.map(row => [row.phase_record_id, row])),
     phasesByLabel: new Map(),
     phasesByNormalizedName: new Map()
@@ -408,13 +413,6 @@ function buildLookups(workers, cycles, phases) {
   for (const worker of workers) {
     addNormalizedLookup(lookups.workersByEmail, worker.worker_email, worker);
     addNormalizedLookup(lookups.workersByName, worker.worker_name, worker);
-  }
-  for (const cycle of cycles) {
-    addNormalizedLookup(lookups.cyclesByLabel, cycle.cycle_label, cycle);
-    addNormalizedLookup(lookups.cyclesByLabel, cycle.cycle_number ? `C${cycle.cycle_number}` : "", cycle);
-    if (cycle.cycle_number !== null && cycle.cycle_number !== undefined) {
-      lookups.cyclesByNumber.set(Number(cycle.cycle_number), cycle);
-    }
   }
   for (const phase of phases) {
     addNormalizedLookup(lookups.phasesByLabel, phase.phase_name, phase);
@@ -433,13 +431,7 @@ function findWorker(lookups, email, name) {
 }
 
 function findCycle(lookups, ...values) {
-  for (const value of values) {
-    const byLabel = lookups.cyclesByLabel.get(normalizeKey(value));
-    if (byLabel) return byLabel;
-    const number = cycleNumberFromText(value);
-    if (number !== null && lookups.cyclesByNumber.has(number)) return lookups.cyclesByNumber.get(number);
-  }
-  return null;
+  return findCycleByReference(lookups.cycleIndex, ...values);
 }
 
 function findPhase(lookups, ...values) {
@@ -557,7 +549,7 @@ function asanaSourceContext(asana) {
     /^\d+\s+-/.test(String(membership.project?.name || "").trim()) &&
     /^Phase A\s*-\s*(Lower|Upper)$/i.test(String(membership.section?.name || "").trim())
   );
-  const fabricationCycle = String(framesOneMembership?.project?.name || "").match(/^F(\d+)\.\d+$/i);
+  const fabricationCycleLabel = fabricationProjectCycleLabel(selectedMembership?.project?.name || asana.project_name);
   return {
     isFramesOne: Boolean(framesOneMembership),
     framesTwoVariant,
@@ -565,7 +557,7 @@ function asanaSourceContext(asana) {
     projectName: selectedMembership?.project?.name || asana.project_name || null,
     sectionName: selectedMembership?.section?.name || null,
     vin: Number(String(vinMembership?.project?.name || "").match(/^(\d+)\s+-/)?.[1] || "") || null,
-    cycleLabel: fabricationCycle ? `C${fabricationCycle[1]}` : ""
+    cycleLabel: fabricationCycleLabel
   };
 }
 
@@ -608,11 +600,12 @@ function addTaskGroup(map, key, seed, task) {
   }
 
   const group = map.get(key);
+  const hours = splitTaskHours(task.batchHours, task.task_completed);
   group.taskIds.push(task.rev1_task_instance_id);
   if (task.airtable_record_id) group.taskRecordIds.push(task.airtable_record_id);
-  group.totalHours += task.batchHours;
-  if (task.task_completed) group.completedHours += task.batchHours;
-  else group.remainingHours += task.batchHours;
+  group.totalHours += hours.totalHours;
+  group.completedHours += hours.completedHours;
+  group.remainingHours += hours.remainingHours;
 }
 
 function unique(values) {
@@ -1321,7 +1314,8 @@ function applyAsanaOverlay(row, asana, lookups) {
     || String(asana.portfolio_task_type || "").trim().toLowerCase() === "engineering change";
   const sourceSection = sourceContext.sectionName;
   const displaySourceSection = c12C13FabSkillFallbackSection(asana, sourceContext) || sourceSection;
-  const completed = Boolean(asana.completed);
+  const completion = resolveAsanaCompletion(asana, row.completed_on);
+  const completed = completion.completed;
   const actualMinutes =
     asana.actual_time_minutes === null || asana.actual_time_minutes === undefined
       ? null
@@ -1332,12 +1326,23 @@ function applyAsanaOverlay(row, asana, lookups) {
     displaySourceSection ||
     row.phase_label ||
     row.section_column;
-  const cycleText =
+  const rawCycleText =
     asanaText(fieldsByName, ["Cycle Label", "Cycle", "Cycle Number"]) ||
-    row.cycle_label ||
     sourceContext.cycleLabel ||
+    row.cycle_label ||
     asana.project_name;
-  const cycle = findCycle(lookups, cycleText);
+  const cycleText = qualifyCycleReference(
+    rawCycleText,
+    asana.portfolio_name,
+    sourceContext.projectName,
+    asana.project_name
+  );
+  const cycleAttachment = resolveCycleAttachment(
+    lookups.cycleIndex,
+    cycleText,
+    row.cycle_record_id
+  );
+  const cycle = cycleAttachment.cycle;
   // Frames 1 is VIN-tracked work that executes in the Frames work area. Keep
   // its VIN/cycle custom fields intact, while using the matching Frames A/B
   // record for capacity and pacing so a dual-homed task is counted once.
@@ -1373,14 +1378,15 @@ function applyAsanaOverlay(row, asana, lookups) {
   row.asana_portfolio_name = asana.portfolio_name || row.asana_portfolio_name;
   row.asana_section = displaySourceSection || row.asana_section;
   row.parent_asana_task_gid = asana.parent_gid || row.parent_asana_task_gid;
-  row.parent_task_name = asana.raw_json?.parent?.name || row.parent_task_name;
+  row.parent_task_name = asana.parent_name || asana.raw_json?.parent?.name || row.parent_task_name;
   row.is_subtask = Boolean(row.parent_asana_task_gid);
+  row.inherited_from_parent = completion.inheritedFromParent;
   row.task_name = asana.name || row.task_name;
   row.task_description = asana.raw_json?.notes || row.task_description;
   row.task_type = row.task_type || asana.portfolio_task_type || null;
   row.task_order = asanaNumber(fieldsByName, ["Task Order", "Order"]) ?? row.task_order;
   row.task_completed = completed;
-  row.completed_on = completed ? dateValue(asana.completed_at) : null;
+  row.completed_on = completion.completedOn;
   row.status = completed ? "Completed" : "Open";
   row.task_status = completed ? "Completed" : "Open";
   row.asana_due_date = dateValue(asana.due_on || asana.due_at) || row.asana_due_date;
@@ -1430,11 +1436,22 @@ function applyAsanaOverlay(row, asana, lookups) {
   }
 
   if (cycle) {
-    row.cycle_record_id = cycle.cycle_record_id;
-    row.cycle_label = cycle.cycle_label;
+    row.cycle_record_id = cycleAttachment.cycleRecordId;
+    row.cycle_label = cycleAttachment.cycleLabel;
     row.days_in_cycle = cycle.days_in_cycle || row.days_in_cycle;
   } else if (cycleText) {
-    row.cycle_label = cycleText;
+    row.cycle_record_id = cycleAttachment.cycleRecordId;
+    row.cycle_label = cycleAttachment.cycleLabel;
+    // A year-qualified Asana cycle is authoritative. If that exact year is not
+    // present in Hawley's cycle table, leave the task available for tracking
+    // but keep it out of a different year's production-load bucket.
+    if (cycleAttachment.clearExisting) {
+      row.phase_cycle_bucket_key = null;
+      row.phase_cycle_key = null;
+      row.days_in_cycle = null;
+      row.phase_cycle_load_record_id = null;
+      row.worker_phase_allocation_record_id = null;
+    }
   }
 
   row.phase_cycle_bucket_key =
@@ -1490,6 +1507,7 @@ function asanaTaskRow(asana, lookups) {
   const rawFields = asana.custom_fields_json || asana.raw_json?.custom_fields || [];
   const fieldsByName = asanaFieldsByName(rawFields);
   const fields = asanaFieldDisplayMap(fieldsByName);
+  const completion = resolveAsanaCompletion(asana);
   const row = {
     airtable_record_id: `asana:${asana.gid}`,
     task_instance_rev1_key: asanaText(fieldsByName, ["Task Instance Rev1 Key"]) || `asana:${asana.gid}`,
@@ -1505,15 +1523,15 @@ function asanaTaskRow(asana, lookups) {
     parent_task_name: asana.raw_json?.parent?.name || null,
     parent_task: null,
     is_subtask: Boolean(asana.parent_gid),
-    inherited_from_parent: false,
+    inherited_from_parent: completion.inheritedFromParent,
     task_name: asana.name,
     task_description: asana.raw_json?.notes || null,
     task_type: asana.portfolio_task_type || null,
     task_order: asanaNumber(fieldsByName, ["Task Order", "Order"]),
-    status: Boolean(asana.completed) ? "Completed" : "Open",
-    task_status: Boolean(asana.completed) ? "Completed" : "Open",
-    task_completed: Boolean(asana.completed),
-    completed_on: Boolean(asana.completed) ? dateValue(asana.completed_at) : null,
+    status: completion.completed ? "Completed" : "Open",
+    task_status: completion.completed ? "Completed" : "Open",
+    task_completed: completion.completed,
+    completed_on: completion.completedOn,
     asana_due_date: dateValue(asana.due_on || asana.due_at),
     assigned_on: asanaAssignedOnDate(rawFields),
     worker_record_id: null,
@@ -1608,6 +1626,7 @@ const PROJECT_CREATOR_ASANA_OVERLAY_COLUMNS = Object.freeze([
   "parent_asana_task_gid",
   "parent_task_name",
   "is_subtask",
+  "inherited_from_parent",
   "task_name",
   "task_description",
   "task_type",
@@ -1630,6 +1649,9 @@ const PROJECT_CREATOR_ASANA_OVERLAY_COLUMNS = Object.freeze([
   "phase_cycle_key",
   "cycle_record_id",
   "cycle_label",
+  "days_in_cycle",
+  "phase_cycle_load_record_id",
+  "worker_phase_allocation_record_id",
   "vin",
   "vin_text",
   "quantity",

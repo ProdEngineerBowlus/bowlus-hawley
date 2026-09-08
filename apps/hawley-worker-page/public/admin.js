@@ -1,8 +1,10 @@
 (() => {
   const root = document.getElementById("admin-root");
   const DASHBOARD_AUTO_REFRESH_MS = 60 * 1000;
+  const DASHBOARD_TIMEOUT_RETRY_MS = 1200;
   const IDEAL_PRODUCTIVE_HOURS_PER_WORKER_DAY = 7 + (40 / 60);
   let dashboardRefreshInFlight = false;
+  let dashboardLoadPromise = null;
   const state = {
     authStatus: null,
     activeView: "dashboard",
@@ -10,6 +12,9 @@
     project: null,
     projectType: "VIN",
     selectedCycle: "",
+    selectedCycleRecordId: "",
+    selectedCycleYear: "",
+    selectedCycleKey: "",
     selectedVin: "",
     projectName: "",
     projectNameDirty: false,
@@ -385,12 +390,37 @@
     });
   }
 
+  function isTransientDatabaseTimeout(error) {
+    return error?.payload?.code === "57014"
+      || /statement timeout|canceling statement/i.test(String(error?.message || ""));
+  }
+
+  function wait(milliseconds) {
+    return new Promise(resolve => window.setTimeout(resolve, milliseconds));
+  }
+
   async function loadAuth() {
     state.authStatus = await fetchJson(`/api/auth-status?_=${Date.now()}`);
   }
 
   async function loadDashboard() {
-    state.dashboard = await fetchJson(`/api/admin/dashboard?_=${Date.now()}`);
+    if (!dashboardLoadPromise) {
+      dashboardLoadPromise = (async () => {
+        try {
+          state.dashboard = await fetchJson(`/api/admin/dashboard?_=${Date.now()}`);
+        } catch (error) {
+          if (!isTransientDatabaseTimeout(error)) throw error;
+          await wait(DASHBOARD_TIMEOUT_RETRY_MS);
+          state.dashboard = await fetchJson(`/api/admin/dashboard?_=${Date.now()}`);
+        }
+      })();
+    }
+    const activeLoad = dashboardLoadPromise;
+    try {
+      await activeLoad;
+    } finally {
+      if (dashboardLoadPromise === activeLoad) dashboardLoadPromise = null;
+    }
   }
 
   async function refreshDashboardSilently() {
@@ -398,6 +428,7 @@
     dashboardRefreshInFlight = true;
     try {
       await loadDashboard();
+      state.dashboardMessage = "";
       if (state.activeView === "dashboard") render();
     } catch (error) {
       state.dashboardMessage = error.message || "Could not automatically refresh the dashboard.";
@@ -418,9 +449,15 @@
     const params = new URLSearchParams();
     const projectType = options.projectType || state.projectType || "VIN";
     const cycle = options.cycle !== undefined ? options.cycle : state.selectedCycle;
+    const cycleRecordId = options.cycleRecordId !== undefined ? options.cycleRecordId : state.selectedCycleRecordId;
+    const cycleYear = options.cycleYear !== undefined ? options.cycleYear : state.selectedCycleYear;
+    const cycleKey = options.cycleKey !== undefined ? options.cycleKey : state.selectedCycleKey;
     const vin = options.vin !== undefined ? options.vin : state.selectedVin;
     params.set("projectType", projectType);
     if (cycle) params.set("cycle", cycle);
+    if (cycleRecordId) params.set("cycleRecordId", cycleRecordId);
+    if (cycleYear) params.set("cycleYear", cycleYear);
+    if (cycleKey) params.set("cycleKey", cycleKey);
     if (vin) params.set("vin", vin);
     if (state.projectNameDirty && state.projectName) params.set("projectName", state.projectName);
     params.set("_", Date.now());
@@ -430,6 +467,9 @@
       state.project = await fetchJson(`/api/admin/project-creator?${params.toString()}`);
       state.projectType = state.project.projectType || projectType;
       state.selectedCycle = String(state.project.selectedCycleNumber || state.selectedCycle || "");
+      state.selectedCycleRecordId = String(state.project.selectedCycleRecordId || "");
+      state.selectedCycleYear = String(state.project.selectedCycleYear || "");
+      state.selectedCycleKey = String(state.project.selectedCycleKey || "");
       state.selectedVin = state.project.selectedVin ? String(state.project.selectedVin) : "";
       if (!state.projectNameDirty) state.projectName = state.project.preview?.projectName || "";
       state.createMessage = "";
@@ -446,7 +486,20 @@
     try {
       await loadAuth();
       if (adminAllowed()) {
-        await Promise.all([loadDashboard(), loadProjectCreator()]);
+        try {
+          if (state.activeView === "project") {
+            await loadProjectCreator();
+          } else {
+            await loadDashboard();
+            state.dashboardMessage = "";
+          }
+        } catch (error) {
+          if (state.activeView === "project") {
+            state.createMessage = error.message || "Could not load Project Creator.";
+          } else {
+            state.dashboardMessage = error.message || "Could not load the dashboard. Hawley will retry automatically.";
+          }
+        }
       }
     } catch (error) {
       state.error = error.message || "Could not load Hawley Admin.";
@@ -467,6 +520,7 @@
         password: data.get("password")
       });
       state.authStatus = { ...(state.authStatus || {}), accountAuth: payload.accountAuth };
+      state.loginPending = false;
       await loadAll();
     } catch (error) {
       state.loginError = error.message || "Could not sign in.";
@@ -480,6 +534,8 @@
     state.authStatus = { ...(state.authStatus || {}), accountAuth: { ...accountAuth(), authenticated: false, user: null } };
     state.dashboard = null;
     state.project = null;
+    state.loginPending = false;
+    state.loginError = "";
     render();
   }
 
@@ -1306,7 +1362,7 @@
           <h2 class="section-title">Dashboard</h2>
           <p class="muted">Checked ${escapeHtml(new Date(state.dashboard?.checkedAt || Date.now()).toLocaleString())}${escapeHtml(buildLabel)}</p>
         </section>
-        ${state.dashboard?.plh ? "" : `<div class="notice risk">The admin API response did not include the PLH payload. Server build: ${escapeHtml(build.label || "unknown")}.</div>`}
+        ${state.dashboard && !state.dashboard.plh ? `<div class="notice risk">The admin API response did not include the PLH payload. Server build: ${escapeHtml(build.label || "unknown")}.</div>` : ""}
         ${state.dashboardMessage ? `<div class="notice">${escapeHtml(state.dashboardMessage)}</div>` : ""}
         ${renderPlhVisuals(plh)}
         ${renderConfigurationDrawer(plh, latestRuns)}
@@ -1332,10 +1388,11 @@
           <div class="chip-row">
             ${pill(project.projectCreateEnabled ? "Write enabled" : "Preview mode", project.projectCreateEnabled ? "good" : "warn")}
             ${pill(projectType, "good")}
-            ${project.selectedCycleNumber ? pill(`C${project.selectedCycleNumber}`, "good") : ""}
+            ${project.selectedCycleKey || project.selectedCycleNumber ? pill(project.selectedCycleKey || `C${project.selectedCycleNumber}`, "good") : ""}
             ${selectedVin ? pill(`VIN ${selectedVin}`, "blue") : ""}
             ${state.projectLoading ? pill("Loading", "warn") : ""}
           </div>
+          ${state.createMessage && !preview ? `<div class="notice risk" style="margin-top: 12px;">${escapeHtml(state.createMessage)}</div>` : ""}
           ${latestRun?.status === "failed" ? `<div class="notice risk-text" style="margin-top: 12px;"><strong>Latest create failed: ${escapeHtml(latestRun.project_name || "Unnamed project")}</strong><br>${escapeHtml(latestRun.error_message || "No failure detail was recorded.")}<div class="inline-actions" style="margin-top: 10px;"><button class="btn" type="button" data-action="cleanup-project-run" data-delete-asana="${latestRun.asana_project_gid ? "true" : "false"}" data-run-id="${escapeAttr(latestRun.project_creation_run_id)}">${latestRun.asana_project_gid ? "Delete failed Asana project and reset" : "Remove failed Hawley run"}</button></div></div>` : ""}
         </section>
         <section class="panel">
@@ -1363,7 +1420,7 @@
           </div>
           <div class="panel-body cycle-strip">
             ${cycles.map(row => `
-              <button class="cycle-button ${String(row.cycle_number) === String(project.selectedCycleNumber) ? "active" : ""}" type="button" data-cycle="${escapeAttr(row.cycle_number)}">
+              <button class="cycle-button ${String(row.cycle_key || "") === String(project.selectedCycleKey || "") ? "active" : ""}" type="button" data-cycle="${escapeAttr(row.cycle_number)}" data-cycle-record-id="${escapeAttr(row.cycle_record_id || "")}" data-cycle-year="${escapeAttr(row.cycle_year || "")}" data-cycle-key="${escapeAttr(row.cycle_key || "")}">
                 <strong>${escapeHtml(row.cycle_label || `C${row.cycle_number}`)}</strong>
                 <span>${escapeHtml(formatDate(row.start_date))} - ${escapeHtml(formatDate(row.end_date))}</span>
                 <span>${formatNumber(row.schedule_rows)} rows - ${formatNumber(row.vin_count)} VINs</span>
@@ -1443,7 +1500,7 @@
             ${preview.creationStrategy === "direct" ? pill("Direct Asana project", "blue") : ""}
             ${pill(preview.projectType || "Project", "good")}
             ${preview.selectedVin ? pill(`VIN ${preview.selectedVin}`, "blue") : ""}
-            ${preview.selectedCycleNumber ? pill(`C${preview.selectedCycleNumber}`, "blue") : ""}
+            ${preview.selectedCycleKey || preview.selectedCycleNumber ? pill(preview.selectedCycleKey || `C${preview.selectedCycleNumber}`, "blue") : ""}
             ${preview.missingEstimates ? pill(`${formatNumber(preview.missingEstimates)} missing estimates`, "risk") : pill("Estimates ready", "good")}
             ${preview.existingSyncedTasks ? pill(`${formatNumber(preview.existingSyncedTasks)} already in Asana`, "risk") : ""}
             ${preview.existingLegacyTasks ? pill(`${formatNumber(preview.existingLegacyTasks)} legacy rows exist`, "risk") : ""}
@@ -1542,16 +1599,35 @@
     if (viewButton) {
       state.activeView = viewButton.dataset.view === "project" ? "project" : "dashboard";
       render();
+      if (state.activeView === "project" && !state.project && !state.projectLoading) {
+        try {
+          await loadProjectCreator();
+        } catch (error) {
+          state.createMessage = error.message || "Could not load Project Creator.";
+          render();
+        }
+      } else if (state.activeView === "dashboard" && !state.dashboard && !dashboardRefreshInFlight) {
+        await refreshDashboardSilently();
+      }
       return;
     }
 
     const cycleButton = event.target.closest("[data-cycle]");
     if (cycleButton) {
       state.selectedCycle = cycleButton.dataset.cycle || "";
+      state.selectedCycleRecordId = cycleButton.dataset.cycleRecordId || "";
+      state.selectedCycleYear = cycleButton.dataset.cycleYear || "";
+      state.selectedCycleKey = cycleButton.dataset.cycleKey || "";
       state.projectName = "";
       state.projectNameDirty = false;
       if (state.projectType === "VIN") state.selectedVin = "";
-      await loadProjectCreator({ cycle: state.selectedCycle, vin: state.selectedVin });
+      await loadProjectCreator({
+        cycle: state.selectedCycle,
+        cycleRecordId: state.selectedCycleRecordId,
+        cycleYear: state.selectedCycleYear,
+        cycleKey: state.selectedCycleKey,
+        vin: state.selectedVin
+      });
       return;
     }
 
@@ -1721,6 +1797,9 @@
         const payload = await postJson("/api/admin/project-creator/create", {
           projectType: state.projectType,
           cycle: state.selectedCycle,
+          cycleRecordId: state.selectedCycleRecordId,
+          cycleYear: state.selectedCycleYear,
+          cycleKey: state.selectedCycleKey,
           vin: state.selectedVin,
           projectName: state.projectName || state.project?.preview?.projectName || ""
         });

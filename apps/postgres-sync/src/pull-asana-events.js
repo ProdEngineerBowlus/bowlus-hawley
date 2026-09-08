@@ -27,6 +27,8 @@ const TASK_OPT_FIELDS = [
   "num_subtasks",
   "parent.gid",
   "parent.name",
+  "parent.completed",
+  "parent.completed_at",
   "memberships.project.gid",
   "memberships.project.name",
   "memberships.section.gid",

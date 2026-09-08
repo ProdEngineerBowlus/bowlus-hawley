@@ -383,6 +383,13 @@ function publicErrorMessage(error) {
     };
   }
 
+  if (error.code === "57014" || /statement timeout|canceling statement/i.test(message)) {
+    return {
+      status: 503,
+      message: "Hawley is temporarily busy. Please retry in a moment."
+    };
+  }
+
   return {
     status: error.statusCode || 500,
     message: message || "Unexpected server error."
@@ -1831,6 +1838,64 @@ function addUtcDays(date, days) {
 function cycleNumberFromName(value) {
   const match = String(value || "").match(/\d+/);
   return match ? Number(match[0]) : null;
+}
+
+function cycleYearFromValues(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    if (value instanceof Date && !Number.isNaN(value.getTime())) return value.getUTCFullYear();
+
+    const numeric = typeof value === "number" ? value : Number.NaN;
+    if (Number.isInteger(numeric) && numeric >= 1900 && numeric <= 2999) return numeric;
+
+    const text = String(value).trim();
+    if (/^(?:19|20)\d{2}$/.test(text)) return Number(text);
+    const isoYear = text.match(/^((?:19|20)\d{2})-\d{1,2}-\d{1,2}/)?.[1];
+    if (isoYear) return Number(isoYear);
+
+    const qualifiedYear = text.match(/\.((?:19|20)\d{2}|\d{2})(?:\b|$)/)?.[1];
+    if (qualifiedYear) {
+      const parsed = Number(qualifiedYear);
+      return qualifiedYear.length === 2 ? 2000 + parsed : parsed;
+    }
+  }
+  return null;
+}
+
+function cycleIdentity(values = {}) {
+  const cycleRecordId = String(values.cycleRecordId || values.cycle_record_id || "").trim() || null;
+  const rawCycleNumber = values.cycleNumber ?? values.cycle_number;
+  const parsedCycleNumber = rawCycleNumber === null || rawCycleNumber === undefined || rawCycleNumber === ""
+    ? cycleNumberFromName(values.cycleLabel || values.cycle_label)
+    : Number(rawCycleNumber);
+  const cycleNumber = Number.isInteger(parsedCycleNumber) ? parsedCycleNumber : null;
+  const cycleLabel = String(values.cycleLabel || values.cycle_label || (cycleNumber ? `C${cycleNumber}` : "")).trim();
+  const explicitCycleYear = values.cycleYear ?? values.cycle_year;
+  const cycleYear = cycleYearFromValues(
+    explicitCycleYear,
+    values.cycleStartDate,
+    values.cycle_start_date,
+    values.cycleEndDate,
+    values.cycle_end_date,
+    cycleLabel
+  );
+  const cycleKey = cycleNumber && cycleYear
+    ? `C${cycleNumber}.${String(cycleYear).slice(-2)}`
+    : cycleRecordId || cycleLabel || (cycleNumber ? `C${cycleNumber}` : "");
+
+  return { cycleRecordId, cycleYear, cycleNumber, cycleLabel, cycleKey };
+}
+
+function withCycleIdentityColumns(row = {}) {
+  const identity = cycleIdentity(row);
+  return {
+    ...row,
+    cycle_record_id: identity.cycleRecordId,
+    cycle_year: identity.cycleYear,
+    cycle_key: identity.cycleKey,
+    cycle_number: identity.cycleNumber,
+    cycle_label: identity.cycleLabel
+  };
 }
 
 function normalizedIsoDate(year, month, day) {
@@ -4732,6 +4797,16 @@ async function prepareAuthClient(client) {
   await client.query("set statement_timeout = 5000");
 }
 
+async function releaseAuthClient(client) {
+  try {
+    await client.query("reset statement_timeout");
+    client.release();
+  } catch (error) {
+    // A pooled connection with auth-only session settings must never be reused.
+    client.release(error);
+  }
+}
+
 async function seedInactiveAuthUsersFromWorkForce() {
   if (!APP_AUTH_SEED_ROSTER_ON_START || !syncDatabaseConfigured()) return;
   const client = new pg.Client(getDatabaseConfig({ useSyncUrl: true }));
@@ -4920,7 +4995,7 @@ async function authActorFromRequest(req) {
     authRuntimeState.lastSessionCheckError = error.message || String(error);
     throw error;
   } finally {
-    client.release();
+    await releaseAuthClient(client);
   }
 }
 
@@ -7796,7 +7871,7 @@ async function handleAuthLogin(req, res) {
     authRuntimeState.lastLoginError = error.message || String(error);
     throw error;
   } finally {
-    client.release();
+    await releaseAuthClient(client);
   }
 }
 
@@ -7817,7 +7892,7 @@ async function handleAuthLogout(req, res) {
         userAgent: String(req.headers["user-agent"] || "")
       });
     } finally {
-      client.release();
+      await releaseAuthClient(client);
     }
   }
 
@@ -8217,41 +8292,60 @@ async function shopPhaseLoadPayload() {
   const result = await pool.query(`
     select
       coalesce(nullif(pcl.phase_name, ''), 'Unassigned') as phase_name,
+      pcl.cycle_record_id,
       coalesce(
         cycles.cycle_number,
         nullif(substring(coalesce(pcl.cycle_label, '') from 'C[[:space:]]*([0-9]{1,3})'), '')::int,
         nullif(substring(coalesce(pcl.cycle_label, '') from '([0-9]{1,3})'), '')::int
       ) as cycle_number,
       coalesce(cycles.cycle_label, pcl.cycle_label) as cycle_label,
-      sum(coalesce(pcl.remaining_task_hours, 0))::numeric(12, 2) as remaining_hours,
-      sum(coalesce(pcl.total_load_hours, 0))::numeric(12, 2) as total_load_hours,
-      sum(coalesce(pcl.completed_task_hours, 0))::numeric(12, 2) as completed_hours,
-      max(pcl.rebuilt_at)::text as rebuilt_at
+      cycles.start_date::text as cycle_start_date,
+      cycles.end_date::text as cycle_end_date,
+      coalesce(pcl.remaining_task_hours, 0)::numeric(12, 2) as remaining_hours,
+      coalesce(pcl.total_load_hours, 0)::numeric(12, 2) as total_load_hours,
+      coalesce(pcl.completed_task_hours, 0)::numeric(12, 2) as completed_hours,
+      pcl.rebuilt_at::text as rebuilt_at
     from hb.phase_cycle_load_rev1 pcl
     left join hb.cycles cycles on cycles.cycle_record_id = pcl.cycle_record_id
     where coalesce(pcl.remaining_task_hours, 0) > 0
        or coalesce(pcl.total_load_hours, 0) > 0
        or coalesce(pcl.completed_task_hours, 0) > 0
-    group by
-      coalesce(nullif(pcl.phase_name, ''), 'Unassigned'),
-      coalesce(
-        cycles.cycle_number,
-        nullif(substring(coalesce(pcl.cycle_label, '') from 'C[[:space:]]*([0-9]{1,3})'), '')::int,
-        nullif(substring(coalesce(pcl.cycle_label, '') from '([0-9]{1,3})'), '')::int
-      ),
-      coalesce(cycles.cycle_label, pcl.cycle_label)
-    order by cycle_number nulls last, phase_name
+    order by cycles.start_date nulls last, cycle_number nulls last, phase_name
   `);
 
-  const rows = result.rows.map((row) => ({
-    cycleNumber: row.cycle_number === null || row.cycle_number === undefined ? null : Number(row.cycle_number),
-    cycleLabel: row.cycle_label || "",
-    phaseName: row.phase_name || "Unassigned",
-    remainingHours: Number(row.remaining_hours || 0),
-    totalLoadHours: Number(row.total_load_hours || 0),
-    completedHours: Number(row.completed_hours || 0),
-    rebuiltAt: row.rebuilt_at || ""
-  }));
+  const groupedRows = new Map();
+  for (const row of result.rows) {
+    const identity = cycleIdentity(row);
+    const phaseName = row.phase_name || "Unassigned";
+    const groupKey = [
+      identity.cycleRecordId || "unlinked",
+      identity.cycleYear || "unknown-year",
+      identity.cycleKey || identity.cycleLabel || "unknown-cycle",
+      phaseName
+    ].join("::");
+    const existing = groupedRows.get(groupKey) || {
+      cycleRecordId: identity.cycleRecordId,
+      cycleYear: identity.cycleYear,
+      cycleKey: identity.cycleKey,
+      cycleNumber: identity.cycleNumber,
+      cycleLabel: identity.cycleLabel,
+      phaseName,
+      remainingHours: 0,
+      totalLoadHours: 0,
+      completedHours: 0,
+      rebuiltAt: ""
+    };
+    existing.remainingHours = round(existing.remainingHours + Number(row.remaining_hours || 0), 2);
+    existing.totalLoadHours = round(existing.totalLoadHours + Number(row.total_load_hours || 0), 2);
+    existing.completedHours = round(existing.completedHours + Number(row.completed_hours || 0), 2);
+    if (String(row.rebuilt_at || "") > existing.rebuiltAt) existing.rebuiltAt = String(row.rebuilt_at || "");
+    groupedRows.set(groupKey, existing);
+  }
+  const rows = Array.from(groupedRows.values()).sort((left, right) =>
+    Number(left.cycleYear || 9999) - Number(right.cycleYear || 9999) ||
+    Number(left.cycleNumber || 9999) - Number(right.cycleNumber || 9999) ||
+    String(left.phaseName).localeCompare(String(right.phaseName))
+  );
 
   return {
     ok: true,
@@ -8289,8 +8383,15 @@ function adminProjectType(value) {
 
 function adminProjectNameForPreview(projectType, context = {}) {
   if (projectType === "Fabrication") {
-    const cycle = adminCycleNumber(context.cycleLabel || context.cycleNumber);
-    return cycle ? `F${cycle}.26` : "Fabrication Project";
+    const identity = cycleIdentity({
+      cycleRecordId: context.cycleRecordId,
+      cycleNumber: context.cycleNumber,
+      cycleYear: context.cycleYear,
+      cycleLabel: context.cycleKey || context.cycleLabel
+    });
+    return identity.cycleNumber && identity.cycleYear
+      ? `F${identity.cycleNumber}.${String(identity.cycleYear).slice(-2)}`
+      : "Fabrication Project";
   }
   const vin = String(context.vin || "").trim();
   return vin ? `${vin} - confirm model before live create` : "VIN Project";
@@ -8371,11 +8472,11 @@ function projectCreatorPhaseCycleKey(schedule) {
 }
 
 function projectCreatorScheduleCycleLabel(row) {
-  return row?.short_cycle_label || row?.cycle_label || (row?.cycle_number ? `C${row.cycle_number}` : "");
+  return row?.cycle_key || row?.cycleKey || row?.short_cycle_label || row?.cycle_label || (row?.cycle_number ? `C${row.cycle_number}` : "");
 }
 
 function projectCreatorAsanaCycleLabel(row) {
-  const explicit = [row?.cycle_label, row?.short_cycle_label]
+  const explicit = [row?.cycle_key, row?.cycleKey, row?.cycle_label, row?.short_cycle_label]
     .map(value => String(value || "").trim())
     .find(value => /^C\d{1,3}\.\d{2}$/i.test(value));
   if (explicit) return explicit.toUpperCase();
@@ -8383,6 +8484,166 @@ function projectCreatorAsanaCycleLabel(row) {
   const date = String(row?.start_date || row?.end_date || "");
   const yearMatch = date.match(/^(\d{4})-/);
   return cycle && yearMatch ? `C${cycle}.${yearMatch[1].slice(-2)}` : projectCreatorScheduleCycleLabel(row);
+}
+
+function projectCreatorScheduleCycleIdentity(row = {}) {
+  return cycleIdentity({
+    cycleRecordId: row.cycle_record_id || row.cycleRecordId,
+    cycleNumber: row.cycle_number ?? row.cycleNumber,
+    cycleYear: row.cycle_year ?? row.cycleYear,
+    cycleLabel: row.cycle_key || row.cycleKey || projectCreatorAsanaCycleLabel(row),
+    cycleStartDate: row.start_date || row.startDate,
+    cycleEndDate: row.end_date || row.endDate
+  });
+}
+
+function projectCreatorCycleOptions(rows) {
+  const options = new Map();
+  for (const row of rows || []) {
+    const identity = projectCreatorScheduleCycleIdentity(row);
+    if (!identity.cycleNumber || !identity.cycleYear) continue;
+    const scopeKey = identity.cycleRecordId
+      ? `record:${identity.cycleRecordId}:${identity.cycleNumber}:${identity.cycleYear}`
+      : `year:${identity.cycleNumber}:${identity.cycleYear}`;
+    const existing = options.get(scopeKey) || {
+      cycle_record_id: identity.cycleRecordId,
+      cycle_number: identity.cycleNumber,
+      cycle_year: identity.cycleYear,
+      cycle_key: identity.cycleKey,
+      cycle_label: identity.cycleKey,
+      start_date: "",
+      end_date: "",
+      schedule_rows: 0,
+      vin_count: 0,
+      _vins: new Set()
+    };
+    const startDate = String(row.start_date || row.startDate || "").slice(0, 10);
+    const endDate = String(row.end_date || row.endDate || "").slice(0, 10);
+    if (startDate && (!existing.start_date || startDate < existing.start_date)) existing.start_date = startDate;
+    if (endDate && (!existing.end_date || endDate > existing.end_date)) existing.end_date = endDate;
+    const vin = String(row.vin || "").trim();
+    if (vin) existing._vins.add(vin);
+    existing.schedule_rows += 1;
+    existing.vin_count = existing._vins.size;
+    options.set(scopeKey, existing);
+  }
+
+  const values = Array.from(options.values());
+  for (const legacyOption of values.filter(option => !option.cycle_record_id)) {
+    const linkedOptions = values.filter(option => option.cycle_record_id &&
+      Number(option.cycle_number) === Number(legacyOption.cycle_number) &&
+      Number(option.cycle_year) === Number(legacyOption.cycle_year));
+    if (linkedOptions.length !== 1) continue;
+    const target = linkedOptions[0];
+    if (legacyOption.start_date && (!target.start_date || legacyOption.start_date < target.start_date)) {
+      target.start_date = legacyOption.start_date;
+    }
+    if (legacyOption.end_date && (!target.end_date || legacyOption.end_date > target.end_date)) {
+      target.end_date = legacyOption.end_date;
+    }
+    for (const vin of legacyOption._vins) target._vins.add(vin);
+    target.schedule_rows += legacyOption.schedule_rows;
+    target.vin_count = target._vins.size;
+    legacyOption._mergedIntoLinkedCycle = true;
+  }
+
+  return values
+    .filter(option => !option._mergedIntoLinkedCycle)
+    .map(option => {
+      const clean = { ...option };
+      delete clean._vins;
+      delete clean._mergedIntoLinkedCycle;
+      return clean;
+    })
+    .sort((left, right) =>
+      String(right.start_date || right.end_date || "").localeCompare(String(left.start_date || left.end_date || "")) ||
+      Number(right.cycle_year || 0) - Number(left.cycle_year || 0) ||
+      Number(right.cycle_number || 0) - Number(left.cycle_number || 0)
+    );
+}
+
+function projectCreatorCycleDistance(option, today) {
+  const todayMs = Date.parse(`${today}T00:00:00Z`);
+  const startDate = String(option.start_date || "").slice(0, 10);
+  const endDate = String(option.end_date || "").slice(0, 10);
+  const startMs = startDate ? Date.parse(`${startDate}T00:00:00Z`) : Number.NaN;
+  const endMs = endDate ? Date.parse(`${endDate}T00:00:00Z`) : Number.NaN;
+  if (Number.isFinite(startMs) && Number.isFinite(endMs) && startMs <= todayMs && todayMs <= endMs) return 0;
+  if (Number.isFinite(endMs) && endMs < todayMs) return todayMs - endMs;
+  if (Number.isFinite(startMs) && startMs > todayMs) return startMs - todayMs;
+  if (Number.isFinite(startMs)) return Math.abs(todayMs - startMs);
+  if (Number.isFinite(endMs)) return Math.abs(todayMs - endMs);
+  return Number.POSITIVE_INFINITY;
+}
+
+function resolveProjectCreatorCycleOption(options, requested = {}) {
+  const requestedIdentity = cycleIdentity(requested);
+  const hasRequestedIdentity = Boolean(
+    requestedIdentity.cycleRecordId || requestedIdentity.cycleNumber || requestedIdentity.cycleYear
+  );
+  let candidates = (options || []).filter(option => {
+    if (requestedIdentity.cycleRecordId && option.cycle_record_id !== requestedIdentity.cycleRecordId) return false;
+    if (requestedIdentity.cycleNumber && Number(option.cycle_number) !== requestedIdentity.cycleNumber) return false;
+    if (requestedIdentity.cycleYear && Number(option.cycle_year) !== requestedIdentity.cycleYear) return false;
+    return true;
+  });
+
+  if (!candidates.length) {
+    // Preserve the empty-state admin page when Production has no usable cycle
+    // rows yet. An explicit stale/unknown selection must still fail closed.
+    if (!(options || []).length && !hasRequestedIdentity) return null;
+    throw actionError("The requested production cycle was not found with a usable year identity.", 404, {
+      code: "PROJECT_CYCLE_NOT_FOUND",
+      cycleRecordId: requestedIdentity.cycleRecordId,
+      cycleNumber: requestedIdentity.cycleNumber,
+      cycleYear: requestedIdentity.cycleYear
+    });
+  }
+
+  if (requestedIdentity.cycleRecordId || requestedIdentity.cycleYear) {
+    if (candidates.length !== 1) {
+      throw actionError("The requested production cycle identity is ambiguous.", 409, {
+        code: "PROJECT_CYCLE_AMBIGUOUS",
+        candidateCycleKeys: candidates.map(option => option.cycle_key)
+      });
+    }
+    return candidates[0];
+  }
+
+  // Existing admin clients send only a cycle number. Resolve that legacy input
+  // to one active/nearest dated annual cycle; never merge equal-number years.
+  const today = todayIso();
+  candidates = candidates
+    .map(option => ({ option, distance: projectCreatorCycleDistance(option, today) }))
+    .filter(candidate => Number.isFinite(candidate.distance))
+    .sort((left, right) => left.distance - right.distance);
+  if (!candidates.length) {
+    throw actionError("Production cycles need dated year metadata before Project Creator can use them.", 409, {
+      code: "PROJECT_CYCLE_IDENTITY_UNKNOWN",
+      requested: hasRequestedIdentity
+    });
+  }
+  if (candidates.length > 1 && candidates[0].distance === candidates[1].distance) {
+    throw actionError("The cycle number matches multiple equally near production years. Select an exact cycle identity.", 409, {
+      code: "PROJECT_CYCLE_AMBIGUOUS",
+      candidateCycleKeys: candidates.filter(candidate => candidate.distance === candidates[0].distance)
+        .map(candidate => candidate.option.cycle_key)
+    });
+  }
+  return candidates[0].option;
+}
+
+function projectCreatorScheduleMatchesCycle(row, selectedCycle) {
+  if (!selectedCycle) return false;
+  const identity = projectCreatorScheduleCycleIdentity(row);
+  if (!identity.cycleNumber || !identity.cycleYear) return false;
+  if (selectedCycle.cycle_record_id && identity.cycleRecordId) {
+    return identity.cycleRecordId === selectedCycle.cycle_record_id &&
+      identity.cycleNumber === Number(selectedCycle.cycle_number) &&
+      identity.cycleYear === Number(selectedCycle.cycle_year);
+  }
+  return identity.cycleNumber === Number(selectedCycle.cycle_number) &&
+    identity.cycleYear === Number(selectedCycle.cycle_year);
 }
 
 function projectCreatorSupportPhaseKey(value) {
@@ -8520,7 +8781,7 @@ function projectCreatorOrderedTasks(tasks) {
   return ordered;
 }
 
-async function adminProjectCreatorScheduleData(projectType, cycleNumber) {
+async function adminProjectCreatorScheduleData(projectType, requestedCycleIdentity = {}) {
   const allResult = await pool.query(`
     select
       production_record_id,
@@ -8547,8 +8808,18 @@ async function adminProjectCreatorScheduleData(projectType, cycleNumber) {
     limit 5000
   `);
 
-  const allScheduleRows = allResult.rows;
-  const selectedCycleRows = allScheduleRows.filter(row => Number(row.cycle_number) === Number(cycleNumber));
+  const allScheduleRows = allResult.rows.map(row => {
+    const identity = projectCreatorScheduleCycleIdentity(row);
+    return {
+      ...row,
+      cycle_record_id: identity.cycleRecordId,
+      cycle_year: identity.cycleYear,
+      cycle_key: identity.cycleKey
+    };
+  });
+  const cycles = projectCreatorCycleOptions(allScheduleRows);
+  const selectedCycle = resolveProjectCreatorCycleOption(cycles, requestedCycleIdentity);
+  const selectedCycleRows = allScheduleRows.filter(row => projectCreatorScheduleMatchesCycle(row, selectedCycle));
   const scheduleRows = projectType === "Fabrication"
     ? selectedCycleRows.filter(projectCreatorScheduleIsFabrication)
     : selectedCycleRows;
@@ -8584,6 +8855,8 @@ async function adminProjectCreatorScheduleData(projectType, cycleNumber) {
 
   return {
     allScheduleRows,
+    cycles,
+    selectedCycle,
     selectedCycleRows,
     scheduleRows,
     vinChoices
@@ -8592,7 +8865,9 @@ async function adminProjectCreatorScheduleData(projectType, cycleNumber) {
 
 async function adminProjectCreatorPreview(options) {
   const projectType = adminProjectType(options?.projectType);
-  const selectedCycleNumber = adminCycleNumber(options?.cycleNumber);
+  const selectedCycle = options?.selectedCycle || null;
+  const selectedCycleIdentity = projectCreatorScheduleCycleIdentity(selectedCycle || {});
+  const selectedCycleNumber = selectedCycleIdentity.cycleNumber;
   const selectedVin = projectCreatorVinNumber(options?.selectedVin);
   const allScheduleRows = options?.allScheduleRows || [];
   const selectedCycleRows = options?.selectedCycleRows || [];
@@ -8604,7 +8879,7 @@ async function adminProjectCreatorPreview(options) {
   // otherwise seed a new Fabrication project with work from an adjacent cycle.
   const targetScheduleRows = projectType === "Fabrication"
     ? selectedCycleRows.filter(row =>
-      Number(row.cycle_number) === Number(selectedCycleNumber) &&
+      projectCreatorScheduleMatchesCycle(row, selectedCycle) &&
       projectCreatorScheduleIsFabrication(row)
     )
     : allScheduleRows.filter(row => projectCreatorVinNumber(row.vin) === selectedVin);
@@ -8683,9 +8958,13 @@ async function adminProjectCreatorPreview(options) {
   for (const row of allScheduleRows || []) {
     const phaseName = projectCreatorPhaseName(row);
     const vin = projectCreatorVinNumber(row.vin);
-    if (!phaseName || vin === null || row.cycle_number === null || row.cycle_number === undefined) continue;
+    const identity = projectCreatorScheduleCycleIdentity(row);
+    const cycleScope = identity.cycleRecordId || (identity.cycleNumber && identity.cycleYear
+      ? `${identity.cycleNumber}:${identity.cycleYear}`
+      : "");
+    if (!phaseName || vin === null || !cycleScope) continue;
     if (!/^[A-H]$/.test(phaseName) && phaseName !== "A1" && phaseName !== "A2") continue;
-    anchorByCyclePhase.set(`${Number(row.cycle_number)}::${phaseName}`, vin);
+    anchorByCyclePhase.set(`${cycleScope}::${phaseName}`, vin);
   }
 
   const vinsByNumber = new Map(vinResult.rows.map(row => [Number(row.vin), row]));
@@ -8773,7 +9052,7 @@ async function adminProjectCreatorPreview(options) {
   const projectScheduleRows = allScheduleRows.filter(row => projectScheduleIds.has(row.production_record_id));
   const firstSchedule = projectScheduleRows[0] || targetScheduleRows[0] || null;
   const cycleLabel = projectType === "Fabrication"
-    ? (projectCreatorScheduleCycleLabel(firstSchedule) || (selectedCycleNumber ? `C${selectedCycleNumber}` : ""))
+    ? (selectedCycleIdentity.cycleKey || projectCreatorAsanaCycleLabel(firstSchedule))
     : "";
   const totalSeconds = tasks.reduce((sum, row) => sum + Number(row.estimatedSeconds || 0), 0);
   const missingEstimates = tasks.filter(row => !row.estimated_batch_task_time_seconds && !row.estimated_task_time_seconds).length;
@@ -8789,11 +9068,17 @@ async function adminProjectCreatorPreview(options) {
     projectName: options?.projectName || adminProjectNameForPreview(projectType, {
       vin: selectedVin,
       cycleNumber: selectedCycleNumber,
+      cycleRecordId: selectedCycleIdentity.cycleRecordId,
+      cycleYear: selectedCycleIdentity.cycleYear,
+      cycleKey: selectedCycleIdentity.cycleKey,
       cycleLabel
     }),
     projectType,
     selectedVin,
     selectedCycleNumber,
+    selectedCycleRecordId: selectedCycleIdentity.cycleRecordId,
+    selectedCycleYear: selectedCycleIdentity.cycleYear,
+    selectedCycleKey: selectedCycleIdentity.cycleKey,
     creationStrategy: "direct",
     portfolioGid: ADMIN_PROJECT_PORTFOLIOS[projectType] || "",
     schedule: firstSchedule,
@@ -8832,6 +9117,10 @@ function adminCycleStatus(row) {
   if (!row) {
     return {
       label: "",
+      cycleRecordId: null,
+      cycleYear: null,
+      cycleKey: "",
+      cycleNumber: null,
       startDate: "",
       endDate: "",
       progressPct: null,
@@ -8862,10 +9151,18 @@ function adminCycleStatus(row) {
   const progressPct = totalWorkdays
     ? round(Math.max(0, Math.min(100, (elapsedWorkday / totalWorkdays) * 100)), 1)
     : adminPercentValue(row.cycle_percent);
+  const identity = cycleIdentity({
+    ...row,
+    cycleStartDate: startDate,
+    cycleEndDate: endDate
+  });
 
   return {
     label: row.cycle_label || (row.cycle_number ? `C${row.cycle_number}` : ""),
-    cycleNumber: row.cycle_number === null || row.cycle_number === undefined ? null : Number(row.cycle_number),
+    cycleRecordId: identity.cycleRecordId,
+    cycleYear: identity.cycleYear,
+    cycleKey: identity.cycleKey,
+    cycleNumber: identity.cycleNumber,
     startDate,
     endDate,
     progressPct,
@@ -8876,10 +9173,13 @@ function adminCycleStatus(row) {
   };
 }
 
-async function adminScheduleAlignmentPayload(currentCycleNumber) {
+async function adminScheduleAlignmentPayload(currentCycleNumber, currentCycleRecordId = null, currentCycleYear = null) {
   if (!currentCycleNumber) {
     return {
       currentCycleNumber: null,
+      currentCycleRecordId: null,
+      currentCycleYear: null,
+      currentCycleKey: "",
       rows: [],
       phaseTotals: [],
       source: "hb.production_schedule + hb.rev1_task_instances + raw.asana_tasks"
@@ -8887,13 +9187,26 @@ async function adminScheduleAlignmentPayload(currentCycleNumber) {
   }
 
   const result = await pool.query(`
-    with schedule_rows as (
+    with alignment_scope as (
+      select
+        $1::int as current_cycle_number,
+        nullif($2::text, '') as current_cycle_record_id,
+        $3::int as current_cycle_year,
+        exists (
+          select 1
+          from hb.production_schedule candidate
+          where candidate.cycle_number = $1::int
+            and candidate.cycle_record_id = nullif($2::text, '')
+        ) as has_current_record_rows
+    ),
+    schedule_rows as (
       select
         ps.production_record_id,
         ps.schedule_name,
         ps.cycle_number,
         coalesce(ps.short_cycle_label, ps.cycle_label, 'C' || ps.cycle_number::text) as cycle_label,
         ps.cycle_record_id,
+        extract(year from coalesce(ps.start_date, ps.end_date))::int as cycle_year,
         ps.phase_record_id,
         coalesce(nullif(ps.phase_name, ''), nullif(ps.section_column, ''), 'Unassigned') as phase_name,
         ps.section_column,
@@ -8907,11 +9220,36 @@ async function adminScheduleAlignmentPayload(currentCycleNumber) {
         coalesce(prior.short_cycle_label, prior.cycle_label, 'C' || prior.cycle_number::text) as prior_cycle_label,
         coalesce(nullif(prior.phase_name, ''), nullif(prior.section_column, '')) as prior_phase_name
       from hb.production_schedule ps
+      cross join alignment_scope scope
       left join hb.production_schedule prior
         on prior.cycle_number = ps.cycle_number - 1
        and nullif(prior.vin, '') is not null
        and nullif(prior.vin, '') = nullif(ps.vin, '')
-      where ps.cycle_number in ($1::int - 1, $1::int)
+       and extract(year from coalesce(prior.start_date, prior.end_date))
+         is not distinct from extract(year from coalesce(ps.start_date, ps.end_date))
+       and (
+         scope.current_cycle_year is null
+         or extract(year from coalesce(prior.start_date, prior.end_date))::int = scope.current_cycle_year
+       )
+      where (
+        ps.cycle_number = scope.current_cycle_number
+        and (
+          (scope.has_current_record_rows and ps.cycle_record_id = scope.current_cycle_record_id)
+          or (
+            not scope.has_current_record_rows
+            and (
+              scope.current_cycle_year is null
+              or extract(year from coalesce(ps.start_date, ps.end_date))::int = scope.current_cycle_year
+            )
+          )
+        )
+      ) or (
+        ps.cycle_number = scope.current_cycle_number - 1
+        and (
+          scope.current_cycle_year is null
+          or extract(year from coalesce(ps.start_date, ps.end_date))::int = scope.current_cycle_year
+        )
+      )
     ),
     linked_tasks as (
       select
@@ -8961,6 +9299,11 @@ async function adminScheduleAlignmentPayload(currentCycleNumber) {
       from schedule_rows sr
       left join lateral unnest(sr.task_instance_record_ids) link(record_id) on true
       where sr.cycle_number = $1::int
+        and (
+          sr.cycle_record_id = nullif($2::text, '')
+          or ($3::int is not null and sr.cycle_year = $3::int)
+          or (nullif($2::text, '') is null and $3::int is null)
+        )
         and link.record_id is not null
     ),
     extra_phase_tasks as (
@@ -8982,6 +9325,16 @@ async function adminScheduleAlignmentPayload(currentCycleNumber) {
        and scheduled.cycle_record_id = ti.cycle_record_id
        and scheduled.phase_record_id = ti.phase_record_id
       where cycles.cycle_number = $1::int
+        and (
+          (nullif($2::text, '') is not null and cycles.cycle_record_id = nullif($2::text, ''))
+          or (
+            nullif($2::text, '') is null
+            and (
+              $3::int is null
+              or extract(year from coalesce(cycles.start_date, cycles.end_date))::int = $3::int
+            )
+          )
+        )
         and ti.phase_record_id is not null
         and scheduled.airtable_record_id is null
         and coalesce(ti.estimated_batch_task_time_seconds, 0) > 0
@@ -9022,6 +9375,8 @@ async function adminScheduleAlignmentPayload(currentCycleNumber) {
       sr.schedule_name,
       sr.cycle_number,
       sr.cycle_label,
+      sr.cycle_record_id,
+      sr.cycle_year,
       sr.phase_name,
       sr.section_column,
       sr.vin,
@@ -9059,7 +9414,7 @@ async function adminScheduleAlignmentPayload(currentCycleNumber) {
       on extra.cycle_record_id = sr.cycle_record_id
      and extra.phase_record_id = sr.phase_record_id
     order by sr.cycle_number, nullif(sr.vin, '') nulls last, sr.phase_name, sr.schedule_name
-  `, [currentCycleNumber]);
+  `, [currentCycleNumber, currentCycleRecordId, currentCycleYear]);
 
   const rows = result.rows.map(row => {
     const phaseName = formatPhaseName(row.phase_name) || "Unassigned";
@@ -9068,17 +9423,21 @@ async function adminScheduleAlignmentPayload(currentCycleNumber) {
     const mirrorTotalHours = round(row.mirror_total_hours, 2);
     const mirrorCompletedHours = round(row.mirror_completed_hours, 2);
     const extraTaskSamples = Array.isArray(row.extra_task_samples) ? row.extra_task_samples : [];
-    const mirrorMatchesPhaseCycle = row.cycle_number === currentCycleNumber &&
+    const identity = cycleIdentity(row);
+    const mirrorMatchesPhaseCycle = identity.cycleNumber === currentCycleNumber &&
       Math.abs(mirrorTotalHours - phaseCycleTotalHours) < 0.02 &&
       Math.abs(mirrorCompletedHours - phaseCycleCompletedHours) < 0.02;
 
     return {
       productionRecordId: row.production_record_id,
       scheduleName: row.schedule_name,
-      cycleNumber: Number(row.cycle_number || 0) || null,
-      cycleLabel: row.cycle_label || "",
+      cycleRecordId: identity.cycleRecordId,
+      cycleYear: identity.cycleYear,
+      cycleKey: identity.cycleKey,
+      cycleNumber: identity.cycleNumber,
+      cycleLabel: identity.cycleLabel,
       phaseName,
-      phaseCycleKey: `${row.cycle_number || ""}::${phaseName}`,
+      phaseCycleKey: `${identity.cycleKey || identity.cycleRecordId || ""}::${phaseName}`,
       presentationPhaseName: adminPresentationPhaseName(phaseName),
       sectionColumn: row.section_column || "",
       vin: row.vin || "",
@@ -9173,6 +9532,13 @@ async function adminScheduleAlignmentPayload(currentCycleNumber) {
 
   return {
     currentCycleNumber,
+    currentCycleRecordId,
+    currentCycleYear,
+    currentCycleKey: cycleIdentity({
+      cycleRecordId: currentCycleRecordId,
+      cycleYear: currentCycleYear,
+      cycleNumber: currentCycleNumber
+    }).cycleKey,
     rows,
     phaseTotals,
     source: "hb.production_schedule + hb.rev1_task_instances + raw.asana_tasks"
@@ -9390,6 +9756,7 @@ const ADMIN_RAW_PCL_FIELDS = Object.freeze({
   bucketKey: ["PhaseCycleBucketKey", "Phase Cycle Bucket Key", "Display Bucket Key", "PhaseCycleKey", "Phase Cycle Key"],
   phase: ["Phase Name", "Phase", "Primary Phase", "Section/Column"],
   cycle: ["Cycle Label", "Cycle", "Cycle Number"],
+  cycleRecordId: ["Cycle Record ID", "Cycle Record", "Cycle"],
   remainingHours: ["Remaining Task Hours", "Remaining Task Hrs", "Remaining Hrs", "Remaining Hours", "Open Est. Hours"],
   totalLoadHours: ["Total Load Hrs.", "Total Load Hrs", "Total Load Hours", "Total Load", "Load Hours"],
   completedHours: ["Completed Task Hours", "Completed Hrs", "Completed Hours", "Competed Est. Hours"],
@@ -9423,6 +9790,21 @@ function adminRawTextValue(value) {
 
 function adminRawTextFromFields(fields, names) {
   return adminRawTextValue(adminRawField(fields, names));
+}
+
+function adminRawLinkedRecordId(value) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const recordId = adminRawLinkedRecordId(item);
+      if (recordId) return recordId;
+    }
+    return null;
+  }
+  if (value && typeof value === "object") {
+    return adminRawLinkedRecordId(value.id ?? value.value ?? value.name);
+  }
+  const text = String(value || "").trim();
+  return /^rec[a-z0-9]+$/i.test(text) ? text : null;
 }
 
 function adminRawNumberValue(value) {
@@ -9461,27 +9843,29 @@ function adminParseRawPclBucketText(value) {
   const text = String(value || "").trim();
   if (!text) return null;
 
-  let match = text.match(/^C?\s*(\d{1,3})\s*[-:|/]+\s*(.+)$/i);
+  let match = text.match(/^C?\s*(\d{1,3})(?:\s*\.\s*((?:19|20)\d{2}|\d{2}))?\s*[-:|/]+\s*(.+)$/i);
   if (match) {
-    const phaseName = adminNormalizeRawPclPhase(match[2]);
+    const phaseName = adminNormalizeRawPclPhase(match[3]);
     return phaseName ? {
       cycleNumber: Number(match[1]),
       cycleLabel: `C${Number(match[1])}`,
+      cycleYear: cycleYearFromValues(match[2] ? `C${match[1]}.${match[2]}` : ""),
       phaseName
     } : null;
   }
 
-  match = text.match(/^(.+?)\s*[-:|/]+\s*C?\s*(\d{1,3})$/i);
+  match = text.match(/^(.+?)\s*[-:|/]+\s*C?\s*(\d{1,3})(?:\s*\.\s*((?:19|20)\d{2}|\d{2}))?$/i);
   if (match) {
     const phaseName = adminNormalizeRawPclPhase(match[1]);
     return phaseName ? {
       cycleNumber: Number(match[2]),
       cycleLabel: `C${Number(match[2])}`,
+      cycleYear: cycleYearFromValues(match[3] ? `C${match[2]}.${match[3]}` : ""),
       phaseName
     } : null;
   }
 
-  match = text.match(/\bC\s*(\d{1,3})\b/i);
+  match = text.match(/\bC\s*(\d{1,3})(?:\s*\.\s*((?:19|20)\d{2}|\d{2}))?\b/i);
   if (match) {
     const phaseText = text
       .replace(match[0], "")
@@ -9491,6 +9875,7 @@ function adminParseRawPclBucketText(value) {
     return phaseName ? {
       cycleNumber: Number(match[1]),
       cycleLabel: `C${Number(match[1])}`,
+      cycleYear: cycleYearFromValues(match[2] ? `C${match[1]}.${match[2]}` : ""),
       phaseName
     } : null;
   }
@@ -9499,15 +9884,29 @@ function adminParseRawPclBucketText(value) {
 }
 
 function adminParseRawPclCycle(fields) {
-  const cycleText = adminRawTextFromFields(fields, ADMIN_RAW_PCL_FIELDS.cycle);
-  const cycleNumber = cycleNumberFromName(cycleText);
+  const cycleValue = adminRawField(fields, ADMIN_RAW_PCL_FIELDS.cycle);
+  const cycleText = adminRawTextValue(cycleValue);
+  const cycleRecordId = adminRawLinkedRecordId(adminRawField(fields, ADMIN_RAW_PCL_FIELDS.cycleRecordId));
+  const cycleNumber = cycleRecordId ? null : cycleNumberFromName(cycleText);
   return {
+    cycleRecordId,
+    cycleYear: cycleYearFromValues(cycleText),
     cycleNumber,
-    cycleLabel: cycleNumber ? `C${cycleNumber}` : formatCycleName(cycleText)
+    cycleLabel: cycleNumber ? `C${cycleNumber}` : (cycleRecordId ? "" : formatCycleName(cycleText))
   };
 }
 
-function adminRawPhaseCycleLoadSnapshot(rawRows) {
+function adminCycleIdentityConflicts(left = {}, right = {}) {
+  const leftIdentity = cycleIdentity(left);
+  const rightIdentity = cycleIdentity(right);
+  return Boolean(
+    (leftIdentity.cycleRecordId && rightIdentity.cycleRecordId && leftIdentity.cycleRecordId !== rightIdentity.cycleRecordId) ||
+    (leftIdentity.cycleNumber && rightIdentity.cycleNumber && leftIdentity.cycleNumber !== rightIdentity.cycleNumber) ||
+    (leftIdentity.cycleYear && rightIdentity.cycleYear && leftIdentity.cycleYear !== rightIdentity.cycleYear)
+  );
+}
+
+function adminRawPhaseCycleLoadSnapshot(rawRows, cycleMetadataByRecordId = new Map()) {
   const groups = new Map();
   const stats = {
     rawRowCount: rawRows.length,
@@ -9515,6 +9914,9 @@ function adminRawPhaseCycleLoadSnapshot(rawRows) {
     positiveRowCount: 0,
     groupedRowCount: 0,
     skippedNoPhaseCycle: 0,
+    authoritativeCycleMetadataCount: 0,
+    authoritativeCycleConflictCount: 0,
+    skippedAmbiguousCycleIdentity: 0,
     totalRemainingHours: 0,
     totalLoadHours: 0,
     completedHours: 0,
@@ -9523,6 +9925,7 @@ function adminRawPhaseCycleLoadSnapshot(rawRows) {
 
   for (const rawRow of rawRows) {
     const fields = rawRow.fields_json || {};
+    const fieldCycle = adminParseRawPclCycle(fields);
     const bucketTexts = ADMIN_RAW_PCL_FIELDS.bucketKey
       .map(fieldName => adminRawTextFromFields(fields, [fieldName]))
       .filter(Boolean);
@@ -9534,8 +9937,42 @@ function adminRawPhaseCycleLoadSnapshot(rawRows) {
 
     if (!parsed) {
       const phaseName = adminNormalizeRawPclPhase(adminRawTextFromFields(fields, ADMIN_RAW_PCL_FIELDS.phase));
-      const cycle = adminParseRawPclCycle(fields);
-      if (phaseName && (cycle.cycleNumber || cycle.cycleLabel)) parsed = { ...cycle, phaseName };
+      if (phaseName && (fieldCycle.cycleRecordId || fieldCycle.cycleNumber || fieldCycle.cycleLabel)) {
+        parsed = { ...fieldCycle, phaseName };
+      }
+    }
+
+    if (parsed) {
+      const cycleRecordId = fieldCycle.cycleRecordId || parsed.cycleRecordId || null;
+      const cycleMetadata = cycleRecordId ? cycleMetadataByRecordId.get(cycleRecordId) : null;
+
+      if (cycleMetadata) {
+        // A linked cycle record is the authoritative identity. Bucket text is a
+        // presentation field and may be stale after a cycle is reused in a new
+        // production year, so it must never override resolved cycle metadata.
+        const authoritativeIdentity = cycleIdentity({ ...cycleMetadata, cycleRecordId });
+        if (adminCycleIdentityConflicts(parsed, authoritativeIdentity) || adminCycleIdentityConflicts(fieldCycle, authoritativeIdentity)) {
+          stats.authoritativeCycleConflictCount += 1;
+        }
+        stats.authoritativeCycleMetadataCount += 1;
+        parsed = { ...parsed, ...authoritativeIdentity };
+      } else {
+        const fieldAndBucketConflict = adminCycleIdentityConflicts(fieldCycle, parsed);
+        if (fieldAndBucketConflict) {
+          // Without resolved record metadata there is no safe tie-breaker. Drop
+          // the row instead of trusting a possibly stale bucket-derived year.
+          stats.skippedAmbiguousCycleIdentity += 1;
+          parsed = null;
+        } else {
+          const identity = cycleIdentity({
+            cycleRecordId,
+            cycleYear: fieldCycle.cycleYear || parsed.cycleYear || null,
+            cycleNumber: fieldCycle.cycleNumber ?? parsed.cycleNumber,
+            cycleLabel: fieldCycle.cycleLabel || parsed.cycleLabel
+          });
+          parsed = { ...parsed, ...identity };
+        }
+      }
     }
 
     if (!parsed || !parsed.phaseName || (!parsed.cycleNumber && !parsed.cycleLabel)) {
@@ -9559,14 +9996,25 @@ function adminRawPhaseCycleLoadSnapshot(rawRows) {
     stats.completedHours = round(stats.completedHours + completedHours, 2);
     if (rawRow.synced_at && String(rawRow.synced_at) > stats.latestSyncedAt) stats.latestSyncedAt = String(rawRow.synced_at);
 
+    const cycleRecordId = parsed.cycleRecordId || null;
+    const cycleYear = parsed.cycleYear || null;
     const cycleNumber = parsed.cycleNumber === null || parsed.cycleNumber === undefined
       ? null
       : Number(parsed.cycleNumber);
     const cycleLabel = parsed.cycleLabel || (cycleNumber ? `C${cycleNumber}` : "");
+    const cycleKey = parsed.cycleKey || cycleIdentity({ cycleRecordId, cycleYear, cycleNumber, cycleLabel }).cycleKey;
     const phaseName = formatPhaseName(parsed.phaseName) || "Unassigned";
-    const key = `${cycleNumber || cycleLabel || "unknown"}::${phaseName}`;
+    const key = [
+      cycleRecordId || "unlinked",
+      cycleYear || "unknown-year",
+      cycleKey || cycleLabel || cycleNumber || "unknown-cycle",
+      phaseName
+    ].join("::");
     const existing = groups.get(key) || {
       phase_name: phaseName,
+      cycle_record_id: cycleRecordId,
+      cycle_year: cycleYear,
+      cycle_key: cycleKey,
       cycle_number: cycleNumber,
       cycle_label: cycleLabel,
       remaining_hours: 0,
@@ -9586,6 +10034,7 @@ function adminRawPhaseCycleLoadSnapshot(rawRows) {
 
   const rows = Array.from(groups.values())
     .sort((left, right) =>
+      Number(left.cycle_year || 9999) - Number(right.cycle_year || 9999) ||
       Number(left.cycle_number || 9999) - Number(right.cycle_number || 9999) ||
       String(left.phase_name || "").localeCompare(String(right.phase_name || ""))
     );
@@ -9656,6 +10105,78 @@ function adminDropDeadStart(remainingHours, workerCount, workdays) {
     reason: workdayIndex >= 0 ? "" : `${requiredWorkdays - dates.length} workday(s) before cycle start required`,
     dailyHours: round(dailyHours, 2)
   };
+}
+
+const ADMIN_PACE_OVERRIDE_SCOPE_SEPARATOR = "::cycle-scope::";
+
+function adminPaceOverrideScopeToken(cycleStatus = {}) {
+  const cycleRecordId = String(cycleStatus.cycleRecordId || cycleStatus.cycle_record_id || "").trim();
+  const cycleYear = cycleYearFromValues(cycleStatus.cycleYear, cycleStatus.cycle_year, cycleStatus.startDate, cycleStatus.start_date);
+  if (cycleRecordId && cycleYear) return `record:${encodeURIComponent(cycleRecordId)}:year:${cycleYear}`;
+  if (cycleRecordId) return `record:${encodeURIComponent(cycleRecordId)}`;
+  return cycleYear ? `year:${cycleYear}` : "";
+}
+
+function adminPaceOverrideStoragePhaseKey(phaseLabelKey, cycleStatus = {}) {
+  const canonicalKey = adminPhaseLabelKey(phaseLabelKey);
+  const scopeToken = adminPaceOverrideScopeToken(cycleStatus);
+  return scopeToken ? `${canonicalKey}${ADMIN_PACE_OVERRIDE_SCOPE_SEPARATOR}${scopeToken}` : canonicalKey;
+}
+
+function adminPaceOverrideCanonicalPhaseKey(row = {}) {
+  const fromLabel = adminPhaseLabelKey(row.phase_label || row.phaseLabel);
+  if (fromLabel) return fromLabel;
+  return adminPhaseLabelKey(String(row.phase_label_key || "").split(ADMIN_PACE_OVERRIDE_SCOPE_SEPARATOR)[0]);
+}
+
+function adminPaceOverrideMatchesCycle(row = {}, cycleStatus = {}) {
+  const expectedCycleNumber = Number(cycleStatus.cycleNumber || cycleStatus.cycle_number || 0) || null;
+  const rowCycleNumber = Number(row.cycle_number || 0) || null;
+  if (expectedCycleNumber && rowCycleNumber && rowCycleNumber !== expectedCycleNumber) return false;
+
+  const expectedScope = adminPaceOverrideScopeToken(cycleStatus);
+  const storageKey = String(row.phase_label_key || "");
+  const separatorIndex = storageKey.indexOf(ADMIN_PACE_OVERRIDE_SCOPE_SEPARATOR);
+  if (separatorIndex >= 0) {
+    const storedScope = storageKey.slice(separatorIndex + ADMIN_PACE_OVERRIDE_SCOPE_SEPARATOR.length);
+    return Boolean(expectedScope) && storedScope === expectedScope;
+  }
+
+  // Legacy rows have no identity suffix. Their required start date was
+  // validated inside the selected cycle when saved, so the date window safely
+  // identifies the historical cycle without changing or deleting the row.
+  const trueStartDate = String(row.true_start_date || row.trueStartDate || "").slice(0, 10);
+  const cycleStartDate = String(cycleStatus.startDate || cycleStatus.start_date || "").slice(0, 10);
+  const cycleEndDate = String(cycleStatus.endDate || cycleStatus.end_date || "").slice(0, 10);
+  if (isIsoDate(trueStartDate) && isIsoDate(cycleStartDate) && isIsoDate(cycleEndDate)) {
+    return trueStartDate >= cycleStartDate && trueStartDate <= cycleEndDate;
+  }
+
+  const expectedYear = cycleYearFromValues(cycleStatus.cycleYear, cycleStatus.cycle_year, cycleStartDate, cycleEndDate);
+  const rowYear = cycleYearFromValues(row.cycle_year, row.cycle_label, trueStartDate);
+  return Boolean(expectedYear && rowYear && expectedYear === rowYear);
+}
+
+function adminScopedPaceOverrideRows(rows, cycleStatus) {
+  const expectedScope = adminPaceOverrideScopeToken(cycleStatus);
+  const selectedByPhase = new Map();
+
+  for (const row of rows || []) {
+    if (!adminPaceOverrideMatchesCycle(row, cycleStatus)) continue;
+    const phaseLabelKey = adminPaceOverrideCanonicalPhaseKey(row);
+    if (!phaseLabelKey) continue;
+    const storageKey = String(row.phase_label_key || "");
+    const exactScoped = Boolean(expectedScope) && storageKey.endsWith(`${ADMIN_PACE_OVERRIDE_SCOPE_SEPARATOR}${expectedScope}`);
+    const candidate = { ...row, canonical_phase_label_key: phaseLabelKey, exact_scoped: exactScoped };
+    const existing = selectedByPhase.get(phaseLabelKey);
+    if (!existing || (exactScoped && !existing.exact_scoped) || (
+      exactScoped === existing.exact_scoped && String(row.updated_at || "") > String(existing.updated_at || "")
+    )) {
+      selectedByPhase.set(phaseLabelKey, candidate);
+    }
+  }
+
+  return Array.from(selectedByPhase.values());
 }
 
 function adminTruePaceForPhase(phaseName, cycleStatus, workdays, override, today = todayIso()) {
@@ -9738,6 +10259,9 @@ function adminMergeCurrentRowsForPresentation(rows) {
       phaseName: presentationName,
       phase: presentationName,
       phaseKey,
+      cycleRecordId: row.cycleRecordId ?? null,
+      cycleYear: row.cycleYear ?? null,
+      cycleKey: row.cycleKey || "",
       cycleNumber: row.cycleNumber ?? null,
       cycleLabel: row.cycleLabel || "",
       remainingHours: 0,
@@ -9761,7 +10285,7 @@ function adminMergeCurrentRowsForPresentation(rows) {
 async function adminPlhMetricsPayload() {
   const baselineCycleNumber = cycleNumberFromName(ADMIN_PLH_BASELINE_CYCLE) || 5;
   const today = todayIso();
-  const [cycleResult, debtResult, rawPhaseCycleLoadResult, dailyResult] = await Promise.all([
+  const [cycleResult, debtResult, rawPhaseCycleLoadResult, dailyResult, cycleMetadataResult] = await Promise.all([
     pool.query(`
       with cycle_rows as (
         select
@@ -9773,9 +10297,11 @@ async function adminPlhMetricsPayload() {
           days_in_cycle,
           holidays,
           cycle_percent,
+          extract(year from coalesce(start_date, end_date))::int as cycle_year,
           0 as source_rank
         from hb.cycles
         where cycle_number is not null
+          and (start_date is not null or end_date is not null)
         union all
         select
           max(cycle_record_id) as cycle_record_id,
@@ -9786,10 +10312,14 @@ async function adminPlhMetricsPayload() {
           max(days_in_cycle) as days_in_cycle,
           null::text as holidays,
           null::numeric as cycle_percent,
+          extract(year from coalesce(min(start_date), max(end_date)))::int as cycle_year,
           1 as source_rank
         from hb.production_schedule
         where cycle_number is not null
-        group by cycle_number
+          and (start_date is not null or end_date is not null)
+        group by
+          cycle_number,
+          extract(year from coalesce(start_date, end_date))
       )
       select
         cycle_record_id,
@@ -9799,24 +10329,30 @@ async function adminPlhMetricsPayload() {
         end_date::text,
         days_in_cycle,
         holidays,
-        cycle_percent
+        cycle_percent,
+        cycle_year
       from cycle_rows
       order by
-        case when $1::date between coalesce(start_date, $1::date) and coalesce(end_date, $1::date) then 0 else 1 end,
+        case when start_date is not null and end_date is not null and $1::date between start_date and end_date then 0 else 1 end,
+        case when coalesce(end_date, start_date) < $1::date then 0 else 1 end,
+        case when coalesce(end_date, start_date) < $1::date then coalesce(end_date, start_date) end desc nulls last,
+        case when coalesce(end_date, start_date) >= $1::date then coalesce(start_date, end_date) end asc nulls last,
         source_rank,
-        start_date desc nulls last,
         cycle_number desc
       limit 1
     `, [today]),
     pool.query(`
       select
         coalesce(nullif(pcl.phase_name, ''), 'Unassigned') as phase_name,
+        pcl.cycle_record_id,
         coalesce(
           cycles.cycle_number,
           nullif(substring(coalesce(pcl.cycle_label, '') from 'C[[:space:]]*([0-9]{1,3})'), '')::int,
           nullif(substring(coalesce(pcl.cycle_label, '') from '([0-9]{1,3})'), '')::int
         ) as cycle_number,
         coalesce(cycles.cycle_label, pcl.cycle_label) as cycle_label,
+        cycles.start_date::text as cycle_start_date,
+        cycles.end_date::text as cycle_end_date,
         sum(coalesce(pcl.remaining_task_hours, 0))::numeric(12, 2) as remaining_hours,
         sum(coalesce(pcl.total_load_hours, 0))::numeric(12, 2) as total_load_hours,
         sum(coalesce(pcl.completed_task_hours, 0))::numeric(12, 2) as completed_hours,
@@ -9829,13 +10365,16 @@ async function adminPlhMetricsPayload() {
          or coalesce(pcl.completed_task_hours, 0) > 0
       group by
         coalesce(nullif(pcl.phase_name, ''), 'Unassigned'),
+        pcl.cycle_record_id,
         coalesce(
           cycles.cycle_number,
           nullif(substring(coalesce(pcl.cycle_label, '') from 'C[[:space:]]*([0-9]{1,3})'), '')::int,
           nullif(substring(coalesce(pcl.cycle_label, '') from '([0-9]{1,3})'), '')::int
         ),
-        coalesce(cycles.cycle_label, pcl.cycle_label)
-      order by cycle_number nulls last, phase_name
+        coalesce(cycles.cycle_label, pcl.cycle_label),
+        cycles.start_date,
+        cycles.end_date
+      order by cycles.start_date nulls last, cycle_number nulls last, phase_name
     `),
     pool.query(`
       select
@@ -9854,15 +10393,26 @@ async function adminPlhMetricsPayload() {
         coalesce(sum(review_required_count), 0)::integer as review_required_count
       from reporting.worker_daily_utilization
       where work_date = $1::date
-    `, [today])
+    `, [today]),
+    pool.query(`
+      select
+        cycle_record_id,
+        cycle_number,
+        cycle_label,
+        start_date::text as cycle_start_date,
+        end_date::text as cycle_end_date
+      from hb.cycles
+      where cycle_record_id is not null
+    `)
   ]);
 
   const cycleStatus = adminCycleStatus(cycleResult.rows[0] || null);
   const currentCycleNumber = cycleStatus.cycleNumber;
+  const currentCycleYear = cycleStatus.cycleYear;
   const cycleRow = cycleResult.rows[0] || {};
   const cycleHolidays = holidayDatesFromField(cycleRow.holidays, cycleStatus.startDate || cycleStatus.endDate);
   const cycleWorkdayList = cycleWorkdays(cycleStatus.startDate, cycleStatus.endDate, cycleHolidays, cycleStatus.totalWorkdays);
-  const paceOverrideResult = currentCycleNumber
+  const paceOverrideCandidateResult = currentCycleNumber
     ? await pool.query(
       `
         select
@@ -9884,8 +10434,11 @@ async function adminPlhMetricsPayload() {
       [currentCycleNumber]
     )
     : { rows: [] };
+  const paceOverrideResult = {
+    rows: adminScopedPaceOverrideRows(paceOverrideCandidateResult.rows, cycleStatus)
+  };
   const paceOverrideByPhase = new Map(
-    paceOverrideResult.rows.map(row => [row.phase_label_key || adminPhaseLabelKey(row.phase_label), row])
+    paceOverrideResult.rows.map(row => [row.canonical_phase_label_key || adminPaceOverrideCanonicalPhaseKey(row), row])
   );
   const truePaceByPhase = new Map();
   const truePaceForPhase = (phaseName) => {
@@ -9939,12 +10492,25 @@ async function adminPlhMetricsPayload() {
   const tierOrder = ["current", ...(carryoverTierKeys.length ? carryoverTierKeys.slice().reverse() : ["carryover"]), "original"];
   const matrix = new Map();
   let currentRows = [];
-  const rawPhaseCycleLoad = adminRawPhaseCycleLoadSnapshot(rawPhaseCycleLoadResult.rows);
+  const hbDebtRows = debtResult.rows.map(withCycleIdentityColumns);
+  const cycleMetadataByRecordId = new Map(
+    cycleMetadataResult.rows
+      .map(withCycleIdentityColumns)
+      .filter(row => row.cycle_record_id)
+      .map(row => [row.cycle_record_id, row])
+  );
+  if (cycleStatus.cycleRecordId) {
+    cycleMetadataByRecordId.set(cycleStatus.cycleRecordId, withCycleIdentityColumns(cycleRow));
+  }
+  const rawPhaseCycleLoad = adminRawPhaseCycleLoadSnapshot(
+    rawPhaseCycleLoadResult.rows,
+    cycleMetadataByRecordId
+  );
   const sourceTimestampMs = (value) => {
     const timestamp = Date.parse(value || "");
     return Number.isFinite(timestamp) ? timestamp : 0;
   };
-  const hbPhaseCycleLoadRebuiltAt = debtResult.rows.reduce((latest, row) => {
+  const hbPhaseCycleLoadRebuiltAt = hbDebtRows.reduce((latest, row) => {
     const timestamp = String(row.rebuilt_at || "");
     return sourceTimestampMs(timestamp) > sourceTimestampMs(latest) ? timestamp : latest;
   }, "");
@@ -9952,16 +10518,20 @@ async function adminPlhMetricsPayload() {
   // Use the freshest complete phase-cycle model. HB is normally rebuilt after
   // changed Asana task events, but the Airtable PCL snapshot remains safer when
   // it is newer or HB has not initialized yet.
-  const useHbPhaseCycleLoad = Boolean(debtResult.rows.length) && (
+  const useHbPhaseCycleLoad = Boolean(hbDebtRows.length) && (
     !rawPhaseCycleLoad.rows.length ||
     sourceTimestampMs(hbPhaseCycleLoadRebuiltAt) >= sourceTimestampMs(rawPhaseCycleLoadSyncedAt)
   );
-  const debtRows = useHbPhaseCycleLoad ? debtResult.rows : rawPhaseCycleLoad.rows;
+  const debtRows = useHbPhaseCycleLoad ? hbDebtRows : rawPhaseCycleLoad.rows;
   const phaseCycleLoadSource = useHbPhaseCycleLoad
     ? "hb.phase_cycle_load_rev1"
     : "raw.airtable_phase_cycle_load";
-  const scheduleAlignment = await adminScheduleAlignmentPayload(currentCycleNumber);
-  const capacityResult = currentCycleNumber
+  const scheduleAlignment = await adminScheduleAlignmentPayload(
+    currentCycleNumber,
+    cycleStatus.cycleRecordId,
+    currentCycleYear
+  );
+  const capacityResult = currentCycleNumber || cycleStatus.cycleRecordId
     ? await pool.query(`
       with worker_phase_capacity as (
         select
@@ -9973,11 +10543,24 @@ async function adminPlhMetricsPayload() {
         from hb.worker_phase_allocation_rev1 wpa
         join hb.worker_cycle_bank_rev1 wcb on wcb.worker_cycle_key = wpa.worker_cycle_key
         left join hb.cycles cycles on cycles.cycle_record_id = wpa.cycle_record_id
-        where coalesce(
-          cycles.cycle_number,
-          nullif(substring(coalesce(wpa.cycle_label, '') from 'C[[:space:]]*([0-9]{1,3})'), '')::int,
-          nullif(substring(coalesce(wpa.cycle_label, '') from '([0-9]{1,3})'), '')::int
-        ) = $1::int
+        where (
+          (
+            nullif($2::text, '') is not null
+            and wpa.cycle_record_id = nullif($2::text, '')
+          )
+          or (
+            nullif($2::text, '') is null
+            and coalesce(
+              cycles.cycle_number,
+              nullif(substring(coalesce(wpa.cycle_label, '') from 'C[[:space:]]*([0-9]{1,3})'), '')::int,
+              nullif(substring(coalesce(wpa.cycle_label, '') from '([0-9]{1,3})'), '')::int
+            ) = $1::int
+            and (
+              $3::int is null
+              or extract(year from coalesce(cycles.start_date, cycles.end_date))::int = $3::int
+            )
+          )
+        )
           and coalesce(wcb.actively_employed, false)
         group by 1, wpa.worker_record_id
       )
@@ -9989,7 +10572,7 @@ async function adminPlhMetricsPayload() {
         coalesce(sum(assigned_hours_total), 0)::numeric(12, 2) as assigned_hours_total
       from worker_phase_capacity
       group by phase_name
-    `, [currentCycleNumber])
+    `, [currentCycleNumber, cycleStatus.cycleRecordId, currentCycleYear])
     : { rows: [] };
   const remainingCapacityRatio = cycleStatus.totalWorkdays
     ? Math.max(0, Math.min(1, Number(cycleStatus.remainingWorkdays || 0) / Number(cycleStatus.totalWorkdays || 1)))
@@ -10045,7 +10628,14 @@ async function adminPlhMetricsPayload() {
     capacityByPresentation.set(presentationName, existing);
   }
 
+  let excludedDebtRowYearCount = 0;
   for (const row of debtRows) {
+    const rowIdentity = cycleIdentity(row);
+    const cycleYear = rowIdentity.cycleYear;
+    if (!currentCycleYear || cycleYear !== currentCycleYear) {
+      excludedDebtRowYearCount += 1;
+      continue;
+    }
     const cycleNumber = row.cycle_number === null || row.cycle_number === undefined ? null : Number(row.cycle_number);
     if (currentCycleNumber && cycleNumber && cycleNumber > currentCycleNumber) continue;
     const phaseName = formatPhaseName(row.phase_name) || "Unassigned";
@@ -10061,6 +10651,9 @@ async function adminPlhMetricsPayload() {
       currentRows.push({
         phaseName,
         phaseKey: adminPhaseFamilyName(phaseName),
+        cycleRecordId: rowIdentity.cycleRecordId,
+        cycleYear,
+        cycleKey: rowIdentity.cycleKey,
         cycleNumber,
         cycleLabel: row.cycle_label || cycleStatus.label,
         remainingHours,
@@ -10117,6 +10710,9 @@ async function adminPlhMetricsPayload() {
       return {
         phaseName,
         phaseKey: adminPhaseFamilyName(phaseName),
+        cycleRecordId: cycleStatus.cycleRecordId,
+        cycleYear: currentCycleYear,
+        cycleKey: cycleStatus.cycleKey,
         cycleNumber: currentCycleNumber,
         cycleLabel: cycleStatus.label,
         remainingHours,
@@ -10204,7 +10800,7 @@ async function adminPlhMetricsPayload() {
   const truePacePhases = phasePacing.map(row => row.truePace);
   const truePacePhaseKeys = new Set(truePacePhases.map(row => row.phaseLabelKey).filter(Boolean));
   for (const override of paceOverrideResult.rows) {
-    const overrideKey = override.phase_label_key || adminPhaseLabelKey(override.phase_label);
+    const overrideKey = override.canonical_phase_label_key || adminPaceOverrideCanonicalPhaseKey(override);
     if (truePacePhaseKeys.has(overrideKey)) continue;
     const truePace = adminTruePaceForPhase(override.phase_label, cycleStatus, cycleWorkdayList, override, today);
     truePacePhases.push(truePace);
@@ -10255,6 +10851,9 @@ async function adminPlhMetricsPayload() {
     debtTiers: {
       baselineCycle: ADMIN_PLH_BASELINE_CYCLE,
       currentCycle: cycleStatus.label,
+      currentCycleRecordId: cycleStatus.cycleRecordId,
+      currentCycleYear,
+      currentCycleKey: cycleStatus.cycleKey,
       cycleStatus,
       cycleStartDate: cycleStatus.startDate,
       cycleEndDate: cycleStatus.endDate,
@@ -10279,6 +10878,9 @@ async function adminPlhMetricsPayload() {
     scheduleAlignment,
     phasePacing,
     truePace: {
+      cycleRecordId: cycleStatus.cycleRecordId,
+      cycleYear: currentCycleYear,
+      cycleKey: cycleStatus.cycleKey,
       cycleNumber: currentCycleNumber,
       cycleLabel: cycleStatus.label,
       cycleStartDate: cycleStatus.startDate,
@@ -10314,17 +10916,25 @@ async function adminPlhMetricsPayload() {
       rawPhaseCycleLoadParsedRowCount: rawPhaseCycleLoad.stats.parsedRowCount,
       rawPhaseCycleLoadPositiveRowCount: rawPhaseCycleLoad.stats.positiveRowCount,
       rawPhaseCycleLoadGroupCount: rawPhaseCycleLoad.stats.groupedRowCount,
+      rawPhaseCycleLoadAuthoritativeCycleMetadataCount: rawPhaseCycleLoad.stats.authoritativeCycleMetadataCount,
+      rawPhaseCycleLoadAuthoritativeCycleConflictCount: rawPhaseCycleLoad.stats.authoritativeCycleConflictCount,
+      rawPhaseCycleLoadSkippedAmbiguousCycleIdentity: rawPhaseCycleLoad.stats.skippedAmbiguousCycleIdentity,
       rawPhaseCycleLoadRemainingHours: rawPhaseCycleLoad.stats.totalRemainingHours,
       rawPhaseCycleLoadTotalHours: rawPhaseCycleLoad.stats.totalLoadHours,
       rawPhaseCycleLoadCompletedHours: rawPhaseCycleLoad.stats.completedHours,
       rawPhaseCycleLoadLatestSyncedAt: rawPhaseCycleLoad.stats.latestSyncedAt,
       currentCycleLoadRowCount: currentRows.length,
+      currentCycleYear,
+      excludedDebtRowYearCount,
+      selectedYearDebtRowCount: debtRows.length - excludedDebtRowYearCount,
       currentPresentationPhaseCount: currentPresentationRows.length,
       scheduleAlignmentRowCount: scheduleAlignment.rows.length,
       scheduleAlignmentPhaseCount: scheduleAlignment.phaseTotals.length,
       capacityPhaseCount: capacityByPhase.size,
       capacityPresentationPhaseCount: capacityByPresentation.size,
       truePaceOverrideCount: paceOverrideResult.rows.length,
+      truePaceOverrideCandidateCount: paceOverrideCandidateResult.rows.length,
+      truePaceOverrideFilteredOrSupersededCount: paceOverrideCandidateResult.rows.length - paceOverrideResult.rows.length,
       phaseFilterActive: ADMIN_PLH_PHASES.size > 0,
       phaseFilterValues: Array.from(ADMIN_PLH_PHASES)
     },
@@ -10456,43 +11066,21 @@ async function adminDashboardPayload() {
   };
 }
 
-async function selectedAdminCycleNumber(requestedCycle) {
-  const explicit = adminCycleNumber(requestedCycle);
-  if (explicit !== null) return explicit;
-  const result = await pool.query(`
-    select cycle_number
-    from hb.production_schedule
-    where cycle_number is not null
-    order by
-      case when current_date between coalesce(start_date, current_date) and coalesce(end_date, current_date) then 0 else 1 end,
-      start_date desc nulls last,
-      cycle_number desc
-    limit 1
-  `);
-  return result.rows[0]?.cycle_number || null;
-}
-
 async function adminProjectCreatorPayload(url) {
   const projectType = adminProjectType(url.searchParams.get("projectType") || "VIN");
   const requestedCycle = url.searchParams.get("cycle") || "";
-  const cycleNumber = await selectedAdminCycleNumber(requestedCycle);
+  const requestedCycleIdentity = cycleIdentity({
+    cycleRecordId: url.searchParams.get("cycleRecordId") || url.searchParams.get("cycle_record_id"),
+    cycleNumber: adminCycleNumber(requestedCycle || url.searchParams.get("cycleNumber")),
+    cycleYear: url.searchParams.get("cycleYear") || url.searchParams.get("cycle_year"),
+    cycleLabel: url.searchParams.get("cycleKey") || url.searchParams.get("cycle_key") || requestedCycle
+  });
   const requestedProjectName = String(url.searchParams.get("projectName") || "").trim();
+  const scheduleData = await adminProjectCreatorScheduleData(projectType, requestedCycleIdentity);
+  const selectedCycle = scheduleData.selectedCycle;
+  const cycleNumber = Number(selectedCycle?.cycle_number || 0) || null;
 
-  const [cyclesResult, phaseResult, scheduleData, creationRunsResult] = await Promise.all([
-    pool.query(`
-      select
-        cycle_number,
-        coalesce(short_cycle_label, cycle_label, 'C' || cycle_number::text) as cycle_label,
-        min(start_date)::text as start_date,
-        max(end_date)::text as end_date,
-        count(*)::int as schedule_rows,
-        count(distinct nullif(vin, ''))::int as vin_count
-      from hb.production_schedule
-      where cycle_number is not null
-      group by cycle_number, coalesce(short_cycle_label, cycle_label, 'C' || cycle_number::text)
-      order by cycle_number desc
-      limit 40
-    `),
+  const [phaseResult, creationRunsResult] = await Promise.all([
     pool.query(`
       select
         primary_phase_record_id,
@@ -10505,7 +11093,6 @@ async function adminProjectCreatorPayload(url) {
       group by primary_phase_record_id, coalesce(primary_phase_name, 'Unassigned')
       order by phase_name
     `),
-    adminProjectCreatorScheduleData(projectType, cycleNumber),
     pool.query(`
       select
         project_creation_run_id,
@@ -10541,6 +11128,7 @@ async function adminProjectCreatorPayload(url) {
   const preview = await adminProjectCreatorPreview({
     projectType,
     cycleNumber,
+    selectedCycle,
     selectedVin,
     projectName: requestedProjectName,
     allScheduleRows: scheduleData.allScheduleRows,
@@ -10553,8 +11141,11 @@ async function adminProjectCreatorPayload(url) {
     projectCreateEnabled: ADMIN_PROJECT_CREATE_ENABLED,
     projectType,
     selectedCycleNumber: cycleNumber,
+    selectedCycleRecordId: selectedCycle?.cycle_record_id || null,
+    selectedCycleYear: selectedCycle?.cycle_year || null,
+    selectedCycleKey: selectedCycle?.cycle_key || "",
     selectedVin,
-    cycles: cyclesResult.rows,
+    cycles: scheduleData.cycles,
     scheduleRows: scheduleData.scheduleRows,
     vinChoices: scheduleData.vinChoices,
     taskTemplatePhases: phaseResult.rows.map(row => ({
@@ -10569,7 +11160,11 @@ async function adminProjectCreatorPayload(url) {
   };
 }
 
-async function adminCycleRowForNumber(cycleNumber) {
+async function adminCycleRowForNumber(cycleNumber, requestedIdentity = {}) {
+  const identity = cycleIdentity({ ...requestedIdentity, cycleNumber });
+  const requestedCycleRecordId = identity.cycleRecordId;
+  const requestedCycleYear = identity.cycleYear;
+  const today = todayIso();
   const result = await pool.query(
     `
       with cycle_rows as (
@@ -10585,9 +11180,10 @@ async function adminCycleRowForNumber(cycleNumber) {
           0 as source_rank
         from hb.cycles
         where cycle_number = $1::int
+          and (start_date is not null or end_date is not null)
         union all
         select
-          max(cycle_record_id) as cycle_record_id,
+          cycle_record_id,
           cycle_number,
           coalesce(max(nullif(short_cycle_label, '')), max(nullif(cycle_label, '')), 'C' || cycle_number::text) as cycle_label,
           min(start_date) as start_date,
@@ -10598,7 +11194,11 @@ async function adminCycleRowForNumber(cycleNumber) {
           1 as source_rank
         from hb.production_schedule
         where cycle_number = $1::int
-        group by cycle_number
+          and (start_date is not null or end_date is not null)
+        group by
+          cycle_record_id,
+          cycle_number,
+          extract(year from coalesce(start_date, end_date))
       )
       select
         cycle_record_id,
@@ -10608,12 +11208,27 @@ async function adminCycleRowForNumber(cycleNumber) {
         end_date::text,
         days_in_cycle,
         holidays,
-        cycle_percent
+        cycle_percent,
+        extract(year from coalesce(start_date, end_date))::int as cycle_year
       from cycle_rows
-      order by source_rank, start_date nulls last
+      where (
+          nullif($2::text, '') is null
+          or cycle_record_id = nullif($2::text, '')
+        )
+        and (
+          $3::int is null
+          or extract(year from coalesce(start_date, end_date))::int = $3::int
+        )
+      order by
+        case when start_date is not null and end_date is not null and $4::date between start_date and end_date then 0 else 1 end,
+        case when coalesce(end_date, start_date) < $4::date then 0 else 1 end,
+        case when coalesce(end_date, start_date) < $4::date then coalesce(end_date, start_date) end desc nulls last,
+        case when coalesce(end_date, start_date) >= $4::date then coalesce(start_date, end_date) end asc nulls last,
+        source_rank,
+        cycle_number desc
       limit 1
     `,
-    [cycleNumber]
+    [cycleNumber, requestedCycleRecordId, requestedCycleYear, today]
   );
   return result.rows[0] || null;
 }
@@ -10622,11 +11237,19 @@ async function handleAdminPhaseCyclePaceOverride(req) {
   const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
   requireAdminActor(actor);
   const body = await readJsonBody(req);
-  const cycleNumber = adminCycleNumber(body.cycleNumber || body.cycle);
+  const cycleNumber = adminCycleNumber(
+    body.cycleNumber || body.cycle || body.cycleKey || body.cycle_key || body.cycleLabel || body.cycle_label
+  );
   const phaseLabel = adminPresentationPhaseName(body.phaseLabel || body.phase || "");
   const phaseLabelKey = adminPhaseLabelKey(phaseLabel);
   const reset = Boolean(body.reset);
   const startMode = body.startMode === "just_in_time" ? "just_in_time" : "manual";
+  const requestedCycleIdentity = cycleIdentity({
+    cycleRecordId: body.cycleRecordId || body.cycle_record_id,
+    cycleYear: body.cycleYear || body.cycle_year,
+    cycleLabel: body.cycleKey || body.cycle_key || body.cycleLabel || body.cycle_label,
+    cycleNumber
+  });
 
   if (!cycleNumber) {
     throw actionError("Cycle number is required.", 400, { code: "CYCLE_REQUIRED" });
@@ -10635,25 +11258,60 @@ async function handleAdminPhaseCyclePaceOverride(req) {
     throw actionError("Phase label is required.", 400, { code: "PHASE_REQUIRED" });
   }
 
-  const cycleRow = await adminCycleRowForNumber(cycleNumber);
+  const cycleRow = await adminCycleRowForNumber(cycleNumber, requestedCycleIdentity);
   if (!cycleRow) {
-    throw actionError(`Cycle C${cycleNumber} was not found in Hawley.`, 404, { code: "CYCLE_NOT_FOUND" });
+    throw actionError(`Cycle C${cycleNumber} with the requested identity was not found in Hawley.`, 404, {
+      code: "CYCLE_NOT_FOUND",
+      cycleRecordId: requestedCycleIdentity.cycleRecordId,
+      cycleYear: requestedCycleIdentity.cycleYear
+    });
   }
 
+  const cycleStatus = adminCycleStatus(cycleRow);
+  const storagePhaseLabelKey = adminPaceOverrideStoragePhaseKey(phaseLabelKey, cycleStatus);
+
   if (reset) {
-    await writePool.query(
+    const resetResult = await writePool.query(
       `
         delete from hb.phase_cycle_pace_overrides
         where cycle_number = $1::int
-          and phase_label_key = $2
+          and (
+            phase_label_key = $3
+            or (
+              phase_label_key = $2
+              and (
+                (
+                  nullif($4::text, '') is not null
+                  and nullif($5::text, '') is not null
+                  and true_start_date between $4::date and $5::date
+                )
+                or (
+                  (nullif($4::text, '') is null or nullif($5::text, '') is null)
+                  and $6::int is not null
+                  and extract(year from true_start_date)::int = $6::int
+                )
+              )
+            )
+          )
       `,
-      [cycleNumber, phaseLabelKey]
+      [
+        cycleNumber,
+        phaseLabelKey,
+        storagePhaseLabelKey,
+        cycleStatus.startDate,
+        cycleStatus.endDate,
+        cycleStatus.cycleYear
+      ]
     );
     return {
       ok: true,
       action: "reset",
+      cycleRecordId: cycleStatus.cycleRecordId,
+      cycleYear: cycleStatus.cycleYear,
+      cycleKey: cycleStatus.cycleKey,
       cycleNumber,
-      phaseLabel
+      phaseLabel,
+      deletedCount: Number(resetResult.rowCount || 0)
     };
   }
 
@@ -10662,7 +11320,6 @@ async function handleAdminPhaseCyclePaceOverride(req) {
     throw actionError("True start date must be YYYY-MM-DD.", 400, { code: "TRUE_START_DATE_REQUIRED" });
   }
 
-  const cycleStatus = adminCycleStatus(cycleRow);
   const holidays = holidayDatesFromField(cycleRow.holidays, cycleStatus.startDate || cycleStatus.endDate);
   const workdays = cycleWorkdays(cycleStatus.startDate, cycleStatus.endDate, holidays, cycleStatus.totalWorkdays);
   if (!workdays.includes(trueStartDate)) {
@@ -10722,9 +11379,9 @@ async function handleAdminPhaseCyclePaceOverride(req) {
     [
       crypto.randomUUID(),
       cycleNumber,
-      cycleStatus.label || cycleRow.cycle_label || `C${cycleNumber}`,
+      cycleStatus.cycleKey || cycleStatus.label || cycleRow.cycle_label || `C${cycleNumber}`,
       phaseLabel,
-      phaseLabelKey,
+      storagePhaseLabelKey,
       trueStartDate,
       startMode,
       note || null,
@@ -10735,7 +11392,13 @@ async function handleAdminPhaseCyclePaceOverride(req) {
   return {
     ok: true,
     action: "saved",
-    override: result.rows[0]
+    override: {
+      ...result.rows[0],
+      phase_label_key: phaseLabelKey,
+      cycle_record_id: cycleStatus.cycleRecordId,
+      cycle_year: cycleStatus.cycleYear,
+      cycle_key: cycleStatus.cycleKey
+    }
   };
 }
 
@@ -11112,13 +11775,27 @@ async function handleAdminCapacityRecommendationPreview(req) {
   const body = await readJsonBody(req);
   const metrics = await adminPlhMetricsPayload();
   const cycleNumber = adminCycleNumber(body.cycleNumber || metrics.cycleStatus?.cycleNumber);
+  const currentCycleNumber = Number(metrics.cycleStatus?.cycleNumber || 0) || null;
+  const currentCycleRecordId = String(metrics.cycleStatus?.cycleRecordId || "").trim() || null;
+  const currentCycleYear = cycleYearFromValues(
+    metrics.cycleStatus?.cycleYear,
+    metrics.cycleStatus?.startDate,
+    metrics.cycleStatus?.endDate
+  );
   const phaseLabel = adminPresentationPhaseName(body.phaseLabel || body.phase || "");
   const requestedWorkerRecordId = String(body.targetWorkerRecordId || "").trim();
   const priorRecommendationIds = [...new Set((Array.isArray(body.priorRecommendationIds) ? body.priorRecommendationIds : [])
     .map(value => String(value || "").trim())
     .filter(value => /^[0-9a-f-]{36}$/i.test(value)))];
   const phaseRow = (metrics.phasePacing || []).find(row => adminPhaseLabelKey(row.phaseName) === adminPhaseLabelKey(phaseLabel));
-  if (!cycleNumber || !phaseRow) throw actionError("Choose a current-cycle phase.", 400);
+  if (
+    !cycleNumber ||
+    !phaseRow ||
+    cycleNumber !== currentCycleNumber ||
+    (!currentCycleRecordId && !currentCycleYear)
+  ) {
+    throw actionError("Choose a current-cycle phase with an unambiguous cycle year.", 400);
+  }
   if (priorRecommendationIds.length) {
     const priorRunsResult = await pool.query(`select recommendation_id, status, expires_at, preview_json from core.capacity_recommendation_runs where recommendation_id = any($1::uuid[])`, [priorRecommendationIds]);
     if (priorRunsResult.rows.length !== priorRecommendationIds.length || priorRunsResult.rows.some(run => run.status !== "preview" || new Date(run.expires_at) <= new Date())) {
@@ -11141,22 +11818,46 @@ async function handleAdminCapacityRecommendationPreview(req) {
       from hb.rev1_task_instances ti
       left join hb.task_templates tt on tt.task_record_id = ti.tasks_record_id
       left join hb.cycles c on c.cycle_record_id = ti.cycle_record_id
-      where c.cycle_number = $1
-        and not coalesce(ti.task_completed, false)
+       where (
+           (
+             nullif($2::text, '') is not null
+             and ti.cycle_record_id = nullif($2::text, '')
+           )
+           or (
+             nullif($2::text, '') is null
+             and c.cycle_number = $1::int
+             and extract(year from coalesce(c.start_date, c.end_date))::int = $3::int
+           )
+         )
+         and not coalesce(ti.task_completed, false)
         and lower(coalesce(ti.task_status, ti.status, '')) not in ('complete','completed','done','true','yes')
         and ti.asana_task_gid is not null and ti.tasks_record_id is not null
         and not exists (select 1 from core.time_sessions s where s.asana_task_gid = ti.asana_task_gid and s.stopped_at is null)
       order by estimated_hours desc, ti.task_order nulls last
-    `, [cycleNumber]),
+    `, [cycleNumber, currentCycleRecordId, currentCycleYear]),
     pool.query(`
       select wf.*, coalesce(bank.remaining_hours, 0)::numeric(12,2) as remaining_hours
       from hb.work_force wf
       left join hb.worker_cycle_bank_rev1 bank
         on bank.worker_record_id = wf.workforce_record_id
-       and bank.cycle_record_id in (select cycle_record_id from hb.cycles where cycle_number = $1)
-      where wf.actively_employed
-      order by wf.worker_name
-    `, [cycleNumber])
+       and (
+         (
+           nullif($2::text, '') is not null
+           and bank.cycle_record_id = nullif($2::text, '')
+         )
+         or (
+           nullif($2::text, '') is null
+           and bank.cycle_record_id in (
+             select cycle_record_id
+             from hb.cycles
+             where cycle_number = $1::int
+               and extract(year from coalesce(start_date, end_date))::int = $3::int
+           )
+         )
+       )
+       where wf.actively_employed
+       order by wf.worker_name
+    `, [cycleNumber, currentCycleRecordId, currentCycleYear])
   ]);
   const tasks = tasksResult.rows.filter(row => adminPhaseLabelKey(adminPresentationPhaseName(row.phase_label || row.section_column)) === adminPhaseLabelKey(phaseLabel));
   if (!tasks.length) throw actionError(`No open, assignable ${phaseLabel} tasks were found in C${cycleNumber}.`, 409);
@@ -11601,7 +12302,7 @@ async function insertAdminProjectCreationRows(preview, runId, projectName, actor
         actor?.email || "",
         runSchedule.production_record_id || null,
         runSchedule.cycle_record_id || null,
-        runSchedule.short_cycle_label || runSchedule.cycle_label || null,
+        runSchedule.cycle_key || projectCreatorAsanaCycleLabel(runSchedule) || null,
         runSchedule.phase_record_id || null,
         projectCreatorPhaseName(runSchedule),
         preview.projectType === "VIN" ? String(preview.selectedVin || "") : "",
@@ -11620,6 +12321,9 @@ async function insertAdminProjectCreationRows(preview, runId, projectName, actor
         projectType: preview.projectType,
         selectedVin: preview.selectedVin,
         selectedCycleNumber: preview.selectedCycleNumber,
+        selectedCycleRecordId: preview.selectedCycleRecordId,
+        selectedCycleYear: preview.selectedCycleYear,
+        selectedCycleKey: preview.selectedCycleKey,
         sourceTaskTemplate: task.task_record_id,
         sourceProductionSchedule: schedule.production_record_id,
         vinSource: task.vinSource,
@@ -11745,7 +12449,7 @@ async function insertAdminProjectCreationRows(preview, runId, projectName, actor
           task.sectionColumn || null,
           projectCreatorPhaseCycleKey(schedule),
           schedule.cycle_record_id || null,
-          schedule.short_cycle_label || schedule.cycle_label || null,
+          schedule.cycle_key || projectCreatorAsanaCycleLabel(schedule) || null,
           task.vin ?? null,
           task.vin === null || task.vin === undefined ? null : String(task.vin),
           schedule.production_record_id,
@@ -12048,24 +12752,31 @@ async function handleAdminProjectCreate(req) {
   }
 
   const projectType = adminProjectType(body.projectType || "VIN");
-  const cycleNumber = adminCycleNumber(body.cycle || body.cycleNumber) || await selectedAdminCycleNumber("");
+  const requestedCycleIdentity = cycleIdentity({
+    cycleRecordId: body.cycleRecordId || body.cycle_record_id || body.selectedCycleRecordId,
+    cycleNumber: adminCycleNumber(body.cycle || body.cycleNumber || body.selectedCycleNumber),
+    cycleYear: body.cycleYear || body.cycle_year || body.selectedCycleYear,
+    cycleLabel: body.cycleKey || body.cycle_key || body.selectedCycleKey || body.cycle || body.cycleLabel
+  });
   const selectedVin = projectCreatorVinNumber(body.vin || body.selectedVin);
   if (projectType === "VIN" && selectedVin === null) {
     throw actionError("Select a VIN before creating a VIN project.", 400, {
       code: "VIN_REQUIRED"
     });
   }
-  if (projectType === "Fabrication" && !cycleNumber) {
-    throw actionError("Select a cycle before creating a Fabrication project.", 400, {
+  const scheduleData = await adminProjectCreatorScheduleData(projectType, requestedCycleIdentity);
+  const selectedCycle = scheduleData.selectedCycle;
+  const cycleNumber = Number(selectedCycle?.cycle_number || 0) || null;
+  if (projectType === "Fabrication" && (!cycleNumber || !selectedCycle?.cycle_year)) {
+    throw actionError("Select a year-qualified cycle before creating a Fabrication project.", 400, {
       code: "CYCLE_REQUIRED"
     });
   }
-
-  const scheduleData = await adminProjectCreatorScheduleData(projectType, cycleNumber);
   const requestedProjectName = String(body.projectName || "").trim();
   const preview = await adminProjectCreatorPreview({
     projectType,
     cycleNumber,
+    selectedCycle,
     selectedVin,
     projectName: requestedProjectName,
     allScheduleRows: scheduleData.allScheduleRows,
@@ -12079,7 +12790,10 @@ async function handleAdminProjectCreate(req) {
   }
   const projectName = requestedProjectName || preview.projectName || adminProjectNameForPreview(projectType, {
     vin: selectedVin,
-    cycleNumber
+    cycleNumber,
+    cycleRecordId: selectedCycle?.cycle_record_id,
+    cycleYear: selectedCycle?.cycle_year,
+    cycleKey: selectedCycle?.cycle_key
   });
   const recoverableRun = (preview.existingNativePendingTasks || preview.existingSyncedTasks || preview.existingLinkedScheduleRows)
     ? await adminRecoverableProjectCreationRun(preview, projectName)
