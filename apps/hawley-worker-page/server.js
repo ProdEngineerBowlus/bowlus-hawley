@@ -8487,11 +8487,12 @@ function projectCreatorAsanaCycleLabel(row) {
 }
 
 function projectCreatorScheduleCycleIdentity(row = {}) {
+  const cycleLabel = row.cycle_key || row.cycleKey || projectCreatorAsanaCycleLabel(row);
   return cycleIdentity({
     cycleRecordId: row.cycle_record_id || row.cycleRecordId,
     cycleNumber: row.cycle_number ?? row.cycleNumber,
-    cycleYear: row.cycle_year ?? row.cycleYear,
-    cycleLabel: row.cycle_key || row.cycleKey || projectCreatorAsanaCycleLabel(row),
+    cycleYear: row.cycle_year ?? row.cycleYear ?? cycleYearFromValues(cycleLabel),
+    cycleLabel,
     cycleStartDate: row.start_date || row.startDate,
     cycleEndDate: row.end_date || row.endDate
   });
