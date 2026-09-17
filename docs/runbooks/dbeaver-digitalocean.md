@@ -24,6 +24,10 @@ Connection name: **Hawley Cloud - READ ONLY**.
    **reporting → Views** for prepared reports.
 4. Double-click a table/view, then choose its **Data** tab. Use filters to
    narrow the rows and Refresh to fetch current data.
+   Expand folders using the small arrows to their left; double-clicking a folder
+   can open its properties instead. **Properties** shows the column definitions;
+   **Data** shows actual rows and columns like an Airtable grid. Scroll horizontally
+   for additional columns. Close the Value panel or minimize AI Chat for more room.
 5. Open `tools/reporting/hawley-dbeaver-starter.sql`, select the Hawley
    connection, and run an individual statement with **Ctrl+Enter**.
    The scripts use limits where appropriate and do not trigger source imports.
@@ -134,6 +138,10 @@ return permission denied; that is expected. Do not replace this connection with
 PostgreSQL JDBC driver 42.7.13 was downloaded through DBeaver's driver manager.
 The user completed DBeaver's first-run preferences, including the data-collection
 choice. These preferences are not imposed by this runbook.
+
+DBeaver UI verification completed after the user entered the read-only username:
+opened `hb.production_schedule` and its Data tab; the grid fetched 200 rows at
+07:44 Pacific on 2026-09-17. The navigator was left expanded to `hb → Tables`.
 
 All 10 statements in the starter SQL were executed successfully in a read-only
 transaction with a 30-second statement timeout. The task-to-part join returned
