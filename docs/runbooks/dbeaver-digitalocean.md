@@ -129,11 +129,36 @@ ID. Used DBeaver's documented `-vars` and `-con` interface for a one-time local
 credential import; command arguments contained a variable reference, not the
 password. Removed the temporary properties file before the restart test.
 
-Verification: quit DBeaver completely, reopened without the credential-import
-file or password arguments, and successfully fetched 200 production-schedule
-rows at 07:52:37 Pacific. Either the normal DBeaver app or the Hawley Database
-shortcut can use this saved connection. The desktop shortcut is a convenience,
-not a separate database or an authentication requirement.
+The first repair appeared successful at 07:52, but a subsequent ordinary launch
+failed with `The server requested SCRAM-based authentication, but no password
+was provided.` The initial verification was insufficient: the CLI-created
+connection was temporary and did not persist the password to the saved profile.
+
+Corrective repair: created a new persistent connection using explicit
+`create=true|save=true|savePassword=true`, with the password supplied through a
+protected temporary `-vars` file. Confirmed the encrypted credentials file was
+updated. Retired the original broken profile and renamed the persistent profile
+to **Hawley Cloud - READ ONLY**, with DBeaver read-only enabled. Its ID is
+`postgres-jdbc-1a0afdea76a-547e89b9e72b8d2b`. Old SQL tabs may need the connection
+selected again because the connection ID changed.
+
+Removed the temporary credential file, confirmed DBeaver had exited, and launched
+the executable with **no arguments**. Double-clicking the saved connection
+successfully authenticated without a credential prompt. This exercises the normal
+app launch rather than a CLI connection override. Both shortcuts use the same
+saved connection; the user does not need a special shutdown procedure.
+
+Also populated the saved profile's host, port, and database metadata explicitly
+(`bowlus_ops`, port 25060). The JDBC URL alone connected, but missing database
+metadata made the navigator label the default database with the role name.
+After another full exit and plain executable launch, the saved connection
+authenticated without a prompt, the navigator showed `bowlus_ops`, and
+`hb.production_schedule` fetched 200 rows at 08:01:56 Pacific on 2026-09-17.
+The application was left open on that Data grid.
+
+Normal daily use: close with the window's X or File → Exit. Reopen DBeaver and
+double-click **Hawley Cloud - READ ONLY** if it is disconnected. Closing the
+application ends the live session; it should retain the connection and login.
 
 ## Verification and access boundaries
 
