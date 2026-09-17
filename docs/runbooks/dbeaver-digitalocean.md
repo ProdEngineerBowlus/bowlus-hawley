@@ -18,7 +18,7 @@ Connection name: **Hawley Cloud - READ ONLY**.
 1. Open the **Hawley Database** desktop shortcut (opens DBeaver and the starter
    SQL file), or open DBeaver from the Windows Start menu.
 2. Expand **Hawley Cloud - READ ONLY → Databases → bowlus_ops → Schemas**.
-   If prompted for a username, enter `bowlus_readonly`; PgPass supplies the password.
+   The saved connection uses `bowlus_readonly` with DBeaver's stored credentials.
    Depending on navigator settings, the database level may be omitted.
 3. Start with **hb → Tables** for normalized production data or
    **reporting → Views** for prepared reports.
@@ -87,11 +87,10 @@ Connection definition: `General\.dbeaver\data-sources.json` inside that workspac
 | Port | `25060` |
 | Database | `bowlus_ops` |
 | Username | `bowlus_readonly` |
-| Authentication | PostgreSQL PgPass (`postgres_pgpass`) |
+| Authentication | Username/password (`native`), credentials saved locally by DBeaver |
 | JDBC SSL mode | `require` |
 | Connection type | Production |
 | DBeaver read-only | Enabled |
-| Session initialization | `SET default_transaction_read_only = on`; `SET statement_timeout = 30000` |
 
 SSL `require` encrypts traffic; this setup does not claim CA/hostname verification.
 For `verify-full`, obtain the cluster CA through the DigitalOcean database
@@ -103,16 +102,38 @@ The existing Shop Ops `.env` key `HAWLEY_CLOUD_DATABASE_URL` is the credential
 source pointer. Its value must not appear in GitHub, terminal output, screenshots,
 or copied connection URLs in documentation.
 
-The local PostgreSQL password file is `%APPDATA%\postgresql\pgpass.conf`.
-It contains the exact host/port/database/read-only-user entry, without wildcards.
-The directory ACL is restricted to the current Windows account and SYSTEM.
-PgPass is a plaintext local credential file protected by filesystem permissions;
-it is not an encrypted password vault. It resides outside Dropbox and Git.
+The current connection uses DBeaver's local saved-credentials mechanism.
+`General\.dbeaver\credentials-config.json` stores encrypted credential data;
+`data-sources.json` records the connection and `save-password: true` without a
+plaintext password. This is local application credential storage, not a claim
+that Community Edition provides a master-password vault.
 
-The DBeaver profile contains no password and does not save a separate password.
-If credentials rotate, update the matching PgPass entry locally from the approved
-credential source. Preserve unrelated entries. Never commit the PgPass file,
-DBeaver secure storage, a workspace export containing credentials, or a `.env`.
+The initial PgPass setup was replaced after a reopen failure (see below).
+Its obsolete Hawley entry and the one-time credential-import properties file
+were removed. No plaintext database password was found in the connection JSON,
+encrypted credentials file, or DBeaver workspace log during verification.
+If credentials rotate, update the saved connection locally from the approved
+credential source. Never commit credentials-config.json, secure storage,
+credential-bearing workspace exports, bootstrap properties, or `.env` files.
+
+## Reopen repair: 2026-09-17
+
+After a normal app restart, DBeaver reported `Couldn't get password from PGPASS
+file`, with the expected local file reported missing. The file was present in
+filesystem checks; the precise reason DBeaver's file lookup failed was not
+established. This occurred before connecting to PostgreSQL.
+
+Changed the existing connection's authentication model to `native` and enabled
+saved credentials, preserving the same read-only role, SSL URL, and connection
+ID. Used DBeaver's documented `-vars` and `-con` interface for a one-time local
+credential import; command arguments contained a variable reference, not the
+password. Removed the temporary properties file before the restart test.
+
+Verification: quit DBeaver completely, reopened without the credential-import
+file or password arguments, and successfully fetched 200 production-schedule
+rows at 07:52:37 Pacific. Either the normal DBeaver app or the Hawley Database
+shortcut can use this saved connection. The desktop shortcut is a convenience,
+not a separate database or an authentication requirement.
 
 ## Verification and access boundaries
 
@@ -172,14 +193,15 @@ The `/api/sync-status` endpoint required authentication during this check.
 ## Troubleshooting and removal
 
 - Driver prompt: download the PostgreSQL JDBC driver when DBeaver requests it.
-- Authentication failure: verify the exact PgPass host/port/database/user match
-  and current credential; do not paste passwords into issue reports.
+- Authentication failure: verify the saved connection uses Username/password,
+  `bowlus_readonly`, and current locally saved credentials. Do not paste passwords
+  into issue reports. A PgPass-file error indicates the superseded setup.
 - Connection timeout: verify network reachability and the cluster's trusted
   sources. This setup did not broaden DigitalOcean network access.
 - Slow report: narrow by date/phase; avoid unbounded exports of large views.
 - No diagram arrows: the `hb` model has logical links rather than declared FKs.
-- To remove: disconnect and delete only this named DBeaver connection; remove
-  only its matching PgPass entry. No cloud resource needs deletion.
+- To remove: disconnect and delete only this named DBeaver connection and its
+  saved credentials. No cloud resource needs deletion.
 
 ## References
 
