@@ -15,7 +15,8 @@ Connection name: **Hawley Cloud - READ ONLY**.
 
 ## Open and explore
 
-1. Open DBeaver from the Windows Start menu.
+1. Open the **Hawley Database** desktop shortcut (opens DBeaver and the starter
+   SQL file), or open DBeaver from the Windows Start menu.
 2. Expand **Hawley Cloud - READ ONLY → Databases → bowlus_ops → Schemas**.
    If prompted for a username, enter `bowlus_readonly`; PgPass supplies the password.
    Depending on navigator settings, the database level may be omitted.
