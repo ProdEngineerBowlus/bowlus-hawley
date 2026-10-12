@@ -699,7 +699,9 @@
 
   function renderTopbar(worker, locked) {
     const scope = locked ? worker ? worker.name : "Worker" : "Admin";
-    const sourceLabel = state.source === "asana" ? "Live Asana" : state.source === "sample" ? "Sample" : state.source === "error" ? "Error" : "Loading";
+    const sourceLabel = ["hawley-brain", "hawley-read-model"].includes(state.source)
+      ? "Live Hawley"
+      : state.source === "asana" ? "Live Asana" : state.source === "sample" ? "Sample" : state.source === "error" ? "Error" : "Loading";
     const user = state.auth.user;
     const adminLink = !locked && (!state.auth.active || user?.role === "admin")
       ? `<a class="btn ghost" href="/admin">${icons.open}<span>Admin</span></a>`

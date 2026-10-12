@@ -75,7 +75,7 @@ function createPage() {
       renderManagerDashboard = () => '<section>manager tasks</section>';
       globalThis.page = {
         state, initialize, loadAssignments, startAutoRefresh, readJsonWithTimeout,
-        renderMain, bindEvents, postJsonWithPin, reloadAfterTaskAction,
+        renderMain, renderTopbar, bindEvents, postJsonWithPin, reloadAfterTaskAction,
         completeWorkerTask, startWorkerTimer, logout
       };
     })();`);
@@ -267,4 +267,22 @@ test("logout clears the saved snapshot and freshness state for the next account"
   assert.equal(page.state.assignmentsLoaded, false);
   assert.equal(page.state.assignmentsRefreshedAt, "");
   assert.equal(page.state.assignmentLoadError, "");
+});
+
+test("the rendered header identifies loaded Hawley assignments instead of still saying Loading", async () => {
+  const { page, loadInitial } = createPage();
+  assert.match(page.renderTopbar(null, true), / - Loading<\/p>/);
+  await loadInitial();
+  const header = page.renderTopbar(page.state.workers[0], true);
+  assert.match(header, / - Live Hawley<\/p>/);
+  assert.doesNotMatch(header, / - Loading<\/p>/);
+  for (const [source, label] of [
+    ["hawley-read-model", "Live Hawley"],
+    ["asana", "Live Asana"],
+    ["sample", "Sample"],
+    ["error", "Error"],
+  ]) {
+    page.state.source = source;
+    assert.ok(page.renderTopbar(page.state.workers[0], true).includes(` - ${label}</p>`));
+  }
 });
