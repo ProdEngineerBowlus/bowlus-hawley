@@ -351,3 +351,32 @@ normalized task-instance/read-model tables, the Daily Assignment Tracker mirror,
 workforce mirror, HB actuals, and the current Asana event watcher and nightly
 HB refresh states. The health probe deliberately avoids presentation-only views
 so it remains dependable during active shop use.
+
+## Worker loading safeguards (October 2026)
+
+The `hawley-worker-loading-v2` build reads the latest assignment date directly
+from `hb.rev1_task_instances`. Presentation-only work-area inference joins are
+not needed for that aggregate. Assignment responses include a `Server-Timing`
+header measuring authentication and payload generation.
+
+The web read pool limits connection acquisition to five seconds and individual
+SQL statements to fifteen seconds. This applies to reporting/admin reads too:
+an expensive report can return an error rather than hold a shared connection
+indefinitely. The separate write pool retains its existing timeout policy.
+
+Worker browsers allow one assignment read at a time, bound each read to twenty
+seconds, and schedule the next refresh sixty seconds after completion. Failed
+refreshes retain the last successful display with a stale-data message and
+disable task changes until a fresh response arrives. A task action invalidates
+older reads so a late response cannot overwrite its result.
+
+Every `build-hb.js` caller uses the same transaction advisory lock. A queued
+rebuild waits before reading sources or writing HB rows, then performs its full
+rebuild against fresh source data. It is not skipped. Commit, rollback, or
+connection loss releases the lock; imports remain outside this gate.
+
+Run `npm test` and `node --check apps/hawley-worker-page/server.js` before
+deployment. Verify the health build label, a logged-in task-page load, refresh
+recovery, and normal background watcher progress afterward. These changes add
+no migration; rollback uses the preceding App Platform deployment or a normal
+Git revert of the release commit.

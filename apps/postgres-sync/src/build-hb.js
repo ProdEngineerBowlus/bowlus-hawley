@@ -1,5 +1,6 @@
 import pg from "pg";
 import { getDatabaseConfig } from "./config.js";
+import { withHbBuildTransaction } from "./hb-build-transaction.js";
 import {
   buildCycleIndex,
   dateValue,
@@ -2258,13 +2259,14 @@ async function main() {
   await client.connect();
 
   try {
-    await client.query("begin");
-    const normalized = await normalizeBaseTables(client);
-    const rebuilt = await rebuildCalculations(client);
-    const capabilityRefresh = (await client.query(
-      "select core.refresh_worker_task_capabilities() as summary"
-    )).rows[0]?.summary || {};
-    await client.query("commit");
+    const { normalized, rebuilt, capabilityRefresh } = await withHbBuildTransaction(client, async () => {
+      const normalized = await normalizeBaseTables(client);
+      const rebuilt = await rebuildCalculations(client);
+      const capabilityRefresh = (await client.query(
+        "select core.refresh_worker_task_capabilities() as summary"
+      )).rows[0]?.summary || {};
+      return { normalized, rebuilt, capabilityRefresh };
+    });
     console.log(JSON.stringify({
       status: "ok",
       writes: "hawley_db_only",
@@ -2272,9 +2274,6 @@ async function main() {
       rebuilt,
       capabilityRefresh
     }, null, 2));
-  } catch (error) {
-    await client.query("rollback");
-    throw error;
   } finally {
     await client.end();
   }

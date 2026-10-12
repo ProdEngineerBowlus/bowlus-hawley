@@ -18,7 +18,7 @@ const staticDir = path.join(appDir, "public");
 
 const HOST = process.env.HAWLEY_WORKER_HOST || (process.env.PORT ? "0.0.0.0" : "127.0.0.1");
 const PORT = Number(process.env.PORT || process.env.HAWLEY_WORKER_PORT || 5273);
-const APP_BUILD_LABEL = "hawley-true-phase-pacing-v1";
+const APP_BUILD_LABEL = "hawley-worker-loading-v2";
 const APP_BUILD_COMMIT = process.env.SOURCE_COMMIT ||
   process.env.COMMIT_SHA ||
   process.env.GIT_SHA ||
@@ -151,7 +151,13 @@ const AUTOMATIC_BENDING_STUDY_LABEL = "Bending";
 const AUTOMATIC_BENDING_STUDY_RULE_KEY = "airtable_has_bending_v1";
 
 const runtimeDatabaseConfig = getDatabaseConfig({ useSyncUrl: true });
-const pool = new Pool(runtimeDatabaseConfig);
+// Interactive reads must release capacity even if the browser has given up.
+// Keep write transactions on their existing pool and timeout policy.
+const pool = new Pool({
+  ...runtimeDatabaseConfig,
+  connectionTimeoutMillis: 5000,
+  statement_timeout: 15000
+});
 const writePool = new Pool(runtimeDatabaseConfig);
 const migrationsDir = path.join(repoRoot, "db", "migrations");
 const viewsDir = path.join(repoRoot, "db", "views");
@@ -3432,8 +3438,11 @@ async function configuredWorkerForId(workerId) {
 
 async function latestAssignmentDate() {
   const result = await pool.query(`
+    -- Presentation joins (especially work-area inference) do not change dates.
+    -- Avoid evaluating them across the entire task history for every page load.
     select max(assigned_on)::text as latest_assignment_date
-    from reporting.hawley_worker_page_assignments
+    from hb.rev1_task_instances
+    where assigned_on is not null
   `);
 
   return result.rows[0]?.latest_assignment_date || "";
@@ -13530,8 +13539,12 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/daily-assignments" || url.pathname === "/api/assignments") {
+      const startedAt = performance.now();
       const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
-      sendJson(res, 200, await dailyAssignmentsPayload(url, authActor));
+      const payload = await dailyAssignmentsPayload(url, authActor);
+      sendJson(res, 200, payload, {
+        "Server-Timing": `assignments;dur=${(performance.now() - startedAt).toFixed(1)}`
+      });
       return;
     }
 

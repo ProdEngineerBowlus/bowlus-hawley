@@ -5,6 +5,7 @@
   "description": "H.A.W.L.E. - Historical Asana/Airtable Workflow Layer for Engineering.",
   "type": "module",
   "scripts": {
+    "test": "node --test",
     "pg:health": "node ./apps/postgres-sync/src/health.js",
     "pg:migrate": "node ./apps/postgres-sync/src/migrate.js",
     "pg:pull:airtable": "node ./apps/postgres-sync/src/pull-airtable.js",

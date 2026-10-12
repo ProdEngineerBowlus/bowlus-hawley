@@ -2,15 +2,24 @@
   const PROJECT_ID = "1214157321063250";
   const ASSIGNMENT_AUTO_REFRESH_MS = 60 * 1000;
   const SYNC_STATUS_REFRESH_MS = 60 * 1000;
+  const READ_REQUEST_TIMEOUT_MS = 20 * 1000;
   const STANDARD_DAILY_MINUTES = 460;
   let today = getTodayIso();
   const queryEmployee = getEmployeeFromUrl();
   const queryDate = queryEmployee ? "" : getDateFromUrl();
   const selectedDate = queryDate || today;
   let autoRefreshStarted = false;
+  let assignmentRefreshTimer = null;
+  let assignmentLoadPromise = null;
+  let assignmentLoadController = null;
+  let assignmentRevision = 0;
+  let activeAssignmentRevision = 0;
 
   const state = {
     loading: true,
+    assignmentsLoaded: false,
+    assignmentLoadError: "",
+    assignmentsRefreshedAt: "",
     actionTaskId: "",
     timers: loadLocalTimers(),
     trackerRefresh: {
@@ -299,14 +308,8 @@
   initialize();
 
   async function initialize() {
-    await loadAuthStatus();
-    if (authLoginRequired()) {
-      state.loading = false;
-      render();
-      return;
-    }
-
     await loadAssignments();
+    if (authLoginRequired()) return;
     loadAlertStatus();
     if (!workerPageLocked()) {
       loadRefreshStatus();
@@ -321,17 +324,55 @@
     window.setInterval(() => {
       if (hasVisibleRunningTimer()) render();
     }, 30000);
-    window.setInterval(() => {
-      if (!state.actionTaskId && !authLoginRequired()) loadAssignments({ silent: true });
-    }, ASSIGNMENT_AUTO_REFRESH_MS);
+    scheduleAssignmentRefresh();
     if (!workerPageLocked()) {
-      window.setInterval(() => {
-        if (!authLoginRequired()) loadSyncStatus({ silent: true });
-      }, SYNC_STATUS_REFRESH_MS);
+      const refreshSyncStatus = async () => {
+        if (!authLoginRequired()) await loadSyncStatus({ silent: true });
+        window.setTimeout(refreshSyncStatus, SYNC_STATUS_REFRESH_MS);
+      };
+      window.setTimeout(refreshSyncStatus, SYNC_STATUS_REFRESH_MS);
     }
   }
 
-  async function loadAssignments(options = {}) {
+  function scheduleAssignmentRefresh() {
+    window.clearTimeout(assignmentRefreshTimer);
+    if (!autoRefreshStarted) return;
+    assignmentRefreshTimer = window.setTimeout(async () => {
+      if (!state.actionTaskId && !authLoginRequired()) await loadAssignments({ silent: true });
+      scheduleAssignmentRefresh();
+    }, ASSIGNMENT_AUTO_REFRESH_MS);
+  }
+
+  function invalidateAssignmentRead() {
+    assignmentRevision += 1;
+    assignmentLoadController?.abort();
+  }
+
+  function loadAssignments(options = {}) {
+    if (state.actionTaskId && !options.afterAction) return Promise.resolve();
+    if (assignmentLoadPromise) {
+      // A write invalidates the previous snapshot. Its reload must wait for a
+      // new read, rather than joining a read that started before the write.
+      if (activeAssignmentRevision !== assignmentRevision) {
+        return assignmentLoadPromise.then(() => loadAssignments(options));
+      }
+      return assignmentLoadPromise;
+    }
+    window.clearTimeout(assignmentRefreshTimer);
+    const controller = new AbortController();
+    assignmentLoadController = controller;
+    activeAssignmentRevision = assignmentRevision;
+    assignmentLoadPromise = readAssignments(options, controller, assignmentRevision).finally(() => {
+      assignmentLoadPromise = null;
+      assignmentLoadController = null;
+      state.loading = false;
+      render();
+      scheduleAssignmentRefresh();
+    });
+    return assignmentLoadPromise;
+  }
+
+  async function readAssignments(options, controller, revision) {
     const silent = Boolean(options.silent);
     if (authLoginRequired()) {
       state.loading = false;
@@ -349,31 +390,43 @@
       return;
     }
 
-    if (!silent) {
+    if (!silent && !state.assignmentsLoaded) {
       state.loading = true;
       render();
     }
 
     try {
+      if (!state.auth.loaded && !await loadAuthStatus(controller)) {
+        throw new Error("Could not connect to Hawley. Try loading assignments again.");
+      }
+      if (authLoginRequired() || revision !== assignmentRevision) return;
       const params = new URLSearchParams({ date: state.date, _: String(Date.now()) });
       params.set("includeNoWork", "true");
       if (queryEmployee) params.set("employee", queryEmployee);
-      const response = await fetch(`/api/daily-assignments?${params.toString()}`);
+      const { response, payload } = await readJsonWithTimeout(`/api/daily-assignments?${params.toString()}`, controller);
+      if (revision !== assignmentRevision) return;
       if (response.status === 401) {
+        state.assignmentsLoaded = false;
+        state.assignmentsRefreshedAt = "";
+        state.workers = [];
+        state.auth.loaded = false;
         await loadAuthStatus();
-        state.loading = false;
-        render();
+        state.assignmentLoadError = "Your session needs to be checked. Reload assignments to continue.";
         return;
       }
-      if (!response.ok) throw new Error(`Asana API returned ${response.status}`);
-      const payload = await response.json();
+      if (!response.ok) throw new Error(`Hawley returned ${response.status}`);
       applyAssignments(payload, "asana");
+      state.assignmentsLoaded = true;
+      state.assignmentLoadError = "";
+      state.assignmentsRefreshedAt = new Date().toISOString();
       const selectedWorker = !workerPageLocked() ? getSelectedWorker() : null;
       if (selectedWorker) void loadWorkerCyclePerformance(selectedWorker, { force: !silent });
     } catch (error) {
-      if (silent) {
-        state.error = "Could not refresh live worker assignments. Reload the page or ask a manager to check the Daily Assignment app server.";
-        render();
+      if (revision !== assignmentRevision) return;
+      state.assignmentLoadError = state.assignmentsLoaded
+        ? `Showing assignments last loaded at ${new Date(state.assignmentsRefreshedAt).toLocaleTimeString()}. Changes are disabled until the connection recovers. Retrying automatically; you can also reload now.`
+        : "Could not connect to Hawley to load assignments. Retrying automatically; you can also reload now.";
+      if (state.assignmentsLoaded) {
         return;
       }
       applyAssignments({
@@ -417,22 +470,35 @@
 
   async function loadSyncStatus(options = {}) {
     try {
-      const response = await fetch(`/api/sync-status?_=${Date.now()}`);
+      const { response, payload } = await readJsonWithTimeout(`/api/sync-status?_=${Date.now()}`);
       if (!response.ok) return;
-      state.syncStatus = await response.json();
+      state.syncStatus = payload;
       if (!options.silent || !state.actionTaskId) render();
     } catch (error) {
       // Freshness status is supplemental; assignments still carry last run info.
     }
   }
 
-  async function loadAuthStatus() {
+  async function loadAuthStatus(controller) {
     try {
-      const response = await fetch("/api/auth-status");
-      if (!response.ok) return;
-      applyAuthStatus(await response.json());
+      const { response, payload } = await readJsonWithTimeout("/api/auth-status", controller);
+      if (!response.ok) return false;
+      applyAuthStatus(payload);
+      return true;
     } catch (error) {
-      // If this fails, write actions will still handle a 401 by prompting.
+      return false;
+    }
+  }
+
+  async function readJsonWithTimeout(url, controller = new AbortController()) {
+    const timeout = window.setTimeout(() => controller.abort(), READ_REQUEST_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      // Keep the deadline active while the response body is downloading too.
+      const payload = await response.json();
+      return { response, payload };
+    } finally {
+      window.clearTimeout(timeout);
     }
   }
 
@@ -456,7 +522,6 @@
   }
 
   function applyAssignments(payload, source) {
-    state.actionTaskId = "";
     state.source = payload.source || source;
     state.date = payload.date || today;
     state.project = payload.project || state.project;
@@ -624,6 +689,10 @@
       state.auth.loginError = "";
       state.workers = [];
       state.lineOverview = null;
+      state.assignmentsLoaded = false;
+      state.assignmentsRefreshedAt = "";
+      state.assignmentLoadError = "";
+      state.error = "";
       render();
     }
   }
@@ -871,6 +940,19 @@
 
   function renderMain(worker, locked) {
     const content = locked || worker ? renderWorkerSection(worker) : renderManagerDashboard();
+
+    if (state.assignmentLoadError) {
+      return `
+        <div class="notice" role="status">
+          <div>
+            <strong>${state.assignmentsLoaded ? "Assignments may be out of date" : "Assignments unavailable"}</strong>
+            <div class="muted">${escapeHtml(state.assignmentLoadError)}</div>
+            <button class="btn ghost" type="button" data-action="refresh">Reload assignments</button>
+          </div>
+        </div>
+        ${state.assignmentsLoaded ? content : ""}
+      `;
+    }
 
     if (state.error) {
       const notice = `
@@ -1926,6 +2008,12 @@
   }
 
   function bindEvents() {
+    if (state.assignmentLoadError || state.actionTaskId) {
+      document.querySelectorAll("button[data-task-id]").forEach((button) => {
+        button.disabled = true;
+        if (state.assignmentLoadError) button.title = "Reload assignments before making changes.";
+      });
+    }
     document.querySelectorAll("[data-worker]").forEach((button) => {
       button.addEventListener("click", () => {
         const nextUrl = new URL(window.location.href);
@@ -1947,7 +2035,9 @@
       });
     });
 
-    document.querySelector("[data-action='refresh']")?.addEventListener("click", loadAssignments);
+    document.querySelectorAll("[data-action='refresh']").forEach((button) => {
+      button.addEventListener("click", () => loadAssignments());
+    });
     document.querySelector("[data-action='logout']")?.addEventListener("click", logout);
 
     document.querySelectorAll("[data-action='refresh-tracker']").forEach((button) => {
@@ -2275,7 +2365,7 @@
         : supportMinutes > 0
           ? `Cut stopped. ${formatMinutes(supportMinutes)} support time was added once to this sheet.`
           : "Cut stopped. The cut was within its expected machine runtime, so no manual support time was added.");
-      await loadAssignments();
+      await reloadAfterTaskAction();
     } catch (error) {
       state.actionTaskId = "";
       render();
@@ -2295,8 +2385,7 @@
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error || `Time study failed with ${response.status}`);
       showToast(payload.alreadyActive ? `${payload.label} is already active on this task.` : `${payload.label} study applied.`);
-      state.actionTaskId = "";
-      await loadAssignments();
+      await reloadAfterTaskAction();
     } catch (error) {
       state.actionTaskId = "";
       render();
@@ -2312,8 +2401,7 @@
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error || `Time study failed with ${response.status}`);
       showToast(action === "start" ? "Study lap started." : "Study lap stopped.");
-      state.actionTaskId = "";
-      await loadAssignments();
+      await reloadAfterTaskAction();
     } catch (error) {
       state.actionTaskId = "";
       render();
@@ -2340,8 +2428,7 @@
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error || `Time study failed with ${response.status}`);
       showToast(`Recorded ${formatMinutes(payload.lap?.duration_minutes || durationMinutes)} as a manual observation.`);
-      state.actionTaskId = "";
-      await loadAssignments();
+      await reloadAfterTaskAction();
     } catch (error) {
       state.actionTaskId = "";
       render();
@@ -2361,8 +2448,7 @@
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error || `Time study failed with ${response.status}`);
       showToast("Time study ended.");
-      state.actionTaskId = "";
-      await loadAssignments();
+      await reloadAfterTaskAction();
     } catch (error) {
       state.actionTaskId = "";
       render();
@@ -2506,7 +2592,7 @@
       }
 
       showToast("Task completed");
-      await loadAssignments();
+      await reloadAfterTaskAction();
     } catch (error) {
       state.actionTaskId = "";
       render();
@@ -2573,7 +2659,7 @@
       }
 
       showToast("Task marked incomplete; logged time was preserved");
-      await loadAssignments();
+      await reloadAfterTaskAction();
     } catch (error) {
       state.actionTaskId = "";
       render();
@@ -2611,7 +2697,7 @@
           ? `Timer session ended and ${releasedResidualTimerCount} stale session${releasedResidualTimerCount === 1 ? " was" : "s were"} cleared`
           : "Timer session ended"
       );
-      await loadAssignments();
+      await reloadAfterTaskAction();
     } catch (error) {
       state.actionTaskId = "";
       render();
@@ -2990,7 +3076,19 @@
     return `${window.location.origin}${window.location.pathname}`;
   }
 
+  async function reloadAfterTaskAction() {
+    try {
+      await loadAssignments({ afterAction: true });
+    } finally {
+      state.actionTaskId = "";
+      render();
+    }
+  }
+
   async function postJsonWithPin(url, payload) {
+    if (payload.taskId && state.assignmentLoadError) {
+      throw new Error("Reload assignments before making changes; the displayed tasks may be out of date.");
+    }
     let response = await postJson(url, payload, state.authStatus.writePinRequired ? getWritePin() : "");
 
     if (response.status === 401) {
@@ -3008,6 +3106,8 @@
   }
 
   async function postJson(url, payload, pin) {
+    // Do not let a pre-action snapshot overwrite timer/completion results.
+    invalidateAssignmentRead();
     const headers = {
       "Content-Type": "application/json",
     };
