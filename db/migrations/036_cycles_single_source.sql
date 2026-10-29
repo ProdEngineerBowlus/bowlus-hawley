@@ -1,6 +1,11 @@
 -- hb.cycles is the single source of cycle dates. The cycle generator publishes into it, and the
 -- production schedule's copied cycle dates follow it automatically, whoever changes a cycle.
 
+-- Take the HB build gate (hb-build-transaction.js: namespace HAWL, key HBBD) before any table lock.
+-- The first startup attempt deadlocked with a concurrent HB rebuild that updates hb.cycles; holding
+-- this gate makes the migration wait for an in-flight rebuild and holds new ones until commit.
+select pg_advisory_xact_lock(1212241740, 1212301892);
+
 create or replace function hb.sync_production_schedule_cycle_dates()
 returns trigger
 language plpgsql
