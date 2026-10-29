@@ -17,9 +17,7 @@ export const DEFAULT_COMPANY_CALENDAR = Object.freeze({
     { key: "christmas_day", name: "Christmas Day", rule: { type: "fixed", month: 12, day: 25 }, observe: "nearest_weekday" }
   ],
   // Per-date overrides: "open" removes a closure, "closed" adds a one-off closure.
-  exceptions: [
-    { date: "2026-11-27", action: "open", note: "No day-after-Thanksgiving closure in 2026." }
-  ]
+  exceptions: []
 });
 
 export function parseIsoDate(value) {

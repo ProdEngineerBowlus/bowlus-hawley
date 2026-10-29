@@ -33,7 +33,7 @@ Endpoints (admin only): `GET /api/admin/cycle-planner?year=`, `POST /api/admin/c
 Confirmed by the user on 2026-10-29: New Year's Day, Memorial Day, Independence Day, Labor Day, Thanksgiving Day, Day After Thanksgiving and Christmas Day. Dates are calculated for each year; nothing is hard-coded per year.
 
 - Fixed-date holidays that fall on a weekend are observed Saturday -> Friday and Sunday -> Monday. This is a default policy pending company confirmation. Example: July 4, 2026 is a Saturday, so July 3 is closed. New Year's Day 2028 is a Saturday, so December 31, 2027 is closed.
-- Per-date exceptions open or close single days. The default calendar opens 2026-11-27: the handoff states there is no day-after-Thanksgiving closure in 2026.
+- Per-date exceptions open or close single days. None are set: the user confirmed on 2026-10-29 that the day after Thanksgiving is a closure in 2026 too.
 
 ## Planning rules
 
@@ -51,6 +51,6 @@ Intentional differences from the Airtable script: no hard-coded July 3, no quart
 
 `apps/hawley-worker-page/test/cycle-planner.test.js` covers rule parsing, locking, in-place updates with schedule sync, version records, stale previews, new-year creation and refusal cases. The tab was exercised end to end in a browser against an in-memory database.
 
-Live check, 2026-10-29 (read-only, `bowlus_readonly`): `hb.cycles` holds 25 cycles for 2026 only, labelled `C1`-`C25` with Airtable record IDs; all 308 linked production schedule rows match their cycle's dates. C20 is stored as 2026-10-01 to 2026-11-02 (23 days), overlapping C18 and C19; as a started cycle it is kept and reported as a warning. A no-rule 2026 preview changes C21-C23 only, because 2026-11-27 is a working day under the confirmed calendar but was a closure in the Airtable dates. A 2027 preview creates 25 new cycles with no conflicts.
+Live check, 2026-10-29 (read-only, `bowlus_readonly`): `hb.cycles` holds 25 cycles for 2026 only, labelled `C1`-`C25` with Airtable record IDs; all 308 linked production schedule rows match their cycle's dates. C20 is stored as 2026-10-01 to 2026-11-02 (23 days), overlapping C18 and C19; as a started cycle it is kept and reported as a warning. With 2026-11-27 confirmed as a closure, a no-rule 2026 preview leaves C21-C25 as published. A 2027 preview creates 25 new cycles with no conflicts.
 
 `npm test` also covers 2026 and 2027 closure dates, an even 25-cycle 2026 plan (255 working days), fixing cycles 22-25 at eight days, extending two upcoming cycles by four days with completed cycles locked, a locked cycle mid-year, and each conflict type.
