@@ -208,7 +208,7 @@ test("a current cycle overlapping a past cycle starts the day after it and keeps
   assert.ok(preview.warnings.some(warning => warning.code === "current_start_moved"));
   const c20 = preview.cycles[19];
   assert.deepEqual([c20.startDate, c20.endDate, c20.days, c20.source, c20.status], ["2026-10-26", "2026-11-02", 6, "current", "changed"]);
-  assert.deepEqual(preview.cycles.slice(20).map(c => [c.startDate, c.days]), [["2026-11-03", 9], ["2026-11-16", 8], ["2026-11-27", 8], ["2026-12-09", 8], ["2026-12-21", 8]]);
+  assert.deepEqual(preview.cycles.slice(20).map(c => [c.startDate, c.days, c.status]), [["2026-11-03", 8, "unchanged"], ["2026-11-13", 8, "unchanged"], ["2026-11-25", 8, "unchanged"], ["2026-12-09", 8, "unchanged"], ["2026-12-21", 8, "unchanged"]]);
 });
 
 test("override the current cycle, then later cycles balance longest first, and it publishes", async () => {
@@ -219,7 +219,7 @@ test("override the current cycle, then later cycles balance longest first, and i
   const c20 = preview.cycles[19];
   assert.deepEqual([c20.startDate, c20.endDate, c20.days, c20.source], ["2026-10-26", "2026-11-09", 11, "fixed"]);
   const rest = preview.cycles.slice(20).map(c => c.days);
-  assert.deepEqual(rest, [8, 7, 7, 7, 7]);
+  assert.deepEqual(rest, [7, 7, 7, 7, 7]);
   assert.equal(preview.cycles[20].startDate, "2026-11-10");
   assert.equal(preview.cycles.at(-1).endDate, "2026-12-31");
   assert.ok(preview.cycles.slice(0, 19).every(cycle => cycle.source === "locked" && cycle.status === "unchanged"));

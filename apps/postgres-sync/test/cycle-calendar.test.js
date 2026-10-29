@@ -25,9 +25,9 @@ function assertContiguous(plan) {
 
 const spread = cycles => Math.max(...cycles.map(c => c.days)) - Math.min(...cycles.map(c => c.days));
 
-test("2026 closures use actual dates, observe July 4 on Friday, and keep the day after Thanksgiving open", () => {
+test("2026 closures use actual dates, observe July 4 on Friday, and include the day after Thanksgiving", () => {
   assert.deepEqual(closureDates("2026-01-01", "2026-12-31"), [
-    "2026-01-01", "2026-05-25", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25"
+    "2026-01-01", "2026-05-25", "2026-07-03", "2026-09-07", "2026-11-26", "2026-11-27", "2026-12-25"
   ]);
 });
 
@@ -47,10 +47,10 @@ test("exceptions can add one-off closures", () => {
 test("a full year spreads every working day evenly and never starts on a weekend or closure", () => {
   const plan = planCycles({ startDate: "2026-01-01", cycleCount: 25 });
   assert.equal(plan.ok, true);
-  assert.equal(plan.workingDayCount, 255);
+  assert.equal(plan.workingDayCount, 254);
   assert.equal(plan.cycles.length, 25);
   assert.ok(spread(plan.cycles) <= 1);
-  assert.equal(plan.cycles.reduce((sum, c) => sum + c.days, 0), 255);
+  assert.equal(plan.cycles.reduce((sum, c) => sum + c.days, 0), 254);
   assert.equal(plan.cycles[0].startDate, "2026-01-02");
   assert.equal(plan.warnings[0].code, "start_moved");
   assert.equal(plan.cycles.at(-1).endDate, "2026-12-31");
