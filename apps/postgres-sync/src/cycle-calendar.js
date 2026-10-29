@@ -176,6 +176,20 @@ export function planCycles({
     previous = { cycle, anchor };
   }
 
+  // A cycle that has started but not ended keeps its start date. By default it also keeps its published
+  // end date; a length rule can extend or shorten it.
+  const currentStarts = new Map();
+  for (const row of baselineByCycle.values()) {
+    if (row.locked || !row.startLocked) continue;
+    const startIndex = days.findIndex(date => date >= row.startDate);
+    if (row.startDate < startDate || startIndex < 0) {
+      fail("current_outside_horizon", `Current cycle ${row.cycle} starts ${row.startDate}, outside the planning range.`, [row.cycle]);
+      continue;
+    }
+    const publishedDays = days.filter(date => date >= row.startDate && date <= row.endDate).length;
+    currentStarts.set(row.cycle, { startIndex, publishedDays: Math.max(1, publishedDays) });
+  }
+
   const fixed = new Map();
   for (const constraint of expandLengthConstraints(lengths)) {
     const { cycle } = constraint;
@@ -184,13 +198,15 @@ export function planCycles({
       continue;
     }
     if (anchors.has(cycle)) {
-      fail("locked_cycle_constraint", `Cycle ${cycle} is locked; its dates cannot be changed.`, [cycle]);
+      fail("locked_cycle_constraint", `Cycle ${cycle} has ended and is locked; its dates cannot be changed.`, [cycle]);
       continue;
     }
     let length = constraint.days;
     if (constraint.extendBy !== undefined) {
       const current = baselineByCycle.get(cycle);
-      const currentDays = current?.days ?? (current ? workingDays(current.startDate, current.endDate, calendar).length : null);
+      const currentDays = currentStarts.get(cycle)?.publishedDays
+        ?? current?.days
+        ?? (current ? workingDays(current.startDate, current.endDate, calendar).length : null);
       if (!currentDays) {
         fail("missing_baseline", `Cycle ${cycle} has no current length to extend.`, [cycle]);
         continue;
@@ -204,13 +220,29 @@ export function planCycles({
     if (fixed.has(cycle) && fixed.get(cycle) !== length) fail("conflicting_lengths", `Cycle ${cycle} was given two different lengths.`, [cycle]);
     fixed.set(cycle, length);
   }
+  const currentDefaults = new Set();
+  for (const [cycle, current] of currentStarts) {
+    if (fixed.has(cycle)) continue;
+    fixed.set(cycle, current.publishedDays);
+    currentDefaults.add(cycle);
+  }
 
-  // Split into spans separated by locked cycles and solve each span independently.
+  // Split into spans separated by locked cycles (and the start of a current cycle) and solve each
+  // span independently.
   const spans = [];
   let span = { start: 0, cycles: [] };
   let lockedThrough = -1;
   for (const cycle of numbers) {
     const anchor = anchors.get(cycle);
+    const current = currentStarts.get(cycle);
+    if (current) {
+      if (current.startIndex <= lockedThrough) {
+        warnings.push({ code: "current_overlap", message: `Current cycle ${cycle} starts before the previous cycle ends; its start date is kept as published.`, cycles: [cycle] });
+      }
+      spans.push({ ...span, end: current.startIndex - 1, trailing: false, leading: !spans.length });
+      span = { start: current.startIndex, cycles: [cycle] };
+      continue;
+    }
     if (!anchor) {
       span.cycles.push(cycle);
       continue;
@@ -251,7 +283,7 @@ export function planCycles({
     let index = start;
     for (const cycle of cycles) {
       let length = fixed.get(cycle);
-      const source = length ? "fixed" : "flexible";
+      const source = currentDefaults.has(cycle) ? "current" : length ? "fixed" : "flexible";
       if (!length) {
         length = base + (extra > 0 ? 1 : 0);
         if (extra > 0) extra--;

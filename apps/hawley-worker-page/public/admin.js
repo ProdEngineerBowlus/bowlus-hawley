@@ -37,7 +37,7 @@
     capacityMessage: "",
     configurationOpen: false,
     cyclePlanner: null,
-    cyclePlanYear: String(new Date().getFullYear() + 1),
+    cyclePlanYear: String(new Date().getFullYear()),
     cyclePlanForm: null,
     cyclePlanPreview: null,
     cyclePlanLoading: false,
@@ -1636,7 +1636,7 @@
           </div>
         </div>
         <div class="panel-body">
-          <p class="muted">Rules: <strong>22-25=8</strong> fixes cycles 22-25 at 8 working days, <strong>20+4</strong> extends cycle 20 by 4 days. Remaining working days are spread evenly over the other cycles. Cycles that have started are locked and never move.</p>
+          <p class="muted">Rules: <strong>22-25=8</strong> fixes cycles 22-25 at 8 working days, <strong>20+4</strong> extends cycle 20 by 4 days. Remaining working days are spread evenly over the other cycles. Past cycles are locked. The current cycle keeps its start date and can be extended or shortened.</p>
           <p class="muted">Closures ${escapeHtml(planner?.year || "")}: ${escapeHtml(closures.map(c => `${c.name} ${formatDate(c.date)}`).join(", ") || "none")}</p>
           ${planner?.scheduleDateMismatches ? `<div class="notice risk">${escapeHtml(`${formatNumber(planner.scheduleDateMismatches)} production schedule rows have dates that differ from their cycle.`)}</div>` : ""}
           ${state.cyclePlanMessage ? `<div class="notice ${preview && !preview.ok ? "risk" : ""}">${escapeHtml(state.cyclePlanMessage)}</div>` : ""}
