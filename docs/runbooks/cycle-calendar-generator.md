@@ -7,7 +7,8 @@ Replaces the Airtable Cycles script (`original-airtable-cycles.js`) with determi
 Admin page > Cycles. Pick a year, the first cycle's start date, the first cycle number and the cycle count, add optional length rules, then Preview. The preview lists every cycle with its type (locked, fixed, flexible), the currently published dates, how many VINs, schedule rows and tasks each changed cycle affects, and any problems. Publish is enabled only when there are no problems and something changes.
 
 - Rules: `22-25=8` fixes cycles 22-25 at 8 working days, `20=12` fixes one cycle, `20+4` extends cycle 20 by 4 working days over its published length. Separate rules with commas.
-- Cycles whose start date is today or earlier (shop time) are locked: never moved, never resized.
+- Past cycles (end date before today, shop time) are locked: never moved, never resized.
+- The current cycle (started, not ended) keeps its start date and, by default, its published end date. A rule such as `20+4` or `20=12` extends or shortens it, and later cycles rebalance.
 - Published cycles are never deleted. A plan with fewer cycles than are published is refused.
 - Publishing recomputes the plan inside one transaction and refuses if anything differs from the approved preview (`PLAN_STALE`).
 - Existing cycles are updated in place and keep their `cycle_record_id`; new cycles get `hawley-cycle:<year>-<nn>` and labels like `C1.27`. Written rows are marked `source_system = 'hawley_cycle_planner'`.

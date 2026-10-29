@@ -74,14 +74,16 @@ export async function loadPublishedCycles(db, year, { forUpdate = false } = {}) 
   return result.rows.map(row => ({ ...row, start_date: iso(row.start_date), end_date: iso(row.end_date) }));
 }
 
-// Cycles that have started are never moved by the planner.
+// Past cycles (ended before today) are never moved. The current cycle keeps its start date but can be
+// extended or shortened.
 export function baselineFromPublished(rows, today) {
   return rows.map(row => ({
     cycle: Number(row.cycle_number),
     startDate: row.start_date,
     endDate: row.end_date,
     days: row.days_in_cycle == null ? undefined : Number(row.days_in_cycle),
-    locked: Boolean(row.start_date && row.start_date <= today),
+    locked: Boolean(row.end_date && row.end_date < today),
+    startLocked: Boolean(row.start_date && row.start_date <= today),
     cycleRecordId: row.cycle_record_id,
     cycleLabel: row.cycle_label
   }));
@@ -139,7 +141,7 @@ async function previewFromPublished(db, inputs, published, calendar) {
   }
 
   const baselineByCycle = new Map(baseline.map(row => [row.cycle, row]));
-  // Started cycles keep their stored length even if today's calendar would count it differently.
+  // Past cycles keep their stored length even if today's calendar would count it differently.
   for (const cycle of plan.cycles) {
     const stored = baselineByCycle.get(cycle.cycle)?.days;
     if (cycle.source === "locked" && stored) cycle.days = stored;
@@ -226,7 +228,7 @@ export async function publishCyclePlan(pool, body, { today, actorEmail = "", cal
 
     const versionId = `cycle-plan:${randomUUID()}`;
     for (const cycle of changed) {
-      if (cycle.source === "locked") throw plannerError(`Cycle ${cycle.cycle} has started and cannot be changed.`, 409, { code: "CYCLE_LOCKED" });
+      if (cycle.source === "locked") throw plannerError(`Cycle ${cycle.cycle} has ended and cannot be changed.`, 409, { code: "CYCLE_LOCKED" });
       const holidays = holidayText(cycle.holidays);
       if (cycle.cycleRecordId) {
         await client.query(
