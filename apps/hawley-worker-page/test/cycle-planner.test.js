@@ -96,20 +96,6 @@ test("a started cycle whose stored length differs from the calendar is shown unc
   assert.deepEqual(preview.changedCycleNumbers, []);
 });
 
-test("overlapping cycles (as in live 2026 data) keep their dates and later cycles still plan", async () => {
-  const cycles = publishedYear(2026);
-  // Live data: C20 starts before C19 and runs Oct 1 - Nov 2 (23 working days).
-  Object.assign(cycles[19], { start_date: "2026-10-01", end_date: "2026-11-02", days_in_cycle: 23 });
-  Object.assign(cycles[20], { start_date: "2026-11-03", end_date: "2026-11-12", days_in_cycle: 8 });
-  const db = fakeDatabase(cycles);
-  const preview = await buildCyclePreview(db.client, { year: 2026, cycleCount: 25 }, TODAY);
-  assert.equal(preview.ok, true, JSON.stringify(preview.conflicts));
-  assert.ok(preview.warnings.some(warning => warning.code === "current_overlap"));
-  assert.deepEqual([preview.cycles[19].startDate, preview.cycles[19].endDate, preview.cycles[19].status, preview.cycles[19].source], ["2026-10-01", "2026-11-02", "unchanged", "current"]);
-  assert.deepEqual(preview.cycles.slice(20).map(c => [c.startDate, c.days]), [["2026-11-03", 9], ["2026-11-16", 8], ["2026-11-27", 8], ["2026-12-09", 8], ["2026-12-21", 8]]);
-  assert.equal(preview.cycles.at(-1).endDate, "2026-12-31");
-});
-
 test("working days before a locked first cycle are a warning, not a conflict", async () => {
   const cycles = publishedYear(2026);
   Object.assign(cycles[0], { start_date: "2026-01-12" });
@@ -200,27 +186,45 @@ test("publish and migration 036 take the HB build gate before touching cycles", 
   assert.equal(firstStatement, `select pg_advisory_xact_lock(${HB_BUILD_LOCK_NAMESPACE}, ${HB_BUILD_LOCK_KEY});`);
 });
 
-test("the current cycle can be extended: start kept, later cycles rebalanced, and it publishes", async () => {
-  const cycles = publishedYear(2026);
-  Object.assign(cycles[19], { start_date: "2026-10-01", end_date: "2026-11-02", days_in_cycle: 23 });
-  Object.assign(cycles[20], { start_date: "2026-11-03", end_date: "2026-11-12", days_in_cycle: 8 });
-  const db = fakeDatabase(cycles);
-  const body = { year: 2026, cycleCount: 25, lengthRules: "20+4" };
-  const preview = await buildCyclePreview(db.client, body, TODAY);
-  assert.equal(preview.ok, true, JSON.stringify(preview.conflicts));
-  const c20 = preview.cycles[19];
-  assert.deepEqual([c20.startDate, c20.endDate, c20.days, c20.source, c20.status], ["2026-10-01", "2026-11-06", 27, "fixed", "changed"]);
-  assert.equal(preview.cycles[20].startDate, "2026-11-09");
-  assert.ok(preview.cycles.slice(0, 19).every(cycle => cycle.source === "locked" && cycle.status === "unchanged"));
-  assert.equal(preview.cycles.at(-1).endDate, "2026-12-31");
-
-  await publishCyclePlan(db.pool, { ...body, planHash: preview.planHash }, { today: TODAY });
-  const stored = db.state.cycles.find(cycle => cycle.cycle_number === 20);
-  assert.deepEqual([stored.start_date, stored.end_date, stored.days_in_cycle], ["2026-10-01", "2026-11-06", 27]);
-});
-
 test("a past cycle still cannot be changed", async () => {
   const db = fakeDatabase(publishedYear(2026));
   const preview = await buildCyclePreview(db.client, { year: 2026, cycleCount: 25, lengthRules: "19+1" }, TODAY);
   assert.equal(preview.conflicts[0].code, "locked_cycle_constraint");
+});
+
+function liveLike2026() {
+  // Live 2026 cycles after the C19 correction (C19 Oct 8-23, 12 days); C20 is stored from Oct 1 to Nov 2.
+  const live = [["2026-01-12","2026-01-27",12],["2026-01-28","2026-02-12",12],["2026-02-13","2026-03-02",12],["2026-03-03","2026-03-18",12],["2026-03-19","2026-04-14",19],["2026-04-15","2026-04-28",10],["2026-04-29","2026-05-12",10],["2026-05-13","2026-05-27",10],["2026-05-28","2026-06-10",10],["2026-06-11","2026-06-24",10],["2026-06-25","2026-07-09",10],["2026-07-10","2026-07-22",9],["2026-07-23","2026-08-04",9],["2026-08-05","2026-08-17",9],["2026-08-18","2026-08-28",9],["2026-08-31","2026-09-11",9],["2026-09-14","2026-09-24",9],["2026-09-25","2026-10-07",9],["2026-10-08","2026-10-23",12],["2026-10-01","2026-11-02",23],["2026-11-03","2026-11-12",8],["2026-11-13","2026-11-24",8],["2026-11-25","2026-12-08",8],["2026-12-09","2026-12-18",8],["2026-12-21","2026-12-31",8]];
+  return live.map(([start_date, end_date, days_in_cycle], index) => ({
+    cycle_record_id: `rec-live-${index + 1}`, cycle_number: index + 1, cycle_label: `C${index + 1}`,
+    start_date, end_date, days_in_cycle, quarter: "", holidays: "", source_system: "airtable_bootstrap"
+  }));
+}
+
+test("a current cycle overlapping a past cycle starts the day after it and keeps its published end", async () => {
+  const db = fakeDatabase(liveLike2026());
+  const preview = await buildCyclePreview(db.client, { year: 2026, startDate: "2026-01-12", cycleCount: 25 }, TODAY);
+  assert.equal(preview.ok, true, JSON.stringify(preview.conflicts));
+  assert.ok(preview.warnings.some(warning => warning.code === "current_start_moved"));
+  const c20 = preview.cycles[19];
+  assert.deepEqual([c20.startDate, c20.endDate, c20.days, c20.source, c20.status], ["2026-10-26", "2026-11-02", 6, "current", "changed"]);
+  assert.deepEqual(preview.cycles.slice(20).map(c => [c.startDate, c.days]), [["2026-11-03", 9], ["2026-11-16", 8], ["2026-11-27", 8], ["2026-12-09", 8], ["2026-12-21", 8]]);
+});
+
+test("override the current cycle, then later cycles balance longest first, and it publishes", async () => {
+  const db = fakeDatabase(liveLike2026());
+  const body = { year: 2026, startDate: "2026-01-12", cycleCount: 25, lengthRules: "20=11" };
+  const preview = await buildCyclePreview(db.client, body, TODAY);
+  assert.equal(preview.ok, true, JSON.stringify(preview.conflicts));
+  const c20 = preview.cycles[19];
+  assert.deepEqual([c20.startDate, c20.endDate, c20.days, c20.source], ["2026-10-26", "2026-11-09", 11, "fixed"]);
+  const rest = preview.cycles.slice(20).map(c => c.days);
+  assert.deepEqual(rest, [8, 7, 7, 7, 7]);
+  assert.equal(preview.cycles[20].startDate, "2026-11-10");
+  assert.equal(preview.cycles.at(-1).endDate, "2026-12-31");
+  assert.ok(preview.cycles.slice(0, 19).every(cycle => cycle.source === "locked" && cycle.status === "unchanged"));
+
+  await publishCyclePlan(db.pool, { ...body, planHash: preview.planHash }, { today: TODAY });
+  const stored = db.state.cycles.find(cycle => cycle.cycle_number === 20);
+  assert.deepEqual([stored.start_date, stored.end_date, stored.days_in_cycle], ["2026-10-26", "2026-11-09", 11]);
 });

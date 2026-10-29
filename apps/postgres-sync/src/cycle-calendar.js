@@ -114,7 +114,7 @@ function expandLengthConstraints(constraints) {
 
 // Plans one year's cycles over working days. Locked cycles keep their exact dates. Fixed lengths are
 // reserved first; the remaining working days in each span are spread over flexible cycles so their
-// lengths differ by at most one day (earlier cycles take the extra days). Problems are returned as
+// lengths differ by at most one day; earlier cycles take the extra days, so lengths descend. Problems are returned as
 // conflicts instead of being silently adjusted.
 export function planCycles({
   year,
@@ -176,17 +176,23 @@ export function planCycles({
     previous = { cycle, anchor };
   }
 
-  // A cycle that has started but not ended keeps its start date. By default it also keeps its published
-  // end date; a length rule can extend or shorten it.
+  // A cycle that has started but not ended keeps its start date, unless that start overlaps an earlier
+  // locked cycle; then it starts the next working day after it. By default it keeps its published end
+  // date; a length rule can extend or shorten it.
   const currentStarts = new Map();
   for (const row of baselineByCycle.values()) {
     if (row.locked || !row.startLocked) continue;
-    const startIndex = days.findIndex(date => date >= row.startDate);
+    let startIndex = days.findIndex(date => date >= row.startDate);
     if (row.startDate < startDate || startIndex < 0) {
       fail("current_outside_horizon", `Current cycle ${row.cycle} starts ${row.startDate}, outside the planning range.`, [row.cycle]);
       continue;
     }
-    const publishedDays = days.filter(date => date >= row.startDate && date <= row.endDate).length;
+    const earlierLockedEnd = Math.max(-1, ...[...anchors].filter(([number]) => number < row.cycle).map(([, anchor]) => anchor.endIndex));
+    if (startIndex <= earlierLockedEnd) {
+      startIndex = earlierLockedEnd + 1;
+      warnings.push({ code: "current_start_moved", message: `Current cycle ${row.cycle} started ${row.startDate}, overlapping an earlier cycle; it now starts ${days[startIndex]}.`, cycles: [row.cycle] });
+    }
+    const publishedDays = days.filter(date => date >= days[startIndex] && date <= row.endDate).length;
     currentStarts.set(row.cycle, { startIndex, publishedDays: Math.max(1, publishedDays) });
   }
 
@@ -236,9 +242,6 @@ export function planCycles({
     const anchor = anchors.get(cycle);
     const current = currentStarts.get(cycle);
     if (current) {
-      if (current.startIndex <= lockedThrough) {
-        warnings.push({ code: "current_overlap", message: `Current cycle ${cycle} starts before the previous cycle ends; its start date is kept as published.`, cycles: [cycle] });
-      }
       spans.push({ ...span, end: current.startIndex - 1, trailing: false, leading: !spans.length });
       span = { start: current.startIndex, cycles: [cycle] };
       continue;
