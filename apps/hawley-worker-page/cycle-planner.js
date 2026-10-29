@@ -68,7 +68,7 @@ export async function loadPublishedCycles(db, year, { forUpdate = false } = {}) 
        from hb.cycles
       where cycle_number is not null
         and extract(year from start_date)::int = $1::int
-      order by start_date, cycle_number${forUpdate ? " for update" : ""}`,
+      order by cycle_number, start_date${forUpdate ? " for update" : ""}`,
     [year]
   );
   return result.rows.map(row => ({ ...row, start_date: iso(row.start_date), end_date: iso(row.end_date) }));

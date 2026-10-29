@@ -37,7 +37,7 @@
     capacityMessage: "",
     configurationOpen: false,
     cyclePlanner: null,
-    cyclePlanYear: String(new Date().getFullYear() + 1),
+    cyclePlanYear: String(new Date().getFullYear()),
     cyclePlanForm: null,
     cyclePlanPreview: null,
     cyclePlanLoading: false,
