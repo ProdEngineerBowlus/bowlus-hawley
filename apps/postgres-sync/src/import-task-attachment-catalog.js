@@ -30,13 +30,14 @@ async function main() {
   try {
     await client.query('begin');
     // Do not replace other native catalog entries or remove historical records.
-    for (const row of rows) await client.query(`
+    await client.query(`
       insert into core.task_attachment_catalog
         (task_record_id,source_base_id,source_table_id,source_field_id,source_snapshot,attachment_files)
-      values ($1,'app0UjzkVuOh7xdi7','tblT6xOuJcsFE23sk','fldYIGr0jMmAGfeX6',$2,$3)
+      select x.task_record_id,'app0UjzkVuOh7xdi7','tblT6xOuJcsFE23sk','fldYIGr0jMmAGfeX6',$2,x.attachment_files
+      from jsonb_to_recordset($1::jsonb) as x(task_record_id text, attachment_files jsonb)
       on conflict (task_record_id) do update set attachment_files=excluded.attachment_files,
         source_snapshot=excluded.source_snapshot, imported_at=now()
-    `,[row.task_record_id,path.basename(path.resolve(snapshot)),JSON.stringify(row.attachment_files)]);
+    `,[JSON.stringify(rows),path.basename(path.resolve(snapshot))]);
     await client.query('commit');
     console.log(JSON.stringify({tasks:rows.length,attachments:rows.reduce((n,r)=>n+r.attachment_files.length,0)}));
   } catch (error) { await client.query('rollback'); throw error; }
