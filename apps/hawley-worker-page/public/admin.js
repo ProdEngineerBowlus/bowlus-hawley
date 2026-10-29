@@ -1633,6 +1633,7 @@
           <div class="inline-actions cycle-plan-actions">
             <button class="btn" type="button" data-action="cycle-plan-load" ${state.cyclePlanLoading ? "disabled" : ""}>Load year</button>
             <button class="btn primary" type="button" data-action="cycle-plan-preview" ${state.cyclePlanLoading || !planner ? "disabled" : ""}>Preview</button>
+            <button class="btn" type="button" data-action="cycle-plan-balance" title="Clear typed lengths and spread the remaining working days evenly" ${state.cyclePlanLoading || !planner ? "disabled" : ""}>Balance remaining</button>
           </div>
         </div>
         <div class="panel-body">
@@ -1792,6 +1793,12 @@
     } else if (action === "cycle-plan-load") {
       state.cyclePlanYear = root.querySelector("[data-cycle-plan-year]")?.value || state.cyclePlanYear;
       await loadCyclePlanner();
+    } else if (action === "cycle-plan-balance") {
+      // Clearing every length rule leaves past cycles locked, the current cycle at its published end,
+      // and all later cycles flexible, so the preview spreads the remaining days evenly.
+      const rulesInput = root.querySelector('[data-cycle-plan="lengthRules"]');
+      if (rulesInput) rulesInput.value = "";
+      root.querySelector('[data-action="cycle-plan-preview"]')?.click();
     } else if (action === "cycle-plan-preview") {
       const body = readCyclePlanForm();
       state.cyclePlanLoading = true;
