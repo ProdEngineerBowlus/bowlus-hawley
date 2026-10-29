@@ -49,19 +49,9 @@ const AIRTABLE_TABLES = Object.freeze([
     targetTable: "raw.airtable_phase_cycle_load"
   },
   {
-    envKey: "HAWLEY_AIRTABLE_WORKER_CYCLE_BANK_TABLE",
-    sourceName: "Worker Cycle Bank Rev1",
-    targetTable: "raw.airtable_worker_cycle_bank"
-  },
-  {
     envKey: "HAWLEY_AIRTABLE_PHASES_TABLE",
     sourceName: "Phases",
     targetTable: "raw.airtable_phases"
-  },
-  {
-    envKey: "HAWLEY_AIRTABLE_WORKER_PHASE_ALLOCATION_TABLE",
-    sourceName: "Worker Phase Allocation Rev1",
-    targetTable: "raw.airtable_worker_phase_allocation"
   },
   {
     envKey: "HAWLEY_AIRTABLE_WORKER_DAILY_ACTUALS_TABLE",
