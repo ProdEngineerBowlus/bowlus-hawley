@@ -6,9 +6,11 @@ import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { promisify } from "node:util";
 import pg from "pg";
+import { taskAttachmentsFromStorage, createAttachmentUrlProvider } from "./attachment-storage.js";
 import { getDatabaseConfig } from "../postgres-sync/src/config.js";
 
 const { Pool } = pg;
+const attachmentDownloadUrl = createAttachmentUrlProvider();
 const scryptAsync = promisify(crypto.scrypt);
 
 const __filename = fileURLToPath(import.meta.url);
@@ -12095,11 +12097,11 @@ async function adminCreateAsanaTask(token, projectGid, sectionGid, parentGid, ta
 async function adminUploadTaskAttachments(token, taskGid, attachments) {
   const warnings = [];
   for (const attachment of attachments || []) {
-    if (!attachment?.url) continue;
+    if (!attachment?.key) throw actionError("Missing permanent attachment reference.", 503);
     let lastError = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
-        const download = await fetch(attachment.url);
+        const download = await fetch(await attachmentDownloadUrl(attachment), { signal: AbortSignal.timeout(1800000) });
         if (!download.ok) throw actionError(`Could not download attachment ${attachment.filename || "attachment"}.`, 502);
         const form = new FormData();
         form.append("file", await download.blob(), attachment.filename || "attachment");
@@ -12124,42 +12126,13 @@ async function adminUploadTaskAttachments(token, taskGid, attachments) {
   return warnings;
 }
 
-function adminAirtableAttachments(value) {
-  return (Array.isArray(value) ? value : []).map(attachment => ({
-    id: attachment?.id || "",
-    url: attachment?.url || "",
-    filename: attachment?.filename || "attachment",
-    size: Number(attachment?.size || 0),
-    type: attachment?.type || ""
-  })).filter(attachment => attachment.url);
-}
-
-async function adminFreshTaskAttachmentsByRecordId(tasks) {
-  const token = process.env.AIRTABLE_PAT;
-  const baseId = process.env.AIRTABLE_BASE || process.env.AIRTABLE_BASE_ID;
-  if (!token || !baseId) {
-    throw actionError("Fresh Airtable attachment URLs are required before creating this project, but Airtable credentials are not configured.", 503);
+async function adminStoredTaskAttachmentsByRecordId(tasks) {
+  const catalog = await taskAttachmentsFromStorage(pool, tasks);
+  // Validate storage configuration before any Asana project is created.
+  for (const files of catalog.values()) {
+    for (const file of files) await attachmentDownloadUrl(file);
   }
-
-  const wanted = new Set((tasks || []).map(task => String(task.task_record_id || "")).filter(Boolean));
-  const attachmentsByRecordId = new Map();
-  let offset = "";
-  do {
-    const url = new URL(`${ADMIN_AIRTABLE_API_BASE}/${encodeURIComponent(baseId)}/${encodeURIComponent(ADMIN_AIRTABLE_TASKS_TABLE)}`);
-    url.searchParams.set("pageSize", "100");
-    url.searchParams.append("fields[]", "Diagrams & Utilities");
-    if (offset) url.searchParams.set("offset", offset);
-    const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-    const text = await response.text();
-    if (!response.ok) throw actionError(`Could not refresh task attachments from Airtable (${response.status}).`, 502);
-    const payload = JSON.parse(text);
-    for (const record of payload.records || []) {
-      if (!wanted.has(record.id)) continue;
-      attachmentsByRecordId.set(record.id, adminAirtableAttachments(record.fields?.["Diagrams & Utilities"]));
-    }
-    offset = payload.offset || "";
-  } while (offset);
-  return attachmentsByRecordId;
+  return catalog;
 }
 
 async function refreshBendingTemplateFlagsFromAirtable() {
@@ -12510,9 +12483,9 @@ async function adminForEachWithConcurrency(items, limit, action) {
 }
 
 async function createAdminAsanaProjectFromPreview(token, preview, projectName, runId = "", existingProjectGid = "") {
-  // Airtable attachment URLs are temporary. Refresh them before the Asana
-  // project exists so a stale cached URL cannot leave another project shell.
-  const freshAttachmentsByRecordId = await adminFreshTaskAttachmentsByRecordId(preview.tasks);
+  // Require the complete permanent attachment catalog before the Asana
+  // project exists so an incomplete migration cannot leave another project shell.
+  const freshAttachmentsByRecordId = await adminStoredTaskAttachmentsByRecordId(preview.tasks);
   const projectGid = String(existingProjectGid || "").trim() || await createAdminAsanaProject(token, projectName, runId);
   if (runId) {
     await updateAdminProjectCreationResult(runId, "project_created", {
@@ -12584,9 +12557,7 @@ async function createAdminAsanaProjectFromPreview(token, preview, projectName, r
       createdTasks.push(createdTask);
       // Save each link immediately so any later failure remains visible and recoverable.
       await updateAdminProjectTaskAsanaLink(createdTask, projectGid, projectName);
-      const attachments = freshAttachmentsByRecordId.has(task.task_record_id)
-        ? freshAttachmentsByRecordId.get(task.task_record_id)
-        : (task.attachment_files_json || []);
+      const attachments = freshAttachmentsByRecordId.get(task.task_record_id) || [];
       const warnings = await adminUploadTaskAttachments(token, asanaTaskGid, attachments);
       attachmentWarnings.push(...warnings.map(warning => ({ taskName: task.task_name, ...warning })));
     }
