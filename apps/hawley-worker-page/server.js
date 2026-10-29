@@ -556,10 +556,9 @@ function shouldStartAirtableTaskTimeWriteback() {
 }
 
 function shouldStartAirtableCurrentAssignmentsWatcher() {
-  if (process.env.HAWLEY_AIRTABLE_CURRENT_ASSIGNMENTS_WATCH_IN_WEB !== undefined) {
-    return booleanEnv("HAWLEY_AIRTABLE_CURRENT_ASSIGNMENTS_WATCH_IN_WEB", false);
-  }
-  return process.env.NODE_ENV === "production";
+  // Retired: live assignments arrive through the direct Asana event watcher.
+  // Ignore legacy deployment flags so they cannot restart the Airtable bridge.
+  return false;
 }
 
 function shouldStartNightlyRefreshScheduler() {
