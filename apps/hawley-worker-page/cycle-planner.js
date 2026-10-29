@@ -108,6 +108,33 @@ export function holidayText(holidays) {
   return holidays.map(holiday => `${holiday.name} (${holiday.date})`).join(", ");
 }
 
+// Every table that stores a cycle ID. A cycle can only be removed when none of them reference it.
+const CYCLE_LINK_TABLES = [
+  ["scheduleRows", "hb.production_schedule"],
+  ["taskInstances", "hb.rev1_task_instances"],
+  ["projectRuns", "hb.project_creation_runs"],
+  ["phaseLoads", "hb.phase_cycle_load_rev1"],
+  ["workerBanks", "hb.worker_cycle_bank_rev1"],
+  ["workerAllocations", "hb.worker_phase_allocation_rev1"]
+];
+
+async function cycleLinks(db, cycleRecordIds) {
+  if (!cycleRecordIds.length) return new Map();
+  const counts = CYCLE_LINK_TABLES.map(([key, table]) => `(select count(*)::int from ${table} t where t.cycle_record_id = ids.cycle_record_id) as "${key}"`).join(", ");
+  const result = await db.query(
+    `select ids.cycle_record_id,
+            ${counts}
+       from unnest($1::text[]) as ids(cycle_record_id)`,
+    [cycleRecordIds]
+  );
+  return new Map(result.rows.map(row => [row.cycle_record_id, row]));
+}
+
+function linkSummary(links) {
+  const labels = { scheduleRows: "schedule rows", taskInstances: "tasks", projectRuns: "project runs", phaseLoads: "phase loads", workerBanks: "worker banks", workerAllocations: "worker allocations" };
+  return Object.entries(labels).filter(([key]) => Number(links?.[key]) > 0).map(([key, label]) => `${links[key]} ${label}`).join(", ");
+}
+
 async function cycleImpacts(db, cycleRecordIds) {
   if (!cycleRecordIds.length) return new Map();
   const result = await db.query(
@@ -133,11 +160,22 @@ async function previewFromPublished(db, inputs, published, calendar) {
   const plan = planCycles({ ...inputs, lengths, baseline, calendar });
   const conflicts = [...errors.map(message => ({ code: "invalid_rule", message, cycles: [] })), ...plan.conflicts];
 
-  const planned = new Set(plan.cycles.map(cycle => cycle.cycle));
-  for (const row of baseline) {
-    if (!planned.has(row.cycle) && (row.cycle < inputs.firstCycleNumber || row.cycle >= inputs.firstCycleNumber + inputs.cycleCount)) {
-      conflicts.push({ code: "published_cycle_outside_plan", message: `Published cycle ${row.cycle} is not in this plan. Cycles are never deleted; widen the cycle range.`, cycles: [row.cycle] });
+  // Published cycles outside the plan's range are removed, but only future cycles with nothing linked.
+  const outside = baseline.filter(row => row.cycle < inputs.firstCycleNumber || row.cycle >= inputs.firstCycleNumber + inputs.cycleCount);
+  const removalLinks = await cycleLinks(db, outside.map(row => row.cycleRecordId));
+  const removedCycles = [];
+  for (const row of outside) {
+    const label = row.cycleLabel || `C${row.cycle}`;
+    if (row.locked || row.startLocked) {
+      conflicts.push({ code: "cycle_removal_started", message: `${label} has started and cannot be removed.`, cycles: [row.cycle] });
+      continue;
     }
+    const linked = linkSummary(removalLinks.get(row.cycleRecordId));
+    if (linked) {
+      conflicts.push({ code: "cycle_removal_linked", message: `${label} cannot be removed yet: ${linked} still point to it. Move that work first.`, cycles: [row.cycle] });
+      continue;
+    }
+    removedCycles.push({ cycle: row.cycle, cycleRecordId: row.cycleRecordId, cycleLabel: label, startDate: row.startDate, endDate: row.endDate, days: row.days ?? null, status: "removed", source: "removed" });
   }
 
   const baselineByCycle = new Map(baseline.map(row => [row.cycle, row]));
@@ -173,7 +211,8 @@ async function previewFromPublished(db, inputs, published, calendar) {
     cycles,
     conflicts,
     warnings: plan.warnings,
-    changedCycleNumbers: cycles.filter(cycle => cycle.status !== "unchanged").map(cycle => cycle.cycle),
+    removedCycles,
+    changedCycleNumbers: [...cycles.filter(cycle => cycle.status !== "unchanged").map(cycle => cycle.cycle), ...removedCycles.map(cycle => cycle.cycle)],
     planHash: planHash(inputs, baseline, plan.cycles)
   };
 }
@@ -224,7 +263,8 @@ export async function publishCyclePlan(pool, body, { today, actorEmail = "", cal
       throw plannerError("The plan inputs or published cycles changed since this preview. Preview again before publishing.", 409, { code: "PLAN_STALE" });
     }
     const changed = preview.cycles.filter(cycle => cycle.status !== "unchanged");
-    if (!changed.length) throw plannerError("Nothing to publish: the plan matches the published cycles.", 409, { code: "PLAN_UNCHANGED" });
+    const removed = preview.removedCycles;
+    if (!changed.length && !removed.length) throw plannerError("Nothing to publish: the plan matches the published cycles.", 409, { code: "PLAN_UNCHANGED" });
 
     const versionId = `cycle-plan:${randomUUID()}`;
     for (const cycle of changed) {
@@ -267,6 +307,11 @@ export async function publishCyclePlan(pool, body, { today, actorEmail = "", cal
       }
     }
 
+    for (const cycle of removed) {
+      // previewFromPublished re-checked links inside this transaction; previous rows go into the version.
+      await client.query("delete from hb.cycles where cycle_record_id = $1", [cycle.cycleRecordId]);
+    }
+
     await client.query(
       `insert into hb.cycle_plan_versions (cycle_plan_version_id, plan_year, plan_hash, inputs_json, cycles_json,
                                           previous_cycles_json, changed_cycle_numbers, note, published_by)
@@ -278,13 +323,13 @@ export async function publishCyclePlan(pool, body, { today, actorEmail = "", cal
         JSON.stringify(preview.inputs),
         JSON.stringify(preview.cycles),
         JSON.stringify(published),
-        changed.map(cycle => cycle.cycle),
+        preview.changedCycleNumbers,
         String(body.note || "").trim().slice(0, 1000),
         actorEmail
       ]
     );
     await client.query("commit");
-    return { ok: true, cyclePlanVersionId: versionId, year: inputs.year, changedCycleNumbers: changed.map(cycle => cycle.cycle) };
+    return { ok: true, cyclePlanVersionId: versionId, year: inputs.year, changedCycleNumbers: preview.changedCycleNumbers, removedCycleNumbers: removed.map(cycle => cycle.cycle) };
   } catch (error) {
     await client.query("rollback").catch(() => {});
     throw error;

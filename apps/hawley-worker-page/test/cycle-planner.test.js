@@ -24,7 +24,7 @@ function publishedYear(year, count = 25) {
 }
 
 function fakeDatabase(cycles = []) {
-  const state = { cycles: structuredClone(cycles), calls: [], versions: [], scheduleUpdates: [] };
+  const state = { cycles: structuredClone(cycles), calls: [], versions: [], scheduleUpdates: [], links: {}, deleted: [] };
   const client = {
     async query(sql, params = []) {
       state.calls.push({ sql: sql.trim().split(/\s+/).slice(0, 3).join(" "), params });
@@ -32,6 +32,14 @@ function fakeDatabase(cycles = []) {
       if (/pg_advisory_xact_lock/.test(sql)) return { rows: [] };
       if (/from hb\.cycles/.test(sql) && /^\s*select/i.test(sql)) {
         return { rows: state.cycles.filter(row => Number(row.start_date.slice(0, 4)) === params[0]).sort((a, b) => a.start_date.localeCompare(b.start_date)) };
+      }
+      if (/"scheduleRows"/.test(sql)) {
+        return { rows: params[0].map(id => ({ cycle_record_id: id, scheduleRows: 0, taskInstances: 0, projectRuns: 0, phaseLoads: 0, workerBanks: 0, workerAllocations: 0, ...state.links[id] })) };
+      }
+      if (/^\s*delete from hb\.cycles/.test(sql)) {
+        state.deleted.push(params[0]);
+        state.cycles = state.cycles.filter(cycle => cycle.cycle_record_id !== params[0]);
+        return { rows: [] };
       }
       if (/from unnest\(\$1::text\[\]\)/.test(sql)) {
         return { rows: params[0].map(id => ({ cycle_record_id: id, schedule_rows: 9, vins: 9, task_instances: 120 })) };
@@ -162,14 +170,43 @@ test("a new year is created with the existing label style and stable IDs", async
   assert.match(created.find(cycle => cycle.holidays.includes("Day After Thanksgiving")).holidays, /2027-11-26/);
 });
 
-test("publishing an unchanged plan or one that drops published cycles is refused", async () => {
+test("publishing an unchanged plan is refused", async () => {
   const db = fakeDatabase(publishedYear(2026));
   const same = await buildCyclePreview(db.client, { year: 2026, cycleCount: 25 }, TODAY);
   assert.deepEqual(same.changedCycleNumbers, []);
   await assert.rejects(publishCyclePlan(db.pool, { year: 2026, cycleCount: 25, planHash: same.planHash }, { today: TODAY }), { code: "PLAN_UNCHANGED" });
+});
 
-  const fewer = await buildCyclePreview(db.client, { year: 2026, cycleCount: 24 }, TODAY);
-  assert.ok(fewer.conflicts.some(conflict => conflict.code === "published_cycle_outside_plan"));
+test("dropping a future cycle with linked work is blocked and says what is linked", async () => {
+  const db = fakeDatabase(publishedYear(2026));
+  db.state.links["rec-2026-25"] = { scheduleRows: 12, taskInstances: 215 };
+  const preview = await buildCyclePreview(db.client, { year: 2026, cycleCount: 24 }, TODAY);
+  assert.equal(preview.ok, false);
+  const conflict = preview.conflicts.find(c => c.code === "cycle_removal_linked");
+  assert.match(conflict.message, /C25\.26 cannot be removed yet: 12 schedule rows, 215 tasks/);
+  assert.deepEqual(preview.removedCycles, []);
+});
+
+test("dropping an unlinked future cycle removes it, rebalances the rest, and records it", async () => {
+  const db = fakeDatabase(publishedYear(2026));
+  const body = { year: 2026, cycleCount: 24 };
+  const preview = await buildCyclePreview(db.client, body, TODAY);
+  assert.equal(preview.ok, true, JSON.stringify(preview.conflicts));
+  assert.deepEqual(preview.removedCycles.map(c => c.cycle), [25]);
+  assert.ok(preview.changedCycleNumbers.includes(25));
+  assert.equal(preview.cycles.length, 24);
+  assert.equal(preview.cycles.at(-1).endDate, "2026-12-31");
+  const result = await publishCyclePlan(db.pool, { ...body, planHash: preview.planHash }, { today: TODAY });
+  assert.deepEqual(result.removedCycleNumbers, [25]);
+  assert.deepEqual(db.state.deleted, ["rec-2026-25"]);
+  assert.ok(db.state.versions[0][6].includes(25));
+  assert.ok(JSON.parse(db.state.versions[0][5]).some(row => row.cycle_record_id === "rec-2026-25"), "previous rows kept for rollback");
+});
+
+test("a started or past cycle cannot be dropped", async () => {
+  const db = fakeDatabase(publishedYear(2026));
+  const preview = await buildCyclePreview(db.client, { year: 2026, firstCycleNumber: 1, cycleCount: 20 }, TODAY);
+  assert.ok(preview.conflicts.some(c => c.code === "cycle_removal_started" && c.cycles[0] === 21));
 });
 
 test("publish and migration 036 take the HB build gate before touching cycles", async () => {
