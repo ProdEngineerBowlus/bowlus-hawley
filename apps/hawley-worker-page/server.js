@@ -10295,7 +10295,7 @@ function adminMergeCurrentRowsForPresentation(rows) {
 async function adminPlhMetricsPayload() {
   const baselineCycleNumber = cycleNumberFromName(ADMIN_PLH_BASELINE_CYCLE) || 5;
   const today = todayIso();
-  const [cycleResult, debtResult, rawPhaseCycleLoadResult, dailyResult, cycleMetadataResult] = await Promise.all([
+  const [cycleResult, debtResult, dailyResult] = await Promise.all([
     pool.query(`
       with cycle_rows as (
         select
@@ -10388,13 +10388,6 @@ async function adminPlhMetricsPayload() {
     `),
     pool.query(`
       select
-        record_id,
-        fields_json,
-        synced_at::text
-      from raw.airtable_phase_cycle_load
-    `),
-    pool.query(`
-      select
         count(*) filter (where productive_task_minutes > 0 or assigned_task_count > 0)::int as worker_count,
         coalesce(sum(productive_task_minutes), 0)::integer as productive_minutes,
         coalesce(sum(estimated_minutes), 0)::integer as estimated_minutes,
@@ -10403,17 +10396,7 @@ async function adminPlhMetricsPayload() {
         coalesce(sum(review_required_count), 0)::integer as review_required_count
       from reporting.worker_daily_utilization
       where work_date = $1::date
-    `, [today]),
-    pool.query(`
-      select
-        cycle_record_id,
-        cycle_number,
-        cycle_label,
-        start_date::text as cycle_start_date,
-        end_date::text as cycle_end_date
-      from hb.cycles
-      where cycle_record_id is not null
-    `)
+    `, [today])
   ]);
 
   const cycleStatus = adminCycleStatus(cycleResult.rows[0] || null);
@@ -10503,19 +10486,6 @@ async function adminPlhMetricsPayload() {
   const matrix = new Map();
   let currentRows = [];
   const hbDebtRows = debtResult.rows.map(withCycleIdentityColumns);
-  const cycleMetadataByRecordId = new Map(
-    cycleMetadataResult.rows
-      .map(withCycleIdentityColumns)
-      .filter(row => row.cycle_record_id)
-      .map(row => [row.cycle_record_id, row])
-  );
-  if (cycleStatus.cycleRecordId) {
-    cycleMetadataByRecordId.set(cycleStatus.cycleRecordId, withCycleIdentityColumns(cycleRow));
-  }
-  const rawPhaseCycleLoad = adminRawPhaseCycleLoadSnapshot(
-    rawPhaseCycleLoadResult.rows,
-    cycleMetadataByRecordId
-  );
   const sourceTimestampMs = (value) => {
     const timestamp = Date.parse(value || "");
     return Number.isFinite(timestamp) ? timestamp : 0;
@@ -10524,18 +10494,10 @@ async function adminPlhMetricsPayload() {
     const timestamp = String(row.rebuilt_at || "");
     return sourceTimestampMs(timestamp) > sourceTimestampMs(latest) ? timestamp : latest;
   }, "");
-  const rawPhaseCycleLoadSyncedAt = rawPhaseCycleLoad.stats.latestSyncedAt;
-  // Use the freshest complete phase-cycle model. HB is normally rebuilt after
-  // changed Asana task events, but the Airtable PCL snapshot remains safer when
-  // it is newer or HB has not initialized yet.
-  const useHbPhaseCycleLoad = Boolean(hbDebtRows.length) && (
-    !rawPhaseCycleLoad.rows.length ||
-    sourceTimestampMs(hbPhaseCycleLoadRebuiltAt) >= sourceTimestampMs(rawPhaseCycleLoadSyncedAt)
-  );
-  const debtRows = useHbPhaseCycleLoad ? hbDebtRows : rawPhaseCycleLoad.rows;
-  const phaseCycleLoadSource = useHbPhaseCycleLoad
-    ? "hb.phase_cycle_load_rev1"
-    : "raw.airtable_phase_cycle_load";
+  // Hawley owns phase-cycle load, including when its result is empty.
+  // Never substitute an older Airtable snapshot or compare source timestamps.
+  const debtRows = hbDebtRows;
+  const phaseCycleLoadSource = "hb.phase_cycle_load_rev1";
   const scheduleAlignment = await adminScheduleAlignmentPayload(
     currentCycleNumber,
     cycleStatus.cycleRecordId,
@@ -10918,21 +10880,10 @@ async function adminPlhMetricsPayload() {
       latestLineOverviewPhaseCount: 0,
       phaseCycleLoadSource,
       hbPhaseCycleLoadRebuiltAt,
-      rawPhaseCycleLoadSyncedAt,
+      airtablePhaseCycleLoadFallbackEnabled: false,
       currentCyclePacingSource: scheduleCurrentRows.length ? "production_schedule_linked_mirror" : phaseCycleLoadSource,
       phaseCycleLoadGroupCount: debtRows.length,
       hbPhaseCycleLoadGroupCount: debtResult.rows.length,
-      rawPhaseCycleLoadRowCount: rawPhaseCycleLoad.stats.rawRowCount,
-      rawPhaseCycleLoadParsedRowCount: rawPhaseCycleLoad.stats.parsedRowCount,
-      rawPhaseCycleLoadPositiveRowCount: rawPhaseCycleLoad.stats.positiveRowCount,
-      rawPhaseCycleLoadGroupCount: rawPhaseCycleLoad.stats.groupedRowCount,
-      rawPhaseCycleLoadAuthoritativeCycleMetadataCount: rawPhaseCycleLoad.stats.authoritativeCycleMetadataCount,
-      rawPhaseCycleLoadAuthoritativeCycleConflictCount: rawPhaseCycleLoad.stats.authoritativeCycleConflictCount,
-      rawPhaseCycleLoadSkippedAmbiguousCycleIdentity: rawPhaseCycleLoad.stats.skippedAmbiguousCycleIdentity,
-      rawPhaseCycleLoadRemainingHours: rawPhaseCycleLoad.stats.totalRemainingHours,
-      rawPhaseCycleLoadTotalHours: rawPhaseCycleLoad.stats.totalLoadHours,
-      rawPhaseCycleLoadCompletedHours: rawPhaseCycleLoad.stats.completedHours,
-      rawPhaseCycleLoadLatestSyncedAt: rawPhaseCycleLoad.stats.latestSyncedAt,
       currentCycleLoadRowCount: currentRows.length,
       currentCycleYear,
       excludedDebtRowYearCount,
