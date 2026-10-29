@@ -1,8 +1,8 @@
 // The two-key advisory-lock namespace is separate from the one-key worker-day
 // timer locks. All build-hb callers use this database-wide gate, including
 // independent web processes and the Asana, Airtable, manual, and nightly jobs.
-const HB_BUILD_LOCK_NAMESPACE = 0x4841574c; // HAWL
-const HB_BUILD_LOCK_KEY = 0x48424244; // HBBD
+export const HB_BUILD_LOCK_NAMESPACE = 0x4841574c; // HAWL
+export const HB_BUILD_LOCK_KEY = 0x48424244; // HBBD
 
 export async function withHbBuildTransaction(client, build) {
   await client.query("begin");

@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { readFile } from "node:fs/promises";
+
 import { planCycles } from "../../postgres-sync/src/cycle-calendar.js";
+import { HB_BUILD_LOCK_KEY, HB_BUILD_LOCK_NAMESPACE } from "../../postgres-sync/src/hb-build-transaction.js";
 import { buildCyclePreview, parseLengthRules, publishCyclePlan } from "../cycle-planner.js";
 
 const TODAY = "2026-10-29";
@@ -26,6 +29,7 @@ function fakeDatabase(cycles = []) {
     async query(sql, params = []) {
       state.calls.push({ sql: sql.trim().split(/\s+/).slice(0, 3).join(" "), params });
       if (/^(begin|commit|rollback)$/i.test(sql.trim())) return { rows: [] };
+      if (/pg_advisory_xact_lock/.test(sql)) return { rows: [] };
       if (/from hb\.cycles/.test(sql) && /^\s*select/i.test(sql)) {
         return { rows: state.cycles.filter(row => Number(row.start_date.slice(0, 4)) === params[0]).sort((a, b) => a.start_date.localeCompare(b.start_date)) };
       }
@@ -178,4 +182,18 @@ test("publishing an unchanged plan or one that drops published cycles is refused
 
   const fewer = await buildCyclePreview(db.client, { year: 2026, cycleCount: 24 }, TODAY);
   assert.ok(fewer.conflicts.some(conflict => conflict.code === "published_cycle_outside_plan"));
+});
+
+test("publish and migration 036 take the HB build gate before touching cycles", async () => {
+  const db = fakeDatabase(publishedYear(2026));
+  const body = { year: 2026, cycleCount: 25, lengthRules: "23+2" };
+  const preview = await buildCyclePreview(db.client, body, TODAY);
+  await publishCyclePlan(db.pool, { ...body, planHash: preview.planHash }, { today: TODAY });
+  const begin = db.state.calls.findIndex(call => call.sql === "begin");
+  assert.equal(db.state.calls[begin + 1].sql, "select pg_advisory_xact_lock($1::integer, $2::integer)");
+  assert.deepEqual(db.state.calls[begin + 1].params, [HB_BUILD_LOCK_NAMESPACE, HB_BUILD_LOCK_KEY]);
+
+  const migration = await readFile(new URL("../../../db/migrations/036_cycles_single_source.sql", import.meta.url), "utf8");
+  const firstStatement = migration.split(/\r?\n/).find(line => line.trim() && !line.startsWith("--"));
+  assert.equal(firstStatement, `select pg_advisory_xact_lock(${HB_BUILD_LOCK_NAMESPACE}, ${HB_BUILD_LOCK_KEY});`);
 });

@@ -3,6 +3,7 @@
 // database reads, lock rules and the publish transaction.
 import { createHash, randomUUID } from "node:crypto";
 import { DEFAULT_COMPANY_CALENDAR, companyClosures, diffCyclePlans, planCycles } from "../postgres-sync/src/cycle-calendar.js";
+import { HB_BUILD_LOCK_KEY, HB_BUILD_LOCK_NAMESPACE } from "../postgres-sync/src/hb-build-transaction.js";
 
 const MAX_CYCLES = 60;
 
@@ -212,6 +213,8 @@ export async function publishCyclePlan(pool, body, { today, actorEmail = "", cal
   const client = await pool.connect();
   try {
     await client.query("begin");
+    // Same gate as HB rebuilds, which also update hb.cycles: wait for them instead of deadlocking.
+    await client.query("select pg_advisory_xact_lock($1::integer, $2::integer)", [HB_BUILD_LOCK_NAMESPACE, HB_BUILD_LOCK_KEY]);
     const published = await loadPublishedCycles(client, inputs.year, { forUpdate: true });
     const preview = await previewFromPublished(client, inputs, published, calendar);
     if (!preview.ok) throw plannerError("The plan has conflicts and cannot be published.", 409, { code: "PLAN_CONFLICTS", conflicts: preview.conflicts });
