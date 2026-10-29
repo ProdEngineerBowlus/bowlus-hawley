@@ -1714,3 +1714,8 @@ a {
     grid-column: auto;
   }
 }
+
+.cycle-days-input {
+  width: 72px;
+  min-height: 32px;
+}

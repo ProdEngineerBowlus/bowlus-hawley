@@ -1636,7 +1636,7 @@
           </div>
         </div>
         <div class="panel-body">
-          <p class="muted">Rules: <strong>22-25=8</strong> fixes cycles 22-25 at 8 working days, <strong>20+4</strong> extends cycle 20 by 4 days. Remaining working days are spread evenly over the other cycles. Past cycles are locked. The current cycle keeps its start date and can be extended or shortened.</p>
+          <p class="muted">Type a number in Days to set that cycle's length, or use rules: <strong>22-25=8</strong> fixes cycles 22-25 at 8 working days, <strong>20+4</strong> extends cycle 20 by 4 days. Remaining working days are spread evenly over the other cycles. Past cycles are locked. The current cycle keeps its start date and can be extended or shortened.</p>
           <p class="muted">Closures ${escapeHtml(planner?.year || "")}: ${escapeHtml(closures.map(c => `${c.name} ${formatDate(c.date)}`).join(", ") || "none")}</p>
           ${planner?.scheduleDateMismatches ? `<div class="notice risk">${escapeHtml(`${formatNumber(planner.scheduleDateMismatches)} production schedule rows have dates that differ from their cycle.`)}</div>` : ""}
           ${state.cyclePlanMessage ? `<div class="notice ${preview && !preview.ok ? "risk" : ""}">${escapeHtml(state.cyclePlanMessage)}</div>` : ""}
@@ -1657,7 +1657,9 @@
                 <tr class="${row.status === "changed" || row.status === "new" ? "cycle-plan-changed" : ""}">
                   <td><strong>${escapeHtml(row.cycleLabel || `C${row.cycle}`)}</strong></td>
                   <td>${escapeHtml(`${formatDate(row.startDate)} - ${formatDate(row.endDate)}`)}</td>
-                  <td>${escapeHtml(formatNumber(row.days))}</td>
+                  <td>${row.source === "locked"
+                    ? escapeHtml(formatNumber(row.days))
+                    : `<input class="table-input cycle-days-input" type="number" min="1" max="99" step="1" data-cycle-days="${escapeAttr(row.cycle)}" value="${escapeAttr(row.days)}" aria-label="Working days for ${escapeAttr(row.cycleLabel || `C${row.cycle}`)}" />`}</td>
                   <td>${escapeHtml(row.source)}${row.status === "new" ? " · new" : ""}</td>
                   <td>${escapeHtml(row.status === "changed" ? cycleRangeText(row.published) : row.status === "new" ? "Not published" : "Same")}</td>
                   <td>${escapeHtml(row.impact ? `${formatNumber(row.impact.vins)} VINs · ${formatNumber(row.impact.scheduleRows)} schedule rows · ${formatNumber(row.impact.taskInstances)} tasks` : "")}</td>
@@ -2013,6 +2015,20 @@
   });
 
   root.addEventListener("change", event => {
+    // Typing a cycle's days writes a "cycle=days" rule (replacing that cycle's single-cycle rules)
+    // and re-previews, so the other cycles rebalance around it.
+    const daysInput = event.target.closest("[data-cycle-days]");
+    if (daysInput) {
+      const cycle = Number(daysInput.dataset.cycleDays);
+      const days = Number(daysInput.value);
+      const rulesInput = root.querySelector('[data-cycle-plan="lengthRules"]');
+      if (!Number.isInteger(days) || days < 1 || !rulesInput) return;
+      const ownRule = new RegExp(`^c?${cycle}\\s*[=+]`, "i");
+      const rules = rulesInput.value.split(",").map(rule => rule.trim()).filter(rule => rule && !ownRule.test(rule));
+      rulesInput.value = [...rules, `${cycle}=${days}`].join(", ");
+      root.querySelector('[data-action="cycle-plan-preview"]')?.click();
+      return;
+    }
     const taskSelect = event.target.closest("[data-capacity-task-select]");
     if (taskSelect) {
       const actionId = taskSelect.dataset.actionId || "";
