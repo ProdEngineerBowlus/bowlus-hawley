@@ -1,6 +1,21 @@
 # Cycle calendar generator
 
-Replaces the Airtable Cycles script (`original-airtable-cycles.js`) with deterministic, tested calendar arithmetic in `apps/postgres-sync/src/cycle-calendar.js`. This first slice is a pure library: it reads and writes no database and changes nothing in production. Persisting, previewing and publishing plans in Hawley is the next slice. Tracks #4.
+Replaces the Airtable Cycles script (`original-airtable-cycles.js`) with deterministic, tested calendar arithmetic in `apps/postgres-sync/src/cycle-calendar.js`, plus an admin **Cycles** tab that previews and publishes a year's calendar into `hb.cycles`. Tracks #4.
+
+## Admin Cycles tab
+
+Admin page > Cycles. Pick a year, the first cycle's start date, the first cycle number and the cycle count, add optional length rules, then Preview. The preview lists every cycle with its type (locked, fixed, flexible), the currently published dates, how many VINs, schedule rows and tasks each changed cycle affects, and any problems. Publish is enabled only when there are no problems and something changes.
+
+- Rules: `22-25=8` fixes cycles 22-25 at 8 working days, `20=12` fixes one cycle, `20+4` extends cycle 20 by 4 working days over its published length. Separate rules with commas.
+- Cycles whose start date is today or earlier (shop time) are locked: never moved, never resized.
+- Published cycles are never deleted. A plan with fewer cycles than are published is refused.
+- Publishing recomputes the plan inside one transaction and refuses if anything differs from the approved preview (`PLAN_STALE`).
+- Existing cycles are updated in place and keep their `cycle_record_id`; new cycles get `hawley-cycle:<year>-<nn>` and labels like `C1.27`. Written rows are marked `source_system = 'hawley_cycle_planner'`.
+- The matching `hb.production_schedule` rows get the new start/end dates and day counts in the same transaction.
+- Every publish inserts an append-only row in `hb.cycle_plan_versions` (migration 035): inputs, resulting cycles, the year's previous `hb.cycles` rows, changed cycle numbers, note and publisher. To roll back, use `previous_cycles_json` from that row.
+- Not changed by publishing: Asana tasks that already exist keep their dates; task instances keep their cycle links.
+
+Endpoints (admin only): `GET /api/admin/cycle-planner?year=`, `POST /api/admin/cycle-planner/preview`, `POST /api/admin/cycle-planner/publish`.
 
 ## Company closures
 
@@ -23,4 +38,6 @@ Intentional differences from the Airtable script: no hard-coded July 3, no quart
 
 ## Validation
 
-`npm test` covers 2026 and 2027 closure dates, an even 25-cycle 2026 plan (255 working days), fixing cycles 22-25 at eight days, extending two upcoming cycles by four days with completed cycles locked, a locked cycle mid-year, and each conflict type.
+`apps/hawley-worker-page/test/cycle-planner.test.js` covers rule parsing, locking, in-place updates with schedule sync, version records, stale previews, new-year creation and refusal cases. The tab was exercised end to end in a browser against an in-memory database. It has not yet been checked against live `hb.cycles` data.
+
+`npm test` also covers 2026 and 2027 closure dates, an even 25-cycle 2026 plan (255 working days), fixing cycles 22-25 at eight days, extending two upcoming cycles by four days with completed cycles locked, a locked cycle mid-year, and each conflict type.

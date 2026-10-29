@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 import { promisify } from "node:util";
 import pg from "pg";
 import { taskAttachmentsFromStorage, createAttachmentUrlProvider } from "./attachment-storage.js";
+import { buildCyclePreview, cyclePlannerOverview, publishCyclePlan } from "./cycle-planner.js";
 import { getDatabaseConfig } from "../postgres-sync/src/config.js";
 
 const { Pool } = pg;
@@ -11185,6 +11186,31 @@ async function adminCycleRowForNumber(cycleNumber, requestedIdentity = {}) {
   return result.rows[0] || null;
 }
 
+async function handleAdminCyclePlannerOverview(req, url) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const today = todayIso();
+  const year = Number(url.searchParams.get("year")) || Number(today.slice(0, 4));
+  return cyclePlannerOverview(pool, year, today);
+}
+
+async function handleAdminCyclePlannerPreview(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  return buildCyclePreview(pool, await readJsonBody(req), todayIso());
+}
+
+async function handleAdminCyclePlannerPublish(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const result = await publishCyclePlan(writePool, await readJsonBody(req), {
+    today: todayIso(),
+    actorEmail: actor?.email || actor?.username || ""
+  });
+  console.log("[hawley-cycle-planner]", JSON.stringify({ action: "publish", ...result }));
+  return result;
+}
+
 async function handleAdminPhaseCyclePaceOverride(req) {
   const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
   requireAdminActor(actor);
@@ -13406,6 +13432,21 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/fabrication/fab-skill-sections" && req.method === "POST") {
       sendJson(res, 200, await handleAdminFabSkillSectionMigration(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/cycle-planner" && req.method === "GET") {
+      sendJson(res, 200, await handleAdminCyclePlannerOverview(req, url));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/cycle-planner/preview" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminCyclePlannerPreview(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/cycle-planner/publish" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminCyclePlannerPublish(req));
       return;
     }
 

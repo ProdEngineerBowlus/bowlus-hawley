@@ -1681,3 +1681,36 @@ a {
     grid-template-columns: 1fr;
   }
 }
+
+.cycle-plan-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+  align-items: end;
+}
+
+.cycle-plan-rules {
+  grid-column: span 2;
+}
+
+.cycle-plan-actions,
+.cycle-plan-publish {
+  display: flex;
+  gap: 10px;
+  align-items: end;
+  flex-wrap: wrap;
+}
+
+.cycle-plan-publish .field {
+  flex: 1 1 320px;
+}
+
+.cycle-plan-changed td {
+  background: rgba(214, 170, 72, 0.12);
+}
+
+@media (max-width: 720px) {
+  .cycle-plan-rules {
+    grid-column: auto;
+  }
+}
