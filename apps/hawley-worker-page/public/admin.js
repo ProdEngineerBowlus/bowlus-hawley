@@ -1633,11 +1633,12 @@
           <div class="inline-actions cycle-plan-actions">
             <button class="btn" type="button" data-action="cycle-plan-load" ${state.cyclePlanLoading ? "disabled" : ""}>Load year</button>
             <button class="btn primary" type="button" data-action="cycle-plan-preview" ${state.cyclePlanLoading || !planner ? "disabled" : ""}>Preview</button>
-            <button class="btn" type="button" data-action="cycle-plan-balance" title="Clear typed lengths and spread the remaining working days evenly" ${state.cyclePlanLoading || !planner ? "disabled" : ""}>Balance remaining</button>
+            <button class="btn" type="button" data-action="cycle-plan-balance" title="Keep the lengths you typed and spread the remaining working days over the other cycles" ${state.cyclePlanLoading || !planner ? "disabled" : ""}>Balance remaining</button>
+            <button class="btn ghost" type="button" data-action="cycle-plan-reset" title="Clear typed lengths and return to the published cycles" ${state.cyclePlanLoading || !planner ? "disabled" : ""}>Reset</button>
           </div>
         </div>
         <div class="panel-body">
-          <p class="muted">Type a number in Days to set that cycle's length, or use rules: <strong>22-25=8</strong> fixes cycles 22-25 at 8 working days, <strong>20+4</strong> extends cycle 20 by 4 days. Remaining working days are spread evenly over the other cycles. Past cycles are locked. The current cycle keeps its start date and can be extended or shortened.</p>
+          <p class="muted">Type a number in Days to fix that cycle's length, then Balance remaining spreads the other cycles (longest first). Reset clears your numbers. Rules also work: <strong>22-25=8</strong> fixes cycles 22-25 at 8 working days, <strong>20+4</strong> extends cycle 20 by 4 days. Remaining working days are spread evenly over the other cycles. Past cycles are locked. The current cycle keeps its start date and can be extended or shortened.</p>
           <p class="muted">Closures ${escapeHtml(planner?.year || "")}: ${escapeHtml(closures.map(c => `${c.name} ${formatDate(c.date)}`).join(", ") || "none")}</p>
           ${planner?.scheduleDateMismatches ? `<div class="notice risk">${escapeHtml(`${formatNumber(planner.scheduleDateMismatches)} production schedule rows have dates that differ from their cycle.`)}</div>` : ""}
           ${state.cyclePlanMessage ? `<div class="notice ${preview && !preview.ok ? "risk" : ""}">${escapeHtml(state.cyclePlanMessage)}</div>` : ""}
@@ -1794,8 +1795,9 @@
       state.cyclePlanYear = root.querySelector("[data-cycle-plan-year]")?.value || state.cyclePlanYear;
       await loadCyclePlanner();
     } else if (action === "cycle-plan-balance") {
-      // Clearing every length rule leaves past cycles locked, the current cycle at its published end,
-      // and all later cycles flexible, so the preview spreads the remaining days evenly.
+      // Typed lengths stay fixed; every other future cycle shares the remaining working days, longest first.
+      root.querySelector('[data-action="cycle-plan-preview"]')?.click();
+    } else if (action === "cycle-plan-reset") {
       const rulesInput = root.querySelector('[data-cycle-plan="lengthRules"]');
       if (rulesInput) rulesInput.value = "";
       root.querySelector('[data-action="cycle-plan-preview"]')?.click();
