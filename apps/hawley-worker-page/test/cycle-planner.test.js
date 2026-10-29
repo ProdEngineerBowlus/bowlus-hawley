@@ -90,6 +90,29 @@ test("a started cycle whose stored length differs from the calendar is shown unc
   assert.deepEqual(preview.changedCycleNumbers, []);
 });
 
+test("overlapping started cycles (as in live 2026 data) are kept and later cycles still plan", async () => {
+  const cycles = publishedYear(2026);
+  // Live data: C20 starts before C19 and runs Oct 1 - Nov 2 (23 working days).
+  Object.assign(cycles[19], { start_date: "2026-10-01", end_date: "2026-11-02", days_in_cycle: 23 });
+  Object.assign(cycles[20], { start_date: "2026-11-03", end_date: "2026-11-12", days_in_cycle: 8 });
+  const db = fakeDatabase(cycles);
+  const preview = await buildCyclePreview(db.client, { year: 2026, cycleCount: 25 }, TODAY);
+  assert.equal(preview.ok, true, JSON.stringify(preview.conflicts));
+  assert.ok(preview.warnings.some(warning => warning.code === "locked_overlap"));
+  assert.deepEqual([preview.cycles[19].startDate, preview.cycles[19].endDate, preview.cycles[19].status], ["2026-10-01", "2026-11-02", "unchanged"]);
+  assert.deepEqual(preview.cycles.slice(20).map(c => [c.startDate, c.days]), [["2026-11-03", 9], ["2026-11-16", 8], ["2026-11-27", 8], ["2026-12-09", 8], ["2026-12-21", 8]]);
+  assert.equal(preview.cycles.at(-1).endDate, "2026-12-31");
+});
+
+test("working days before a locked first cycle are a warning, not a conflict", async () => {
+  const cycles = publishedYear(2026);
+  Object.assign(cycles[0], { start_date: "2026-01-12" });
+  const db = fakeDatabase(cycles);
+  const preview = await buildCyclePreview(db.client, { year: 2026, startDate: "2026-01-01", cycleCount: 25 }, TODAY);
+  assert.equal(preview.ok, true, JSON.stringify(preview.conflicts));
+  assert.ok(preview.warnings.some(warning => warning.code === "unassigned_days" && /before cycle 1/.test(warning.message)));
+});
+
 test("publishing a started cycle is refused as a conflict", async () => {
   const db = fakeDatabase(publishedYear(2026));
   const preview = await buildCyclePreview(db.client, { year: 2026, cycleCount: 25, lengthRules: "2=15" }, TODAY);
@@ -132,7 +155,7 @@ test("a stale preview is rejected and rolled back without writes", async () => {
   assert.equal(db.state.calls.at(-1).sql, "rollback");
 });
 
-test("a new year is created with year-qualified labels and stable IDs", async () => {
+test("a new year is created with the existing label style and stable IDs", async () => {
   const db = fakeDatabase(publishedYear(2026));
   const body = { year: 2027, cycleCount: 25, lengthRules: "" };
   const preview = await buildCyclePreview(db.client, body, TODAY);
@@ -141,7 +164,7 @@ test("a new year is created with year-qualified labels and stable IDs", async ()
   await publishCyclePlan(db.pool, { ...body, planHash: preview.planHash }, { today: TODAY });
   const created = db.state.cycles.filter(cycle => cycle.start_date.startsWith("2027"));
   assert.equal(created.length, 25);
-  assert.equal(created[0].cycle_label, "C1.27");
+  assert.equal(created[0].cycle_label, "C1");
   assert.equal(created[0].cycle_record_id, "hawley-cycle:2027-01");
   assert.equal(created.at(-1).end_date, "2027-12-30");
   assert.match(created.find(cycle => cycle.holidays.includes("Day After Thanksgiving")).holidays, /2027-11-26/);

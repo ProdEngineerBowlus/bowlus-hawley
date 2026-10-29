@@ -95,9 +95,10 @@ export function planHash(inputs, baseline, cycles) {
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 32);
 }
 
-// New rows follow the label style already used ("C12.26"); existing rows keep their label and ID.
-export function cycleLabelFor(year, cycleNumber) {
-  return `C${cycleNumber}.${String(year).slice(-2)}`;
+// New rows follow the label style already in hb.cycles ("C12"); the year comes from the start date,
+// and the app derives keys such as "C12.27" from it. Existing rows keep their label and ID.
+export function cycleLabelFor(cycleNumber) {
+  return `C${cycleNumber}`;
 }
 
 export function holidayText(holidays) {
@@ -153,7 +154,7 @@ async function previewFromPublished(db, inputs, published, calendar) {
     return {
       ...cycle,
       cycleRecordId: current?.cycleRecordId || null,
-      cycleLabel: current?.cycleLabel || cycleLabelFor(inputs.year, cycle.cycle),
+      cycleLabel: current?.cycleLabel || cycleLabelFor(cycle.cycle),
       status: current ? (changedSet.has(cycle.cycle) ? "changed" : "unchanged") : "new",
       published: current ? { startDate: current.startDate, endDate: current.endDate, days: current.days ?? null } : null,
       impact: impact ? { scheduleRows: impact.schedule_rows, vins: impact.vins, taskInstances: impact.task_instances } : null

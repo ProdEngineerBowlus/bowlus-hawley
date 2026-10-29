@@ -38,6 +38,8 @@ Intentional differences from the Airtable script: no hard-coded July 3, no quart
 
 ## Validation
 
-`apps/hawley-worker-page/test/cycle-planner.test.js` covers rule parsing, locking, in-place updates with schedule sync, version records, stale previews, new-year creation and refusal cases. The tab was exercised end to end in a browser against an in-memory database. It has not yet been checked against live `hb.cycles` data.
+`apps/hawley-worker-page/test/cycle-planner.test.js` covers rule parsing, locking, in-place updates with schedule sync, version records, stale previews, new-year creation and refusal cases. The tab was exercised end to end in a browser against an in-memory database.
+
+Live check, 2026-10-29 (read-only, `bowlus_readonly`): `hb.cycles` holds 25 cycles for 2026 only, labelled `C1`-`C25` with Airtable record IDs; all 308 linked production schedule rows match their cycle's dates. C20 is stored as 2026-10-01 to 2026-11-02 (23 days), overlapping C18 and C19; as a started cycle it is kept and reported as a warning. A no-rule 2026 preview changes C21-C23 only, because 2026-11-27 is a working day under the confirmed calendar but was a closure in the Airtable dates. A 2027 preview creates 25 new cycles with no conflicts.
 
 `npm test` also covers 2026 and 2027 closure dates, an even 25-cycle 2026 plan (255 working days), fixing cycles 22-25 at eight days, extending two upcoming cycles by four days with completed cycles locked, a locked cycle mid-year, and each conflict type.

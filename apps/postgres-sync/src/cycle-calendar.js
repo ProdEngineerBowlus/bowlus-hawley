@@ -168,8 +168,10 @@ export function planCycles({
   for (const cycle of numbers) {
     const anchor = anchors.get(cycle);
     if (!anchor) continue;
+    // Overlapping history is reported but kept as-is: locked dates are never rewritten. Any flexible
+    // cycle squeezed between overlapping locked cycles still fails with not_enough_days below.
     if (previous && anchor.startIndex <= previous.anchor.endIndex) {
-      fail("locked_overlap", `Locked cycles ${previous.cycle} and ${cycle} overlap or are out of order.`, [previous.cycle, cycle]);
+      warnings.push({ code: "locked_overlap", message: `Locked cycles ${previous.cycle} and ${cycle} overlap or are out of order; their dates are kept as published.`, cycles: [previous.cycle, cycle] });
     }
     previous = { cycle, anchor };
   }
@@ -206,19 +208,21 @@ export function planCycles({
   // Split into spans separated by locked cycles and solve each span independently.
   const spans = [];
   let span = { start: 0, cycles: [] };
+  let lockedThrough = -1;
   for (const cycle of numbers) {
     const anchor = anchors.get(cycle);
     if (!anchor) {
       span.cycles.push(cycle);
       continue;
     }
-    spans.push({ ...span, end: anchor.startIndex - 1, trailing: false });
-    span = { start: anchor.endIndex + 1, cycles: [] };
+    spans.push({ ...span, end: anchor.startIndex - 1, trailing: false, leading: !spans.length });
+    lockedThrough = Math.max(lockedThrough, anchor.endIndex);
+    span = { start: lockedThrough + 1, cycles: [] };
   }
   spans.push({ ...span, end: days.length - 1, trailing: true });
 
   const assigned = new Map();
-  for (const { start, end, cycles, trailing } of spans) {
+  for (const { start, end, cycles, trailing, leading } of spans) {
     const available = Math.max(0, end - start + 1);
     const flexible = cycles.filter(cycle => !fixed.has(cycle));
     const reserved = cycles.reduce((sum, cycle) => sum + (fixed.get(cycle) || 0), 0);
@@ -231,6 +235,8 @@ export function planCycles({
     if (!flexible.length && remaining > 0) {
       if (trailing) {
         warnings.push({ code: "unassigned_days", message: `${remaining} working days after cycle ${numbers.at(-1)} are not in any cycle.` });
+      } else if (leading && !cycles.length) {
+        warnings.push({ code: "unassigned_days", message: `${remaining} working days before cycle ${numbers[0]} are not in any cycle.` });
       } else {
         fail("gap_before_locked_cycle", `${label} leave ${remaining} working days uncovered before the next locked cycle.`, cycles);
         continue;
