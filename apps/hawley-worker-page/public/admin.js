@@ -35,7 +35,13 @@
     capacitySelectedActionIds: [],
     capacityLoading: false,
     capacityMessage: "",
-    configurationOpen: false
+    configurationOpen: false,
+    cyclePlanner: null,
+    cyclePlanYear: String(new Date().getFullYear() + 1),
+    cyclePlanForm: null,
+    cyclePlanPreview: null,
+    cyclePlanLoading: false,
+    cyclePlanMessage: ""
   };
 
   function escapeHtml(value) {
@@ -621,6 +627,7 @@
         <nav class="nav-tabs" aria-label="Admin views">
           <button class="nav-tab ${state.activeView === "dashboard" ? "active" : ""}" type="button" data-view="dashboard">Dashboard</button>
           <button class="nav-tab ${state.activeView === "project" ? "active" : ""}" type="button" data-view="project">Project Creator</button>
+          <button class="nav-tab ${state.activeView === "cycles" ? "active" : ""}" type="button" data-view="cycles">Cycles</button>
         </nav>
         <div class="top-actions">
           <a class="btn ghost" href="/">Live app</a>
@@ -1554,6 +1561,128 @@
     `;
   }
 
+  function defaultCyclePlanForm(planner) {
+    const published = planner?.published || [];
+    return {
+      startDate: published[0]?.startDate || `${planner?.year || state.cyclePlanYear}-01-01`,
+      cycleCount: String(published.length || 25),
+      firstCycleNumber: String(published[0]?.cycle || 1),
+      lengthRules: "",
+      note: ""
+    };
+  }
+
+  async function loadCyclePlanner() {
+    state.cyclePlanLoading = true;
+    state.cyclePlanMessage = "";
+    render();
+    try {
+      state.cyclePlanner = await fetchJson(`/api/admin/cycle-planner?year=${encodeURIComponent(state.cyclePlanYear)}`);
+      state.cyclePlanForm = defaultCyclePlanForm(state.cyclePlanner);
+      state.cyclePlanPreview = null;
+    } catch (error) {
+      state.cyclePlanMessage = error.message || "Could not load cycles.";
+    } finally {
+      state.cyclePlanLoading = false;
+      render();
+    }
+  }
+
+  function readCyclePlanForm() {
+    const value = name => root.querySelector(`[data-cycle-plan="${name}"]`)?.value ?? "";
+    state.cyclePlanForm = {
+      startDate: value("startDate"),
+      cycleCount: value("cycleCount"),
+      firstCycleNumber: value("firstCycleNumber"),
+      lengthRules: value("lengthRules"),
+      note: value("note")
+    };
+    return {
+      year: Number(state.cyclePlanYear),
+      startDate: state.cyclePlanForm.startDate,
+      cycleCount: Number(state.cyclePlanForm.cycleCount),
+      firstCycleNumber: Number(state.cyclePlanForm.firstCycleNumber),
+      lengthRules: state.cyclePlanForm.lengthRules
+    };
+  }
+
+  function cycleRangeText(row) {
+    return row ? `${formatDate(row.startDate)} - ${formatDate(row.endDate)} (${formatNumber(row.days)}d)` : "";
+  }
+
+  function renderCyclePlanner() {
+    const planner = state.cyclePlanner;
+    const form = state.cyclePlanForm || defaultCyclePlanForm(planner);
+    const preview = state.cyclePlanPreview;
+    const rows = preview?.cycles || (planner?.published || []).map(row => ({ ...row, source: row.locked ? "locked" : "published", status: "unchanged" }));
+    const closures = preview?.closures || planner?.closures || [];
+    const changedCount = preview ? preview.changedCycleNumbers.length : 0;
+    const canPublish = preview?.ok && changedCount > 0 && !state.cyclePlanLoading;
+    return `
+      <section class="panel">
+        <div class="panel-header">
+          <h3 class="panel-title">Cycle Calendar</h3>
+          <span class="pill">${escapeHtml(planner ? `${formatNumber(planner.published.length)} published cycles in ${planner.year}` : "Loading")}</span>
+        </div>
+        <div class="panel-body cycle-plan-form">
+          <label class="field"><span>Year</span><input type="number" min="2020" max="2100" data-cycle-plan-year value="${escapeAttr(state.cyclePlanYear)}" /></label>
+          <label class="field"><span>First cycle starts</span><input type="date" data-cycle-plan="startDate" value="${escapeAttr(form.startDate)}" /></label>
+          <label class="field"><span>First cycle number</span><input type="number" min="1" data-cycle-plan="firstCycleNumber" value="${escapeAttr(form.firstCycleNumber)}" /></label>
+          <label class="field"><span>Cycles in year</span><input type="number" min="1" max="60" data-cycle-plan="cycleCount" value="${escapeAttr(form.cycleCount)}" /></label>
+          <label class="field cycle-plan-rules"><span>Fixed lengths (working days)</span><input type="text" data-cycle-plan="lengthRules" value="${escapeAttr(form.lengthRules)}" placeholder="22-25=8, 20+4" /></label>
+          <div class="inline-actions cycle-plan-actions">
+            <button class="btn" type="button" data-action="cycle-plan-load" ${state.cyclePlanLoading ? "disabled" : ""}>Load year</button>
+            <button class="btn primary" type="button" data-action="cycle-plan-preview" ${state.cyclePlanLoading || !planner ? "disabled" : ""}>Preview</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <p class="muted">Rules: <strong>22-25=8</strong> fixes cycles 22-25 at 8 working days, <strong>20+4</strong> extends cycle 20 by 4 days. Remaining working days are spread evenly over the other cycles. Cycles that have started are locked and never move.</p>
+          <p class="muted">Closures ${escapeHtml(planner?.year || "")}: ${escapeHtml(closures.map(c => `${c.name} ${formatDate(c.date)}`).join(", ") || "none")}</p>
+          ${state.cyclePlanMessage ? `<div class="notice ${preview && !preview.ok ? "risk" : ""}">${escapeHtml(state.cyclePlanMessage)}</div>` : ""}
+          ${(preview?.conflicts || []).map(c => `<div class="notice risk">${escapeHtml(c.message)}</div>`).join("")}
+          ${(preview?.warnings || []).map(w => `<div class="notice">${escapeHtml(w.message)}</div>`).join("")}
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-header">
+          <h3 class="panel-title">${preview ? `Preview - ${formatNumber(changedCount)} cycles change` : "Published cycles"}</h3>
+          ${preview ? `<span class="pill">${formatNumber(preview.workingDayCount || 0)} working days</span>` : ""}
+        </div>
+        <div class="panel-body table-wrap">
+          <table class="table">
+            <thead><tr><th>Cycle</th><th>Dates</th><th>Days</th><th>Type</th><th>Published now</th><th>Affected</th><th>Holidays</th></tr></thead>
+            <tbody>
+              ${rows.map(row => `
+                <tr class="${row.status === "changed" || row.status === "new" ? "cycle-plan-changed" : ""}">
+                  <td><strong>${escapeHtml(row.cycleLabel || `C${row.cycle}`)}</strong></td>
+                  <td>${escapeHtml(`${formatDate(row.startDate)} - ${formatDate(row.endDate)}`)}</td>
+                  <td>${escapeHtml(formatNumber(row.days))}</td>
+                  <td>${escapeHtml(row.source)}${row.status === "new" ? " · new" : ""}</td>
+                  <td>${escapeHtml(row.status === "changed" ? cycleRangeText(row.published) : row.status === "new" ? "Not published" : "Same")}</td>
+                  <td>${escapeHtml(row.impact ? `${formatNumber(row.impact.vins)} VINs · ${formatNumber(row.impact.scheduleRows)} schedule rows · ${formatNumber(row.impact.taskInstances)} tasks` : "")}</td>
+                  <td>${escapeHtml((row.holidays || []).map(h => h.name).join(", "))}</td>
+                </tr>
+              `).join("") || `<tr><td colspan="7">No cycles published for this year. Preview a plan to create them.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+        ${preview ? `
+          <div class="panel-body cycle-plan-publish">
+            <label class="field"><span>Reason for this change</span><input type="text" data-cycle-plan="note" value="${escapeAttr(form.note)}" placeholder="e.g. Extend C20-C21 for model changeover" /></label>
+            <button class="btn primary" type="button" data-action="cycle-plan-publish" ${canPublish ? "" : "disabled"}>Publish ${formatNumber(changedCount)} cycle changes</button>
+          </div>
+          <div class="panel-body"><p class="muted">Publishing updates cycle dates and the production schedule rows in those cycles. Asana tasks that were already created keep their existing dates.</p></div>
+        ` : ""}
+      </section>
+      <section class="panel">
+        <div class="panel-header"><h3 class="panel-title">Published versions</h3></div>
+        <div class="panel-body">
+          ${(planner?.versions || []).map(v => `<p>${escapeHtml(new Date(v.published_at).toLocaleString())} - ${escapeHtml(v.published_by || "admin")} - cycles ${escapeHtml((v.changed_cycle_numbers || []).join(", "))}${v.note ? ` - ${escapeHtml(v.note)}` : ""}</p>`).join("") || `<p class="muted">No calendar versions published from Hawley yet.</p>`}
+        </div>
+      </section>
+    `;
+  }
+
   function renderApp() {
     if (state.loading) {
       return `
@@ -1575,7 +1704,7 @@
       <div class="admin-shell">
         ${renderTopbar()}
         <main class="admin-main">
-          ${state.activeView === "project" ? renderProjectCreator() : renderDashboard()}
+          ${state.activeView === "project" ? renderProjectCreator() : state.activeView === "cycles" ? renderCyclePlanner() : renderDashboard()}
         </main>
       </div>
     `;
@@ -1597,9 +1726,11 @@
   root.addEventListener("click", async event => {
     const viewButton = event.target.closest("[data-view]");
     if (viewButton) {
-      state.activeView = viewButton.dataset.view === "project" ? "project" : "dashboard";
+      state.activeView = ["project", "cycles"].includes(viewButton.dataset.view) ? viewButton.dataset.view : "dashboard";
       render();
-      if (state.activeView === "project" && !state.project && !state.projectLoading) {
+      if (state.activeView === "cycles") {
+        if (!state.cyclePlanner) await loadCyclePlanner();
+      } else if (state.activeView === "project" && !state.project && !state.projectLoading) {
         try {
           await loadProjectCreator();
         } catch (error) {
@@ -1655,6 +1786,43 @@
       await loadAll();
     } else if (action === "logout") {
       await logout();
+    } else if (action === "cycle-plan-load") {
+      state.cyclePlanYear = root.querySelector("[data-cycle-plan-year]")?.value || state.cyclePlanYear;
+      await loadCyclePlanner();
+    } else if (action === "cycle-plan-preview") {
+      const body = readCyclePlanForm();
+      state.cyclePlanLoading = true;
+      state.cyclePlanMessage = "";
+      render();
+      try {
+        state.cyclePlanPreview = await postJson("/api/admin/cycle-planner/preview", body);
+        const count = state.cyclePlanPreview.changedCycleNumbers.length;
+        state.cyclePlanMessage = state.cyclePlanPreview.ok
+          ? (count ? `${count} cycles would change. Review, then publish.` : "This plan matches the published cycles.")
+          : "Fix the problems below before publishing.";
+      } catch (error) {
+        state.cyclePlanPreview = null;
+        state.cyclePlanMessage = error.message || "Could not preview the plan.";
+      } finally {
+        state.cyclePlanLoading = false;
+        render();
+      }
+    } else if (action === "cycle-plan-publish") {
+      const preview = state.cyclePlanPreview;
+      const body = readCyclePlanForm();
+      if (!preview || !window.confirm(`Publish ${preview.changedCycleNumbers.length} cycle changes for ${state.cyclePlanYear}?`)) return;
+      state.cyclePlanLoading = true;
+      render();
+      try {
+        const result = await postJson("/api/admin/cycle-planner/publish", { ...body, planHash: preview.planHash, note: state.cyclePlanForm.note });
+        await loadCyclePlanner();
+        state.cyclePlanMessage = `Published ${result.changedCycleNumbers.length} cycle changes.`;
+      } catch (error) {
+        state.cyclePlanMessage = error.message || "Could not publish the plan.";
+      } finally {
+        state.cyclePlanLoading = false;
+        render();
+      }
     } else if (action === "capacity-preview") {
       state.capacityLoading = true;
       state.capacityMessage = "";
