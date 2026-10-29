@@ -9,3 +9,11 @@ Phase Cycle Load Rev1 remains connected: the admin dashboard still selects the A
 Validation: inspect all references to both retired raw tables, verify only count diagnostics remain, run the existing test suite and syntax checks. No new calculations or assignment/time behavior are introduced.
 
 Rollback: revert the two source-list changes and redeploy; retained raw tables and credentials support resuming imports. This is the first disconnection step, not the full Airtable cutover.
+
+## Phase-cycle load follow-up
+
+The admin Dashboard now uses hb.phase_cycle_load_rev1 exclusively. Airtable timestamp comparison and fallback queries are removed, including when HB returns no rows. An empty HB result remains empty; retained Airtable rows cannot reintroduce stale workload. Diagnostics identify the HB source and airtablePhaseCycleLoadFallbackEnabled=false.
+
+Phase Cycle Load Rev1 is removed from the full importer and source health checks, leaving 11 active source tables. Existing raw rows and raw count diagnostics remain historical evidence. No task, worker, calendar, production, assignment or time data is deleted. This follows the user's explicit authorization to retire the dashboard fallback. Earlier paragraphs describe the first deployment; this follow-up supersedes the instruction to retain Phase Cycle Load.
+
+Rollback: revert this follow-up commit to restore both the import and dashboard fallback together. The existing tests and syntax checks are required before deployment.
