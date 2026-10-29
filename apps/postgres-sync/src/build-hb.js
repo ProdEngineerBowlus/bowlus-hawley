@@ -1,3 +1,4 @@
+import { pathToFileURL } from "node:url";
 import pg from "pg";
 import { getDatabaseConfig } from "./config.js";
 import { withHbBuildTransaction } from "./hb-build-transaction.js";
@@ -1871,6 +1872,46 @@ function actualsRow(raw) {
   };
 }
 
+// Runtime ownership: base/reference tables and historical actuals belong to Hawley.
+// Cached Airtable rows are retained for recovery but never reapplied here.
+export async function normalizeHawleyTables(client) {
+  const workers = (await client.query("select * from hb.work_force")).rows;
+  const cycles = (await client.query("select * from hb.cycles")).rows;
+  const phases = (await client.query("select * from hb.phases")).rows;
+  const models = (await client.query("select * from hb.models")).rows;
+  if (!workers.length || !cycles.length || !phases.length) {
+    throw new Error("Hawley reference tables must be populated before native rebuild; refusing bootstrap from Airtable.");
+  }
+  for (const cycle of cycles) {
+    const percent = computeCyclePercent({startDate: dateValue(cycle.start_date), endDate: dateValue(cycle.end_date), daysInCycle: cycle.days_in_cycle, holidays: cycle.holidays});
+    if (percent !== null && percent !== Number(cycle.cycle_percent)) {
+      await client.query("update hb.cycles set cycle_percent=$2, normalized_at=now() where cycle_record_id=$1", [cycle.cycle_record_id,percent]);
+      cycle.cycle_percent = percent;
+    }
+  }
+  const lookups = {...buildLookups(workers,cycles,phases),models:new Map(models.map(row=>[row.model_record_id,row]))};
+  const asanaRows = await rawAsanaPortfolioTaskRows(client);
+  const asanaByGid = new Map(asanaRows.map(row=>[row.gid,row]));
+  const existing = (await client.query("select * from hb.rev1_task_instances")).rows;
+  const knownGids = new Set(existing.map(row=>row.asana_task_gid).filter(Boolean));
+  const updates = existing.filter(row=>asanaByGid.has(row.asana_task_gid)).map(row=> {
+    const merged = applyAsanaOverlay({...row},asanaByGid.get(row.asana_task_gid),lookups);
+    return Object.fromEntries(["rev1_task_instance_id",...PROJECT_CREATOR_ASANA_OVERLAY_COLUMNS].map(key=>[key,merged[key]]));
+  });
+  // UPDATE only: preserve identity, origin, unmatched history and native metadata.
+  const assignments = PROJECT_CREATOR_ASANA_OVERLAY_COLUMNS.map(key=>`${quoteIdent(key)}=source.${quoteIdent(key)}`).join(",");
+  for (const batch of chunk(updates,250)) {
+    await client.query(`update hb.rev1_task_instances target set ${assignments}, normalized_at=now()
+      from jsonb_populate_recordset(null::hb.rev1_task_instances,$1::jsonb) source
+      where target.rev1_task_instance_id=source.rev1_task_instance_id`,[JSON.stringify(batch)]);
+  }
+  const newRows = asanaRows.filter(row=>row.gid && !knownGids.has(row.gid)).map(row=>asanaTaskRow(row,lookups));
+  await upsertRows(client,"hb.rev1_task_instances","airtable_record_id",newRows,150);
+  return {source:"hawley",workers:workers.length,cycles:cycles.length,phases:phases.length,
+    asanaUpdated:updates.length,asanaAdded:newRows.length,retainedTaskInstances:existing.length,
+    airtableReads:0,historicalActuals:"preserved"};
+}
+
 async function normalizeBaseTables(client) {
   const workerRaw = await rawRows(client, "raw.airtable_work_force");
   const cycleRaw = await rawRows(client, "raw.airtable_cycles");
@@ -2056,7 +2097,7 @@ function phaseNameMaps(phasesById) {
   return { byName, byNormalizedName };
 }
 
-async function rebuildCalculations(client) {
+export async function rebuildCalculations(client) {
   const { tasks, workersById, cyclesById, phasesById } = await loadHbRows(client);
   const { byName: phaseIdByName, byNormalizedName: phaseIdByNormalizedName } = phaseNameMaps(phasesById);
 
@@ -2260,7 +2301,7 @@ async function main() {
 
   try {
     const { normalized, rebuilt, capabilityRefresh } = await withHbBuildTransaction(client, async () => {
-      const normalized = await normalizeBaseTables(client);
+      const normalized = await normalizeHawleyTables(client);
       const rebuilt = await rebuildCalculations(client);
       const capabilityRefresh = (await client.query(
         "select core.refresh_worker_task_capabilities() as summary"
@@ -2279,7 +2320,7 @@ async function main() {
   }
 }
 
-main().catch(error => {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => {
   console.error("Hawley Brain build failed.");
   console.error(error.stack || error.message);
   process.exitCode = 1;

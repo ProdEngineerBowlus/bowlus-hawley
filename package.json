@@ -20,7 +20,7 @@
     "pg:writeback:airtable-task-times": "node ./apps/postgres-sync/src/writeback-airtable-task-times.js",
     "pg:load:ops-hints": "node ./apps/postgres-sync/src/load-ops-owner-hints.js",
     "pg:refresh-worker-read-model": "npm run pg:pull:asana && npm run pg:build:hb",
-    "pg:refresh-hawley-read-model": "npm run pg:pull:airtable && npm run pg:normalize && npm run pg:pull:asana && npm run pg:build:hb",
+    "pg:refresh-hawley-read-model": "npm run pg:pull:asana && npm run pg:build:hb",
     "pg:refresh:current-assignments": "npm run pg:pull:airtable-current-assignments && npm run pg:normalize && npm run pg:build:hb",
     "pg:refresh-legacy-airtable-bootstrap": "npm run pg:pull:airtable && npm run pg:normalize && npm run pg:build:hb",
     "pg:refresh-all": "npm run pg:refresh-hawley-read-model",

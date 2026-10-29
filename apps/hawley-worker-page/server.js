@@ -44,7 +44,7 @@ const AUTOMATIC_BENDING_STUDY_WATCH_INTERVAL_MS = Number(process.env.HAWLEY_AUTO
 const AUTOMATIC_BENDING_TEMPLATE_REFRESH_INTERVAL_MS = Number(process.env.HAWLEY_AUTOMATIC_BENDING_TEMPLATE_REFRESH_INTERVAL_MS || 300000);
 const NIGHTLY_REFRESH_TIME = process.env.HAWLEY_NIGHTLY_REFRESH_TIME || "01:00";
 const NIGHTLY_REFRESH_TIME_ZONE = process.env.HAWLEY_NIGHTLY_REFRESH_TIME_ZONE || "America/Los_Angeles";
-const NIGHTLY_REFRESH_SCRIPT = process.env.HAWLEY_NIGHTLY_REFRESH_SCRIPT || "pg:refresh-hawley-read-model";
+const NIGHTLY_REFRESH_SCRIPT = "pg:refresh-hawley-read-model"; // Fixed native pipeline; ignore legacy overrides.
 const NIGHTLY_AIRTABLE_BACKFILL_SCRIPT = process.env.HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_SCRIPT || "pg:backfill:airtable-worker-actuals";
 const NIGHTLY_AIRTABLE_BACKFILL_WINDOW_DAYS = Number(process.env.HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_WINDOW_DAYS || process.env.HAWLEY_AIRTABLE_BACKFILL_WINDOW_DAYS || 2);
 const APPLY_MIGRATIONS_ON_START = booleanEnv("HAWLEY_APPLY_MIGRATIONS_ON_START", process.env.NODE_ENV === "production");
@@ -542,17 +542,11 @@ function shouldStartAsanaEventWatcher() {
 }
 
 function shouldStartWorkerActualsWatcher() {
-  if (process.env.HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB !== undefined) {
-    return booleanEnv("HAWLEY_WORKER_ACTUALS_WATCH_IN_WEB", false);
-  }
-  return process.env.NODE_ENV === "production";
+  return false; // Retired: Hawley owns live time records.
 }
 
 function shouldStartAirtableTaskTimeWriteback() {
-  if (process.env.HAWLEY_AIRTABLE_TASK_TIME_WRITEBACK_IN_WEB !== undefined) {
-    return booleanEnv("HAWLEY_AIRTABLE_TASK_TIME_WRITEBACK_IN_WEB", false);
-  }
-  return process.env.NODE_ENV === "production";
+  return false; // Retired: Hawley owns live time records.
 }
 
 function shouldStartAirtableCurrentAssignmentsWatcher() {
@@ -569,10 +563,7 @@ function shouldStartNightlyRefreshScheduler() {
 }
 
 function shouldRunNightlyAirtableBackfill() {
-  if (process.env.HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_ENABLED !== undefined) {
-    return booleanEnv("HAWLEY_NIGHTLY_AIRTABLE_BACKFILL_ENABLED", false);
-  }
-  return process.env.NODE_ENV === "production";
+  return false; // Retired: Hawley owns live time records.
 }
 
 function shouldApplyNightlyAirtableBackfill() {
@@ -1343,8 +1334,7 @@ function runNightlyRefresh() {
 }
 
 function nightlyRefreshNeedsAirtable() {
-  const script = String(NIGHTLY_REFRESH_SCRIPT || "").toLowerCase();
-  return script.includes("airtable") || script === "pg:refresh-all" || script === "pg:refresh-hawley-read-model";
+  return false;
 }
 
 function configureNightlyAirtableBackfill() {
@@ -12173,6 +12163,10 @@ async function adminFreshTaskAttachmentsByRecordId(tasks) {
 }
 
 async function refreshBendingTemplateFlagsFromAirtable() {
+  return { skipped: "Hawley owns template flags; Airtable refresh retired.", changed: 0 };
+}
+
+async function legacyRefreshBendingTemplateFlagsFromAirtable() {
   const token = process.env.AIRTABLE_PAT;
   const baseId = process.env.AIRTABLE_BASE || process.env.AIRTABLE_BASE_ID;
   if (!token || !baseId) return { skipped: "Airtable credentials are not configured." };
