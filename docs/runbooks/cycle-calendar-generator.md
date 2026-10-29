@@ -15,6 +15,16 @@ Admin page > Cycles. Pick a year, the first cycle's start date, the first cycle 
 - Every publish inserts an append-only row in `hb.cycle_plan_versions` (migration 035): inputs, resulting cycles, the year's previous `hb.cycles` rows, changed cycle numbers, note and publisher. To roll back, use `previous_cycles_json` from that row.
 - Not changed by publishing: Asana tasks that already exist keep their dates; task instances keep their cycle links.
 
+## Single source of cycle dates (migration 036)
+
+`hb.cycles` is the only table that owns cycle dates; the generator publishes into it and the app reads it. `hb.production_schedule` keeps copies of each cycle's start date, end date and day count because Project Creator and the dashboard read them (Project Creator writes "Days in Cycle" into new Asana projects). Migration 036:
+
+- adds trigger `cycles_sync_production_schedule_dates`, which copies a cycle's dates and day count to its linked schedule rows whenever they change in `hb.cycles`, whoever makes the change;
+- aligns existing copies once. On 2026-10-29 all linked dates matched, but 48 rows for C19-C22 still held older day counts;
+- records a baseline `hb.cycle_plan_versions` row per year (`cycle-plan:baseline-<year>`, published by `migration 036`) with the existing cycles, so generator history starts from the current table.
+
+The Cycles tab shows a red notice if any schedule row's dates disagree with its cycle.
+
 Endpoints (admin only): `GET /api/admin/cycle-planner?year=`, `POST /api/admin/cycle-planner/preview`, `POST /api/admin/cycle-planner/publish`.
 
 ## Company closures
