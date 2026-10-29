@@ -182,9 +182,20 @@ export async function cyclePlannerOverview(db, year, today, calendar = DEFAULT_C
        from hb.cycle_plan_versions where plan_year = $1::int order by published_at desc limit 20`,
     [year]
   );
+  // hb.cycles is the source of cycle dates; any schedule row disagreeing with its cycle is surfaced.
+  const mismatches = await db.query(
+    `select count(*)::int as count
+       from hb.production_schedule ps
+       join hb.cycles c using (cycle_record_id)
+      where extract(year from c.start_date)::int = $1::int
+        and (ps.start_date is distinct from c.start_date or ps.end_date is distinct from c.end_date
+             or ps.days_in_cycle is distinct from c.days_in_cycle)`,
+    [year]
+  );
   return {
     year,
     today,
+    scheduleDateMismatches: mismatches.rows[0]?.count ?? 0,
     closures: companyClosures(`${year}-01-01`, `${year}-12-31`, calendar),
     published: baselineFromPublished(published, today).map(row => ({ ...row, quarter: published.find(p => p.cycle_record_id === row.cycleRecordId)?.quarter || null })),
     versions: versions.rows
@@ -222,11 +233,13 @@ export async function publishCyclePlan(pool, body, { today, actorEmail = "", cal
             where cycle_record_id = $1`,
           [cycle.cycleRecordId, cycle.startDate, cycle.endDate, cycle.days, cycle.quarter, holidays]
         );
-        // Production schedule rows carry copies of their cycle's dates; keep them consistent.
+        // Migration 036's trigger copies cycle dates to hb.production_schedule. This explicit update is a
+        // no-op when the trigger ran, and keeps the copies consistent if that migration has not applied.
         await client.query(
           `update hb.production_schedule
               set start_date = $2::date, end_date = $3::date, days_in_cycle = $4::int, normalized_at = now()
-            where cycle_record_id = $1`,
+            where cycle_record_id = $1
+              and (start_date is distinct from $2::date or end_date is distinct from $3::date or days_in_cycle is distinct from $4::int)`,
           [cycle.cycleRecordId, cycle.startDate, cycle.endDate, cycle.days]
         );
       } else {
