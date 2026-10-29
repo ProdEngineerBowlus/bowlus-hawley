@@ -9,7 +9,7 @@ Admin page > Cycles. Pick a year, the first cycle's start date, the first cycle 
 - Rules: `22-25=8` fixes cycles 22-25 at 8 working days, `20=12` fixes one cycle, `20+4` extends cycle 20 by 4 working days over its published length. Separate rules with commas.
 - Past cycles (end date before today, shop time) are locked: never moved, never resized.
 - The current cycle (started, not ended) keeps its start date and, by default, its published end date. A rule such as `20+4` or `20=12` extends or shortens it, and later cycles rebalance.
-- Published cycles are never deleted. A plan with fewer cycles than are published is refused.
+- Lowering the cycle count removes the cycles past the new count, but only future cycles with nothing linked: no production schedule rows, tasks, project runs, phase loads, worker banks or worker allocations. Otherwise the preview names what is linked. Removed rows are kept in the version record for rollback.
 - Publishing recomputes the plan inside one transaction and refuses if anything differs from the approved preview (`PLAN_STALE`).
 - Existing cycles are updated in place and keep their `cycle_record_id`; new cycles get `hawley-cycle:<year>-<nn>` and labels like `C1.27`. Written rows are marked `source_system = 'hawley_cycle_planner'`.
 - The matching `hb.production_schedule` rows get the new start/end dates and day counts in the same transaction.

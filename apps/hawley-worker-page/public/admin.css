@@ -1719,3 +1719,8 @@ a {
   width: 72px;
   min-height: 32px;
 }
+
+.cycle-plan-removed td {
+  background: rgba(214, 90, 72, 0.14);
+  text-decoration: line-through;
+}

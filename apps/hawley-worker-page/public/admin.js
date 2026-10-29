@@ -1614,7 +1614,7 @@
     const planner = state.cyclePlanner;
     const form = state.cyclePlanForm || defaultCyclePlanForm(planner);
     const preview = state.cyclePlanPreview;
-    const rows = preview?.cycles || (planner?.published || []).map(row => ({ ...row, source: row.locked ? "locked" : "published", status: "unchanged" }));
+    const rows = preview ? [...preview.cycles, ...(preview.removedCycles || [])] : (planner?.published || []).map(row => ({ ...row, source: row.locked ? "locked" : "published", status: "unchanged" }));
     const closures = preview?.closures || planner?.closures || [];
     const changedCount = preview ? preview.changedCycleNumbers.length : 0;
     const canPublish = preview?.ok && changedCount > 0 && !state.cyclePlanLoading;
@@ -1656,14 +1656,14 @@
             <thead><tr><th>Cycle</th><th>Dates</th><th>Days</th><th>Type</th><th>Published now</th><th>Affected</th><th>Holidays</th></tr></thead>
             <tbody>
               ${rows.map(row => `
-                <tr class="${row.status === "changed" || row.status === "new" ? "cycle-plan-changed" : ""}">
+                <tr class="${row.status === "changed" || row.status === "new" ? "cycle-plan-changed" : row.status === "removed" ? "cycle-plan-removed" : ""}">
                   <td><strong>${escapeHtml(row.cycleLabel || `C${row.cycle}`)}</strong></td>
                   <td>${escapeHtml(`${formatDate(row.startDate)} - ${formatDate(row.endDate)}`)}</td>
-                  <td>${row.source === "locked"
+                  <td>${row.source === "locked" || row.source === "removed"
                     ? escapeHtml(formatNumber(row.days))
                     : `<input class="table-input cycle-days-input" type="number" min="1" max="99" step="1" data-cycle-days="${escapeAttr(row.cycle)}" value="${escapeAttr(row.days)}" aria-label="Working days for ${escapeAttr(row.cycleLabel || `C${row.cycle}`)}" />`}</td>
                   <td>${escapeHtml(row.source)}${row.status === "new" ? " · new" : ""}</td>
-                  <td>${escapeHtml(row.status === "changed" ? cycleRangeText(row.published) : row.status === "new" ? "Not published" : "Same")}</td>
+                  <td>${escapeHtml(row.status === "changed" ? cycleRangeText(row.published) : row.status === "new" ? "Not published" : row.status === "removed" ? "Will be removed" : "Same")}</td>
                   <td>${escapeHtml(row.impact ? `${formatNumber(row.impact.vins)} VINs · ${formatNumber(row.impact.scheduleRows)} schedule rows · ${formatNumber(row.impact.taskInstances)} tasks` : "")}</td>
                   <td>${escapeHtml((row.holidays || []).map(h => h.name).join(", "))}</td>
                 </tr>
