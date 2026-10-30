@@ -3,6 +3,7 @@ import pg from "pg";
 import { getDatabaseConfig } from "./config.js";
 import { withHbBuildTransaction } from "./hb-build-transaction.js";
 import { linkTaskOccurrences } from "./task-occurrences.js";
+import { promoteTemplateVersions } from "./template-editor.js";
 import {
   buildCycleIndex,
   dateValue,
@@ -2303,7 +2304,10 @@ async function main() {
   try {
     const { normalized, occurrences, rebuilt, capabilityRefresh } = await withHbBuildTransaction(client, async () => {
       const normalized = await normalizeHawleyTables(client);
-      const occurrences = await linkTaskOccurrences(client);
+      // Template versions whose "applies from" cycle has started become current before tasks are linked.
+      const shopToday = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles" }).format(new Date());
+      const templatesPromoted = (await promoteTemplateVersions(client, shopToday)).length;
+      const occurrences = { ...(await linkTaskOccurrences(client)), templatesPromoted };
       const rebuilt = await rebuildCalculations(client);
       const capabilityRefresh = (await client.query(
         "select core.refresh_worker_task_capabilities() as summary"

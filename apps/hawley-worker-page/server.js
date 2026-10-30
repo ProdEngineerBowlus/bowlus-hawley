@@ -9,6 +9,7 @@ import pg from "pg";
 import { taskAttachmentsFromStorage, createAttachmentUrlProvider } from "./attachment-storage.js";
 import { buildTaskTimeTable, saveTaskMappingRules, taskMappingGroups, taskTimeCoverage, taskTimeObservations } from "../postgres-sync/src/task-occurrences.js";
 import { HB_BUILD_LOCK_KEY, HB_BUILD_LOCK_NAMESPACE } from "../postgres-sync/src/hb-build-transaction.js";
+import { listTemplates, saveTemplateVersion, templateDetail, templateEditorOptions } from "../postgres-sync/src/template-editor.js";
 import { buildCyclePreview, cyclePlannerOverview, pendingAsanaPushes, productionScheduleRows, publishCyclePlan, recordAsanaPushResults } from "./cycle-planner.js";
 import { getDatabaseConfig } from "../postgres-sync/src/config.js";
 
@@ -11314,6 +11315,43 @@ async function handleAdminCyclePlannerPublish(req) {
   return { ...result, asanaPushes: undefined, asanaOptionsToAdd: undefined, asanaPush };
 }
 
+async function handleAdminTemplates(req, url) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const [rows, options] = await Promise.all([
+    listTemplates(pool, { phase: url.searchParams.get("phase") || "", search: url.searchParams.get("q") || "", includeRetired: url.searchParams.get("retired") === "1" }),
+    templateEditorOptions(pool, todayIso())
+  ]);
+  return { rows, options };
+}
+
+async function handleAdminTemplateDetail(req, url) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  return templateDetail(pool, String(url.searchParams.get("id") || ""));
+}
+
+async function handleAdminTemplateSave(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const client = await writePool.connect();
+  try {
+    await client.query("begin");
+    // HB rebuilds also promote template versions; share their gate.
+    await client.query("select pg_advisory_xact_lock($1::integer, $2::integer)", [HB_BUILD_LOCK_NAMESPACE, HB_BUILD_LOCK_KEY]);
+    const result = await saveTemplateVersion(client, body, { actor: actor?.email || actor?.username || "", today: todayIso() });
+    await client.query("commit");
+    console.log("[hawley-templates]", JSON.stringify({ action: "save", ...result }));
+    return { ok: true, ...result };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function handleAdminTaskMapping(req, url) {
   const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
   requireAdminActor(actor);
@@ -13602,6 +13640,21 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/cycle-planner/preview" && req.method === "POST") {
       sendJson(res, 200, await handleAdminCyclePlannerPreview(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/templates" && req.method === "GET") {
+      sendJson(res, 200, await handleAdminTemplates(req, url));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/templates/detail" && req.method === "GET") {
+      sendJson(res, 200, await handleAdminTemplateDetail(req, url));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/templates/save" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminTemplateSave(req));
       return;
     }
 
