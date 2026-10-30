@@ -1791,7 +1791,7 @@
       <section class="panel">
         <div class="panel-header"><h3 class="panel-title">Published versions</h3></div>
         <div class="panel-body">
-          ${(planner?.versions || []).map(v => `<p>${escapeHtml(new Date(v.published_at).toLocaleString())} - ${escapeHtml(v.published_by || "admin")} - ${escapeHtml(v.plan_year)} cycles ${escapeHtml((v.changed_cycle_numbers || []).join(", "))}${v.note ? ` - ${escapeHtml(v.note)}` : ""}</p>`).join("") || `<p class="muted">No calendar versions published from Hawley yet.</p>`}
+          ${(planner?.versions || []).map(v => `<p>${escapeHtml(new Date(v.published_at).toLocaleString())} - ${escapeHtml(v.published_by || "admin")} - ${escapeHtml(v.plan_year)} cycles ${escapeHtml((v.changed_cycle_numbers || []).join(", "))}${v.note ? ` - ${escapeHtml(v.note)}` : ""}${v.asana_pending ? ` <button class="btn compact" type="button" data-action="cycle-plan-retry-push" data-version="${escapeAttr(v.cycle_plan_version_id)}">Retry Asana update (${formatNumber(v.asana_pending)} tasks)</button>` : ""}</p>`).join("") || `<p class="muted">No calendar versions published from Hawley yet.</p>`}
         </div>
       </section>
     `;
@@ -2397,9 +2397,11 @@
       state.cyclePlanLoading = true;
       render();
       try {
-        const result = await postJson("/api/admin/cycle-planner/push", { cyclePlanVersionId: state.cyclePlanPushFailedVersion });
+        const versionId = event.target.closest("[data-version]")?.dataset.version || state.cyclePlanPushFailedVersion;
+        const result = await postJson("/api/admin/cycle-planner/push", { cyclePlanVersionId: versionId });
         state.cyclePlanPushFailedVersion = result.asanaPush.failed ? result.cyclePlanVersionId : "";
-        state.cyclePlanMessage = `Asana: ${result.asanaPush.pushed} of ${result.asanaPush.total} tasks updated.`;
+        state.cyclePlanMessage = `Asana: ${result.asanaPush.optionsAdded ? `${result.asanaPush.optionsAdded} Cycle options added; ` : ""}${result.asanaPush.pushed} of ${result.asanaPush.total} tasks updated${result.asanaPush.optionsFailed?.length ? `; could not add ${result.asanaPush.optionsFailed.join(", ")}` : ""}.`;
+        await loadCyclePlanner();
       } catch (error) {
         state.cyclePlanMessage = error.message || "Could not push to Asana.";
       } finally {

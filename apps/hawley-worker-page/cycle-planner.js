@@ -491,7 +491,8 @@ export async function cyclePlannerOverview(db, year, today, calendar = DEFAULT_C
   const published = await loadPublishedCycles(db, year);
   const publishedNext = await loadPublishedCycles(db, year + 1);
   const versions = await db.query(
-    `select cycle_plan_version_id, plan_year, changed_cycle_numbers, note, published_by, published_at::text as published_at
+    `select cycle_plan_version_id, plan_year, changed_cycle_numbers, note, published_by, published_at::text as published_at,
+            (select count(*)::int from jsonb_array_elements(asana_push_json) p where p ->> 'status' in ('pending', 'failed')) as asana_pending
        from hb.cycle_plan_versions where plan_year in ($1::int, $1::int + 1) order by published_at desc limit 20`,
     [year]
   );
