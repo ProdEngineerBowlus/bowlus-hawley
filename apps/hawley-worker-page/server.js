@@ -3344,16 +3344,20 @@ async function workerAssignments(date) {
           task_instance.assigned_on desc
       ), crew as (
         -- Team tasks: the assignee's row plus one row per helper from the Asana Helpers field (trial
-        -- workers only until enabled for everyone). Helper rows carry no estimate.
-        select si.*, si.worker_name as crew_worker_name, si.worker_email as crew_worker_email, 'assignee'::text as assignment_role
+        -- workers only until enabled for everyone). Helper rows carry no estimate. scoped_instances is
+        -- referenced once (lateral roles) so the planner keeps the pre-team-tasks plan.
+        select si.*, roles.crew_worker_name, roles.crew_worker_email, roles.assignment_role
           from scoped_instances si
-        union all
-        select si.*, coalesce(helper.helper_name, helper.helper_email), helper.helper_email, 'helper'::text
-          from scoped_instances si
-          join hb.task_helpers helper on helper.asana_task_gid = si.asana_task_gid
-          cross join hb.team_task_settings settings
-         where lower(helper.helper_email) <> lower(coalesce(si.worker_email, ''))
-           and (settings.enabled_for_all or lower(helper.helper_email) = any(settings.trial_worker_emails))
+          cross join lateral (
+            select si.worker_name, si.worker_email, 'assignee'::text
+            union all
+            select coalesce(helper.helper_name, helper.helper_email), helper.helper_email, 'helper'::text
+              from hb.task_helpers helper
+              cross join hb.team_task_settings settings
+             where helper.asana_task_gid = si.asana_task_gid
+               and lower(helper.helper_email) <> lower(coalesce(si.worker_email, ''))
+               and (settings.enabled_for_all or lower(helper.helper_email) = any(settings.trial_worker_emails))
+          ) roles(crew_worker_name, crew_worker_email, assignment_role)
       )
       select
         task_instance.rev1_task_instance_id as task_instance_id,
