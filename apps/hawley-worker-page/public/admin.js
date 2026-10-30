@@ -51,6 +51,12 @@
     taskTimes: null,
     taskTimesLoading: false,
     taskTimesMessage: "",
+    templates: null,
+    templatesLoading: false,
+    templatesMessage: "",
+    templatesFilters: { phase: "", q: "", retired: false },
+    templateEdit: null,
+    templateDetail: null,
     taskMapping: null,
     taskMappingLoading: false,
     taskMappingMessage: "",
@@ -646,6 +652,7 @@
           <button class="nav-tab ${state.activeView === "production" ? "active" : ""}" type="button" data-view="production">Production</button>
           <button class="nav-tab ${state.activeView === "task-times" ? "active" : ""}" type="button" data-view="task-times">Task Times</button>
           <button class="nav-tab ${state.activeView === "task-mapping" ? "active" : ""}" type="button" data-view="task-mapping">Task Review</button>
+          <button class="nav-tab ${state.activeView === "templates" ? "active" : ""}" type="button" data-view="templates">Templates</button>
         </nav>
         <div class="top-actions">
           <a class="btn ghost" href="/">Live app</a>
@@ -2027,6 +2034,154 @@
     `;
   }
 
+  async function loadTemplates() {
+    const f = state.templatesFilters;
+    state.templatesLoading = true;
+    render();
+    try {
+      state.templates = await fetchJson(`/api/admin/templates?${new URLSearchParams({ phase: f.phase, q: f.q, retired: f.retired ? "1" : "0" })}`);
+    } catch (error) {
+      state.templatesMessage = error.message || "Could not load templates.";
+    } finally {
+      state.templatesLoading = false;
+      render();
+    }
+  }
+
+  function minutesText(seconds) {
+    return seconds == null ? "" : String(Math.round(Number(seconds) / 6) / 10);
+  }
+
+  // Editing state is a plain copy of the version being edited (or a blank new task).
+  function startTemplateEdit(row) {
+    state.templateEdit = row ? {
+      taskDefinitionId: row.task_definition_id,
+      taskName: row.task_name || "",
+      phaseRecordId: row.phase_record_id || "",
+      modelTypeRecordIds: [...(row.model_type_record_ids || [])],
+      estimateMinutes: minutesText(row.estimated_task_time_seconds),
+      batchEstimateMinutes: minutesText(row.estimated_batch_task_time_seconds),
+      quantity: row.quantity ?? "",
+      taskOrder: row.task_order ?? "",
+      requiredSkillLevel: row.required_skill_level ?? "",
+      sopLink: row.sop_link || "",
+      taskDescription: row.task_description || "",
+      attachmentFiles: [...(row.attachment_files_json || [])],
+      retired: Boolean(row.retired),
+      appliesFrom: "",
+      note: ""
+    } : { taskDefinitionId: "", taskName: "", phaseRecordId: "", modelTypeRecordIds: [], estimateMinutes: "", batchEstimateMinutes: "", quantity: "", taskOrder: "", requiredSkillLevel: "", sopLink: "", taskDescription: "", attachmentFiles: [], retired: false, appliesFrom: "", note: "" };
+    state.templateDetail = null;
+    state.templatesMessage = "";
+  }
+
+  function readTemplateEdit() {
+    const e = state.templateEdit;
+    const value = name => root.querySelector(`[data-template-field="${name}"]`);
+    for (const name of ["taskName", "phaseRecordId", "estimateMinutes", "batchEstimateMinutes", "quantity", "taskOrder", "requiredSkillLevel", "sopLink", "taskDescription", "appliesFrom", "note"]) {
+      if (value(name)) e[name] = value(name).value;
+    }
+    e.retired = Boolean(value("retired")?.checked);
+    e.modelTypeRecordIds = [...root.querySelectorAll("[data-template-model]:checked")].map(input => input.value);
+    return e;
+  }
+
+  function renderTemplateEditor() {
+    const e = state.templateEdit;
+    if (!e) return "";
+    const options = state.templates?.options || {};
+    const fileLabel = file => file.filename || file.name || file.key?.split("/").at(-2) || "file";
+    const available = (options.files || []).filter(file => !e.attachmentFiles.some(a => a.sha256 === file.sha256));
+    const detail = state.templateDetail;
+    return `
+      <section class="panel">
+        <div class="panel-header">
+          <h3 class="panel-title">${escapeHtml(e.taskDefinitionId ? `Edit: ${e.taskName}` : "New task template")}</h3>
+          <span class="pill">${escapeHtml(e.taskDefinitionId ? "Saving creates a new version" : "Creates version 1")}</span>
+        </div>
+        <div class="panel-body cycle-plan-form">
+          <label class="field cycle-plan-rules"><span>Task name</span><input type="text" data-template-field="taskName" value="${escapeAttr(e.taskName)}" /></label>
+          <label class="field"><span>Phase</span><select data-template-field="phaseRecordId"><option value="">Choose…</option>${(options.phases || []).map(p => `<option value="${escapeAttr(p.phase_record_id)}" ${p.phase_record_id === e.phaseRecordId ? "selected" : ""}>${escapeHtml(p.phase_name)}</option>`).join("")}</select></label>
+          <label class="field"><span>Estimate (min)</span><input type="number" min="0" step="0.1" data-template-field="estimateMinutes" value="${escapeAttr(e.estimateMinutes)}" /></label>
+          <label class="field"><span>Batch estimate (min)</span><input type="number" min="0" step="0.1" data-template-field="batchEstimateMinutes" value="${escapeAttr(e.batchEstimateMinutes)}" /></label>
+          <label class="field"><span>Quantity</span><input type="number" min="0" step="any" data-template-field="quantity" value="${escapeAttr(e.quantity)}" /></label>
+          <label class="field"><span>Order</span><input type="number" step="any" data-template-field="taskOrder" value="${escapeAttr(e.taskOrder)}" /></label>
+          <label class="field"><span>Required skill level</span><input type="number" step="any" data-template-field="requiredSkillLevel" value="${escapeAttr(e.requiredSkillLevel)}" /></label>
+          <label class="field cycle-plan-rules"><span>SOP link</span><input type="url" data-template-field="sopLink" value="${escapeAttr(e.sopLink)}" placeholder="https://…" /></label>
+          <label class="field production-checks"><span>Models</span>${(options.models || []).map(m => `<span><input type="checkbox" data-template-model value="${escapeAttr(m.model_record_id)}" ${e.modelTypeRecordIds.includes(m.model_record_id) ? "checked" : ""} /> ${escapeHtml(m.model_name)}</span>`).join("")}</label>
+        </div>
+        <div class="panel-body">
+          <label class="field"><span>Description</span><textarea class="table-input" rows="3" data-template-field="taskDescription">${escapeHtml(e.taskDescription)}</textarea></label>
+          <div class="field" style="margin-top: 12px;"><span>Attachments</span>
+            ${e.attachmentFiles.map((file, i) => `<div class="inline-actions"><span>${escapeHtml(fileLabel(file))}</span><button class="btn ghost compact" type="button" data-action="template-remove-file" data-index="${i}">Remove</button></div>`).join("") || `<span class="muted">None</span>`}
+            <div class="inline-actions"><select class="table-input" style="max-width: 360px;" data-template-add-file><option value="">Add a stored file…</option>${available.map(file => `<option value="${escapeAttr(file.sha256)}">${escapeHtml(fileLabel(file))}</option>`).join("")}</select>
+            <button class="btn compact" type="button" data-action="template-add-file">Add</button></div>
+            <span class="muted">Uploading new files needs a write-capable storage key on the app; existing stored files can be reused now.</span>
+          </div>
+        </div>
+        <div class="panel-body cycle-plan-publish">
+          <label class="field"><span>Applies from</span><select data-template-field="appliesFrom"><option value="">Now</option>${(options.cycles || []).map(c => { const key = `${c.year}:${c.cycle}`; return `<option value="${escapeAttr(key)}" ${e.appliesFrom === key ? "selected" : ""}>${escapeHtml(`C${c.cycle}.${String(c.year).slice(-2)} (${formatDate(c.start_date)})`)}</option>`; }).join("")}</select></label>
+          <label class="field"><span>Reason</span><input type="text" data-template-field="note" value="${escapeAttr(e.note)}" placeholder="What changed and why" /></label>
+          ${e.taskDefinitionId ? `<label class="field production-checks"><span>Retire</span><span><input type="checkbox" data-template-field="retired" ${e.retired ? "checked" : ""} /> No longer used</span></label>` : ""}
+          <button class="btn primary" type="button" data-action="template-save" ${state.templatesLoading ? "disabled" : ""}>Save</button>
+          <button class="btn ghost" type="button" data-action="template-cancel">Cancel</button>
+        </div>
+        ${detail ? `
+          <div class="panel-body">
+            <p class="muted">${escapeHtml(`Used by ${formatNumber(detail.usage?.occurrences || 0)} work occurrences (${formatNumber(detail.usage?.completed || 0)} completed). Current version: ${detail.currentVersionNumber}.`)}</p>
+            ${detail.versions.map(v => `<p><strong>v${v.version_number}</strong> · ${escapeHtml(v.effective_from_year ? `applies from C${v.effective_from_cycle}.${String(v.effective_from_year).slice(-2)}` : "applies immediately")} · ${escapeHtml(v.task_name)} · ${escapeHtml(formatDuration(v.estimated_task_time_seconds) || "no estimate")}${v.retired ? " · retired" : ""} · ${escapeHtml(v.created_by || "import")} ${escapeHtml(v.note ? `· ${v.note}` : "")}</p>`).join("")}
+          </div>` : ""}
+      </section>
+    `;
+  }
+
+  function renderTemplates() {
+    const data = state.templates;
+    const f = state.templatesFilters;
+    const rows = data?.rows || [];
+    const phases = data?.options?.phases || [];
+    return `
+      ${renderTemplateEditor()}
+      <section class="panel">
+        <div class="panel-header">
+          <h3 class="panel-title">Task Templates</h3>
+          <span class="pill">${escapeHtml(data ? `${formatNumber(rows.length)} templates` : "Loading")}</span>
+        </div>
+        <div class="panel-body cycle-plan-form">
+          <label class="field"><span>Phase</span><select data-templates-filter="phase"><option value="">All phases</option>${phases.map(p => `<option value="${escapeAttr(p.phase_name)}" ${f.phase === p.phase_name ? "selected" : ""}>${escapeHtml(p.phase_name)}</option>`).join("")}</select></label>
+          <label class="field"><span>Name contains</span><input type="text" data-templates-filter="q" value="${escapeAttr(f.q)}" /></label>
+          <label class="field production-checks"><span>Show</span><span><input type="checkbox" data-templates-filter="retired" ${f.retired ? "checked" : ""} /> Retired too</span></label>
+        </div>
+        <div class="panel-body">
+          <div class="inline-actions">
+            <button class="btn" type="button" data-action="templates-load" ${state.templatesLoading ? "disabled" : ""}>Search</button>
+            <button class="btn primary" type="button" data-action="template-new">New task</button>
+          </div>
+          <p class="muted">Edits are saved as new versions. "Applies from" a future cycle keeps the current version live until that cycle starts; released work keeps the version it was released with. Project Creator uses the current version.</p>
+          ${state.templatesMessage ? `<div class="notice">${escapeHtml(state.templatesMessage)}</div>` : ""}
+        </div>
+        <div class="panel-body table-wrap">
+          <table class="table task-times-table">
+            <thead><tr><th>Task</th><th>Phase</th><th>Estimate</th><th>Avg actual</th><th>Version</th><th>SOP / files</th><th></th></tr></thead>
+            <tbody>
+              ${rows.map((row, i) => `
+                <tr>
+                  <td style="text-align: left;"><strong>${escapeHtml(row.task_name)}</strong>${row.retired ? " <small>(retired)</small>" : ""}</td>
+                  <td>${escapeHtml(row.phase_name || "")}</td>
+                  <td>${escapeHtml(formatDuration(row.estimated_task_time_seconds))}</td>
+                  <td>${escapeHtml(row.avg_time_seconds ? `${formatDuration(row.avg_time_seconds)} (${row.avg_time_input_count || 0})` : "")}</td>
+                  <td>${escapeHtml(`v${row.version_number}${row.latest_version_number > row.version_number ? ` (v${row.latest_version_number} scheduled)` : ""}`)}</td>
+                  <td>${row.sop_link ? `<a href="${escapeAttr(row.sop_link)}" target="_blank" rel="noopener">SOP</a>` : ""} ${escapeHtml((row.attachment_files_json || []).length ? `${row.attachment_files_json.length} file(s)` : "")}</td>
+                  <td><button class="btn ghost compact" type="button" data-action="template-edit" data-index="${i}">Edit</button></td>
+                </tr>
+              `).join("") || `<tr><td colspan="7">${state.templatesLoading ? "Loading…" : "No templates match."}</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    `;
+  }
+
   function renderApp() {
     if (state.loading) {
       return `
@@ -2048,7 +2203,7 @@
       <div class="admin-shell">
         ${renderTopbar()}
         <main class="admin-main">
-          ${state.activeView === "project" ? renderProjectCreator() : state.activeView === "cycles" ? renderCyclePlanner() : state.activeView === "production" ? renderProductionTable() : state.activeView === "task-times" ? renderTaskTimes() : state.activeView === "task-mapping" ? renderTaskMapping() : renderDashboard()}
+          ${state.activeView === "project" ? renderProjectCreator() : state.activeView === "cycles" ? renderCyclePlanner() : state.activeView === "production" ? renderProductionTable() : state.activeView === "task-times" ? renderTaskTimes() : state.activeView === "task-mapping" ? renderTaskMapping() : state.activeView === "templates" ? renderTemplates() : renderDashboard()}
         </main>
       </div>
     `;
@@ -2070,7 +2225,7 @@
   root.addEventListener("click", async event => {
     const viewButton = event.target.closest("[data-view]");
     if (viewButton) {
-      state.activeView = ["project", "cycles", "production", "task-times", "task-mapping"].includes(viewButton.dataset.view) ? viewButton.dataset.view : "dashboard";
+      state.activeView = ["project", "cycles", "production", "task-times", "task-mapping", "templates"].includes(viewButton.dataset.view) ? viewButton.dataset.view : "dashboard";
       render();
       if (state.activeView === "cycles") {
         if (!state.cyclePlanner) await loadCyclePlanner();
@@ -2080,6 +2235,8 @@
         if (!state.taskTimes) await loadTaskTimes();
       } else if (state.activeView === "task-mapping") {
         if (!state.taskMapping) await loadTaskMapping();
+      } else if (state.activeView === "templates") {
+        if (!state.templates) await loadTemplates();
       } else if (state.activeView === "project" && !state.project && !state.projectLoading) {
         try {
           await loadProjectCreator();
@@ -2143,6 +2300,60 @@
       await loadAll();
     } else if (action === "logout") {
       await logout();
+    } else if (action === "templates-load") {
+      for (const input of root.querySelectorAll("[data-templates-filter]")) state.templatesFilters[input.dataset.templatesFilter] = input.type === "checkbox" ? input.checked : input.value;
+      await loadTemplates();
+    } else if (action === "template-new") {
+      startTemplateEdit(null);
+      render();
+    } else if (action === "template-edit") {
+      const row = state.templates?.rows?.[Number(event.target.closest("[data-index]")?.dataset.index)];
+      if (!row) return;
+      startTemplateEdit(row);
+      render();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      try {
+        const detail = await fetchJson(`/api/admin/templates/detail?id=${encodeURIComponent(row.task_definition_id)}`);
+        // Start from the newest version so a scheduled change is not silently undone by the next save.
+        const latest = detail.versions[0];
+        if (latest && latest.version_number !== row.version_number) {
+          startTemplateEdit(latest);
+          state.templatesMessage = `Editing from scheduled version v${latest.version_number}; v${row.version_number} is live until it takes effect.`;
+        }
+        state.templateDetail = detail;
+        render();
+      } catch {}
+    } else if (action === "template-cancel") {
+      state.templateEdit = null;
+      state.templateDetail = null;
+      render();
+    } else if (action === "template-add-file" || action === "template-remove-file") {
+      const e = readTemplateEdit();
+      if (action === "template-add-file") {
+        const sha = root.querySelector("[data-template-add-file]")?.value;
+        const file = (state.templates?.options?.files || []).find(x => x.sha256 === sha);
+        if (file) e.attachmentFiles.push(file);
+      } else {
+        e.attachmentFiles.splice(Number(event.target.closest("[data-index]")?.dataset.index), 1);
+      }
+      render();
+    } else if (action === "template-save") {
+      const e = readTemplateEdit();
+      const [year, cycle] = String(e.appliesFrom || "").split(":");
+      state.templatesLoading = true;
+      render();
+      try {
+        const result = await postJson("/api/admin/templates/save", { ...e, appliesFrom: year ? { year: Number(year), cycle: Number(cycle) } : null });
+        state.templatesMessage = `Saved version ${result.versionNumber} of "${e.taskName}"${result.inEffect ? " - in effect now" : ` - takes effect C${result.effectiveFrom.cycle}.${String(result.effectiveFrom.year).slice(-2)}`}.`;
+        state.templateEdit = null;
+        state.templateDetail = null;
+        state.templatesLoading = false;
+        await loadTemplates();
+      } catch (error) {
+        state.templatesMessage = error.message || "Could not save the template.";
+        state.templatesLoading = false;
+        render();
+      }
     } else if (action === "task-mapping-search") {
       state.taskMappingSearch = root.querySelector("[data-task-mapping-search]")?.value || "";
       await loadTaskMapping();
