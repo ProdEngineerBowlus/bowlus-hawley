@@ -1758,3 +1758,9 @@ a {
   background: #121710;
   padding: 0 8px;
 }
+
+.task-times-table td:nth-child(n + 3),
+.task-times-table th:nth-child(n + 3) {
+  text-align: right;
+  white-space: nowrap;
+}

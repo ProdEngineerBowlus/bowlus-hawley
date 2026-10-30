@@ -48,6 +48,10 @@
     production: null,
     productionLoading: false,
     productionMessage: "",
+    taskTimes: null,
+    taskTimesLoading: false,
+    taskTimesMessage: "",
+    taskTimesFilters: { phase: "", q: "", mode: "vin", columns: "12" },
     productionFilters: { year: String(new Date().getFullYear()), cycle: "", phase: "", vin: "", vinsOnly: false, withTasks: false }
   };
 
@@ -636,6 +640,7 @@
           <button class="nav-tab ${state.activeView === "project" ? "active" : ""}" type="button" data-view="project">Project Creator</button>
           <button class="nav-tab ${state.activeView === "cycles" ? "active" : ""}" type="button" data-view="cycles">Cycles</button>
           <button class="nav-tab ${state.activeView === "production" ? "active" : ""}" type="button" data-view="production">Production</button>
+          <button class="nav-tab ${state.activeView === "task-times" ? "active" : ""}" type="button" data-view="task-times">Task Times</button>
         </nav>
         <div class="top-actions">
           <a class="btn ghost" href="/">Live app</a>
@@ -1862,6 +1867,75 @@
     `;
   }
 
+  async function loadTaskTimes() {
+    const f = state.taskTimesFilters;
+    state.taskTimesLoading = true;
+    state.taskTimesMessage = "";
+    render();
+    try {
+      const params = new URLSearchParams({ phase: f.phase, q: f.q, mode: f.mode, columns: f.columns });
+      state.taskTimes = await fetchJson(`/api/admin/task-times?${params}`);
+    } catch (error) {
+      state.taskTimesMessage = error.message || "Could not load task times.";
+    } finally {
+      state.taskTimesLoading = false;
+      render();
+    }
+  }
+
+  // Seconds as h:mm.
+  function formatDuration(seconds) {
+    const value = Number(seconds);
+    if (!Number.isFinite(value) || value <= 0) return "";
+    const minutes = Math.round(value / 60);
+    return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}`;
+  }
+
+  function renderTaskTimes() {
+    const data = state.taskTimes;
+    const f = state.taskTimesFilters;
+    const coverage = data?.coverage || {};
+    const phases = coverage.phases || [];
+    const columns = data?.columns || [];
+    const rows = data?.rows || [];
+    return `
+      <section class="panel">
+        <div class="panel-header">
+          <h3 class="panel-title">Task Times</h3>
+          <span class="pill">${escapeHtml(data ? `${formatNumber(rows.length)} tasks · ${formatNumber(coverage.timed_linked || 0)} of ${formatNumber(coverage.timed_tasks || 0)} timed tasks included` : "Loading")}</span>
+        </div>
+        <div class="panel-body cycle-plan-form">
+          <label class="field"><span>Phase</span><select data-task-times-filter="phase"><option value="">All phases</option>${phases.map(p => `<option value="${escapeAttr(p)}" ${f.phase === p ? "selected" : ""}>${escapeHtml(p)}</option>`).join("")}</select></label>
+          <label class="field"><span>Task contains</span><input type="text" data-task-times-filter="q" value="${escapeAttr(f.q)}" placeholder="e.g. shower" /></label>
+          <label class="field"><span>Columns</span><select data-task-times-filter="mode"><option value="vin" ${f.mode !== "cycle" ? "selected" : ""}>By VIN</option><option value="cycle" ${f.mode === "cycle" ? "selected" : ""}>By cycle</option></select></label>
+          <label class="field"><span>How many columns</span><input type="number" min="1" max="40" data-task-times-filter="columns" value="${escapeAttr(f.columns)}" /></label>
+        </div>
+        <div class="panel-body">
+          <div class="inline-actions"><button class="btn primary" type="button" data-action="task-times-load" ${state.taskTimesLoading ? "disabled" : ""}>Show</button></div>
+          <p class="muted">Actual time per task (h:mm), from completed tasks. Average and Last 5 use the same rule as the template averages: above zero and no more than 5 hours over the estimate. ${coverage.unlinked_tasks ? escapeHtml(`${formatNumber(coverage.unlinked_tasks)} older or one-off tasks are not linked to a template yet; the review step will add them.`) : ""}</p>
+          ${state.taskTimesMessage ? `<div class="notice risk">${escapeHtml(state.taskTimesMessage)}</div>` : ""}
+        </div>
+        <div class="panel-body table-wrap">
+          <table class="table task-times-table">
+            <thead><tr><th>Task</th><th>Phase</th><th>Est.</th><th>Avg (n)</th><th>Last 5</th>${columns.map(c => `<th>${escapeHtml(f.mode === "cycle" ? c : `VIN ${c}`)}</th>`).join("")}</tr></thead>
+            <tbody>
+              ${rows.map(row => `
+                <tr>
+                  <td><strong>${escapeHtml(row.taskName)}</strong></td>
+                  <td>${escapeHtml(row.phaseName || "")}</td>
+                  <td>${escapeHtml(formatDuration(row.estimateSeconds))}</td>
+                  <td>${escapeHtml(row.averageSeconds ? `${formatDuration(row.averageSeconds)} (${row.count})` : "")}</td>
+                  <td>${escapeHtml(formatDuration(row.recentAverageSeconds))}</td>
+                  ${columns.map(c => `<td>${escapeHtml(formatDuration(row.cells[c]))}</td>`).join("")}
+                </tr>
+              `).join("") || `<tr><td colspan="${5 + columns.length}">${state.taskTimesLoading ? "Loading…" : "No timed tasks match these filters."}</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    `;
+  }
+
   function renderApp() {
     if (state.loading) {
       return `
@@ -1883,7 +1957,7 @@
       <div class="admin-shell">
         ${renderTopbar()}
         <main class="admin-main">
-          ${state.activeView === "project" ? renderProjectCreator() : state.activeView === "cycles" ? renderCyclePlanner() : state.activeView === "production" ? renderProductionTable() : renderDashboard()}
+          ${state.activeView === "project" ? renderProjectCreator() : state.activeView === "cycles" ? renderCyclePlanner() : state.activeView === "production" ? renderProductionTable() : state.activeView === "task-times" ? renderTaskTimes() : renderDashboard()}
         </main>
       </div>
     `;
@@ -1905,12 +1979,14 @@
   root.addEventListener("click", async event => {
     const viewButton = event.target.closest("[data-view]");
     if (viewButton) {
-      state.activeView = ["project", "cycles", "production"].includes(viewButton.dataset.view) ? viewButton.dataset.view : "dashboard";
+      state.activeView = ["project", "cycles", "production", "task-times"].includes(viewButton.dataset.view) ? viewButton.dataset.view : "dashboard";
       render();
       if (state.activeView === "cycles") {
         if (!state.cyclePlanner) await loadCyclePlanner();
       } else if (state.activeView === "production") {
         if (!state.production) await loadProductionTable();
+      } else if (state.activeView === "task-times") {
+        if (!state.taskTimes) await loadTaskTimes();
       } else if (state.activeView === "project" && !state.project && !state.projectLoading) {
         try {
           await loadProjectCreator();
@@ -1974,6 +2050,9 @@
       await loadAll();
     } else if (action === "logout") {
       await logout();
+    } else if (action === "task-times-load") {
+      for (const input of root.querySelectorAll("[data-task-times-filter]")) state.taskTimesFilters[input.dataset.taskTimesFilter] = input.value;
+      await loadTaskTimes();
     } else if (action === "production-load") {
       state.productionFilters.year = root.querySelector('[data-production-filter="year"]')?.value || state.productionFilters.year;
       state.productionFilters.cycle = "";

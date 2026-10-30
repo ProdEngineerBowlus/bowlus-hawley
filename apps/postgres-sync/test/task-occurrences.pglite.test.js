@@ -52,3 +52,41 @@ test("migration 039 creates version 1 of every template and maps existing tasks 
     "occ:recShower:vin:334:1", "occ:recShower:vin:335:1", "occ:recShower:vin:335:2", "occ:recCnc:batch:ps-25-CNC-B:1", null, null
   ], "unknown template and no-subject tasks stay unmapped for review");
 });
+
+test("HB rebuild linking adds new tasks as the next occurrence and keeps status and cycle current", async () => {
+  const { linkTaskOccurrences } = await import("../src/task-occurrences.js");
+  const db = await database();
+  await db.exec(await migration("039_task_definitions_occurrences.sql"));
+  await db.query("insert into hb.rev1_task_instances (tasks_key, vin, cycle_record_id, task_completed, task_name) values ('recShower', 335, 'c1-27', false, 'new')");
+  await db.query("update hb.rev1_task_instances set task_completed = true, cycle_record_id = 'c24' where vin = 334");
+  const result = await linkTaskOccurrences(db);
+  assert.deepEqual(result, { linked: 1, refreshed: 1 });
+  const occ = await db.query("select occurrence_id, cycle_record_id, status from hb.work_occurrences where subject_key in ('334', '335') order by occurrence_id");
+  assert.deepEqual(occ.rows.map(o => [o.occurrence_id, o.cycle_record_id, o.status]), [
+    ["occ:recShower:vin:334:1", "c24", "completed"],
+    ["occ:recShower:vin:335:1", "c25", "released"],
+    ["occ:recShower:vin:335:2", "c25", "released"],
+    ["occ:recShower:vin:335:3", "c1-27", "released"]
+  ]);
+  assert.deepEqual(await linkTaskOccurrences(db), { linked: 0, refreshed: 0 }, "second run is a no-op");
+});
+
+test("task-time table: averages use the 5-hour rule, last 5 are most recent, columns are newest VINs", async () => {
+  const { buildTaskTimeTable, qualifiesForAverage } = await import("../src/task-occurrences.js");
+  assert.equal(qualifiesForAverage(3600, 1800), true);
+  assert.equal(qualifiesForAverage(1800 + 5 * 3600 + 1, 1800), false);
+  const obs = [330, 331, 332, 333, 334, 335, 336].map((vin, i) => ({
+    task_definition_id: "recShower", task_name: "Install Shower L-Track", phase_name: "F", estimate_seconds: 1800,
+    vin, actual_seconds: 1800 + i * 600, completed_on: `2026-10-${String(10 + i).padStart(2, "0")}`, cycle_key: `C${18 + i}.26`, cycle_order: i
+  }));
+  obs.push({ ...obs[0], vin: 337, actual_seconds: 30 * 3600, completed_on: "2026-10-30" });
+  const table = buildTaskTimeTable(obs, { columns: 3 });
+  assert.deepEqual(table.columns, ["337", "336", "335"]);
+  const row = table.rows[0];
+  assert.equal(row.count, 7);
+  assert.equal(row.excluded, 1);
+  assert.equal(row.averageSeconds, 3600);
+  assert.equal(row.recentAverageSeconds, Math.round((5400 + 4800 + 4200 + 3600 + 3000) / 5));
+  assert.deepEqual(row.cells, { 337: 108000, 336: 5400, 335: 4800 });
+  assert.deepEqual(buildTaskTimeTable(obs, { mode: "cycle", columns: 2 }).columns, ["C24.26", "C23.26"]);
+});

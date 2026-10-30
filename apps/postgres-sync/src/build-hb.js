@@ -2,6 +2,7 @@ import { pathToFileURL } from "node:url";
 import pg from "pg";
 import { getDatabaseConfig } from "./config.js";
 import { withHbBuildTransaction } from "./hb-build-transaction.js";
+import { linkTaskOccurrences } from "./task-occurrences.js";
 import {
   buildCycleIndex,
   dateValue,
@@ -2300,18 +2301,20 @@ async function main() {
   await client.connect();
 
   try {
-    const { normalized, rebuilt, capabilityRefresh } = await withHbBuildTransaction(client, async () => {
+    const { normalized, occurrences, rebuilt, capabilityRefresh } = await withHbBuildTransaction(client, async () => {
       const normalized = await normalizeHawleyTables(client);
+      const occurrences = await linkTaskOccurrences(client);
       const rebuilt = await rebuildCalculations(client);
       const capabilityRefresh = (await client.query(
         "select core.refresh_worker_task_capabilities() as summary"
       )).rows[0]?.summary || {};
-      return { normalized, rebuilt, capabilityRefresh };
+      return { normalized, occurrences, rebuilt, capabilityRefresh };
     });
     console.log(JSON.stringify({
       status: "ok",
       writes: "hawley_db_only",
       normalized,
+      occurrences,
       rebuilt,
       capabilityRefresh
     }, null, 2));
