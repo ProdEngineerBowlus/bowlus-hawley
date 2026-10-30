@@ -1398,10 +1398,16 @@ function applyAsanaOverlay(row, asana, lookups) {
   row.start_date = dateValue(asana.start_on || asana.start_at) || row.start_date;
   row.end_date = dateValue(asana.due_on || asana.due_at) || row.end_date;
 
+  // Asana's Assigned On drives the worker page. Clearing it on an open task takes the task off the page, but only
+  // when Hawley saw a date there before (asana_assigned_on): tasks never dispatched in Asana and completed
+  // history keep the planned date.
   const asanaAssignedOn = asanaAssignedOnDate(rawFields);
   if (asanaAssignedOn) {
     row.assigned_on = asanaAssignedOn;
+  } else if (row.asana_assigned_on && !completed) {
+    row.assigned_on = null;
   }
+  row.asana_assigned_on = asanaAssignedOn || null;
 
   // Airtable's Assigned Worker link is Hawley's planning control surface only
   // when an Airtable Task Instance actually exists. Direct Hawley-created and
@@ -1539,6 +1545,7 @@ function asanaTaskRow(asana, lookups) {
     completed_on: completion.completedOn,
     asana_due_date: dateValue(asana.due_on || asana.due_at),
     assigned_on: asanaAssignedOnDate(rawFields),
+    asana_assigned_on: asanaAssignedOnDate(rawFields),
     worker_record_id: null,
     worker_name: null,
     worker_email: null,
@@ -1642,6 +1649,7 @@ const PROJECT_CREATOR_ASANA_OVERLAY_COLUMNS = Object.freeze([
   "completed_on",
   "asana_due_date",
   "assigned_on",
+  "asana_assigned_on",
   "worker_record_id",
   "worker_name",
   "worker_email",
