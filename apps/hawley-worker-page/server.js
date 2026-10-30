@@ -7,7 +7,7 @@ import crypto from "node:crypto";
 import { promisify } from "node:util";
 import pg from "pg";
 import { taskAttachmentsFromStorage, createAttachmentUrlProvider } from "./attachment-storage.js";
-import { buildCyclePreview, cyclePlannerOverview, publishCyclePlan } from "./cycle-planner.js";
+import { buildCyclePreview, cyclePlannerOverview, pendingAsanaPushes, publishCyclePlan, recordAsanaPushResults } from "./cycle-planner.js";
 import { getDatabaseConfig } from "../postgres-sync/src/config.js";
 
 const { Pool } = pg;
@@ -11194,21 +11194,96 @@ async function handleAdminCyclePlannerOverview(req, url) {
   return cyclePlannerOverview(pool, year, today);
 }
 
+const ASANA_CYCLE_FIELD_GID = "1203060130064229";
+
+// Enabled options of the Asana "Cycle" field, keyed by lower-case name ("c1.27" -> option gid).
+async function asanaCycleFieldOptions() {
+  const token = process.env.ASANA_PAT;
+  if (!token) return null;
+  try {
+    const field = await adminAsanaRequest(token, `/custom_fields/${ASANA_CYCLE_FIELD_GID}?opt_fields=enum_options.gid,enum_options.name,enum_options.enabled`, "GET", null, 0, 15000);
+    return new Map((field.enum_options || []).filter(option => option.enabled !== false).map(option => [String(option.name || "").trim().toLowerCase(), option.gid]));
+  } catch (error) {
+    console.warn("[hawley-cycle-planner]", JSON.stringify({ action: "asana_cycle_options_failed", error: error.message }));
+    return null;
+  }
+}
+
+// One-time push of a published plan: set the Cycle field on moved Asana tasks. Afterwards the Asana sync
+// owns day-to-day cycle changes again.
+async function pushCyclePlanToAsana(versionId, pushes, options) {
+  const token = process.env.ASANA_PAT;
+  const results = pushes.map(push => ({ ...push }));
+  const pending = results.filter(push => push.status === "pending" || push.status === "failed");
+  if (!pending.length) return results;
+  if (!token || !options) {
+    pending.forEach(push => { push.status = "failed"; push.error = "Asana is not reachable."; });
+  } else {
+    for (let index = 0; index < pending.length; index += 10) {
+      const batch = pending.slice(index, index + 10);
+      const actions = batch.map(push => ({
+        method: "put",
+        relative_path: `/tasks/${push.asanaTaskGid}`,
+        data: { custom_fields: { [ASANA_CYCLE_FIELD_GID]: options.get(push.label.toLowerCase()) } }
+      }));
+      try {
+        const responses = await adminAsanaRequest(token, "/batch", "POST", { actions }, 0, 30000);
+        batch.forEach((push, i) => {
+          const code = Number(responses?.[i]?.status_code || 500);
+          push.status = code < 400 ? "pushed" : "failed";
+          if (code >= 400) push.error = `Asana returned ${code}`;
+        });
+      } catch (error) {
+        batch.forEach(push => { push.status = "failed"; push.error = error.message; });
+      }
+    }
+  }
+  await recordAsanaPushResults(writePool, versionId, results);
+  return results;
+}
+
+function summarizePushes(pushes) {
+  return {
+    total: pushes.length,
+    pushed: pushes.filter(push => push.status === "pushed").length,
+    failed: pushes.filter(push => push.status === "failed").length
+  };
+}
+
 async function handleAdminCyclePlannerPreview(req) {
   const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
   requireAdminActor(actor);
-  return buildCyclePreview(pool, await readJsonBody(req), todayIso());
+  const body = await readJsonBody(req);
+  const options = await asanaCycleFieldOptions();
+  return buildCyclePreview(pool, body, todayIso(), undefined, { asanaCycleOptions: options ? new Set(options.keys()) : null });
 }
 
 async function handleAdminCyclePlannerPublish(req) {
   const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
   requireAdminActor(actor);
-  const result = await publishCyclePlan(writePool, await readJsonBody(req), {
+  const body = await readJsonBody(req);
+  const options = await asanaCycleFieldOptions();
+  const result = await publishCyclePlan(writePool, body, {
     today: todayIso(),
-    actorEmail: actor?.email || actor?.username || ""
+    actorEmail: actor?.email || actor?.username || "",
+    asanaCycleOptions: options ? new Set(options.keys()) : null
   });
-  console.log("[hawley-cycle-planner]", JSON.stringify({ action: "publish", ...result }));
-  return result;
+  const pushes = await pushCyclePlanToAsana(result.cyclePlanVersionId, result.asanaPushes, options);
+  const asanaPush = summarizePushes(pushes);
+  console.log("[hawley-cycle-planner]", JSON.stringify({ action: "publish", ...result, asanaPushes: undefined, asanaPush }));
+  // Refresh phase loads and allocations for the new plan; the publish itself is already committed.
+  runAdminProjectDownstreamRebuild().catch(error => console.warn("[hawley-cycle-planner]", JSON.stringify({ action: "rebuild_failed", error: error.message })));
+  return { ...result, asanaPushes: undefined, asanaPush };
+}
+
+async function handleAdminCyclePlannerRetryPush(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const versionId = String(body.cyclePlanVersionId || "");
+  const pushes = await pendingAsanaPushes(writePool, versionId);
+  const results = await pushCyclePlanToAsana(versionId, pushes, await asanaCycleFieldOptions());
+  return { ok: true, cyclePlanVersionId: versionId, asanaPush: summarizePushes(results) };
 }
 
 async function handleAdminPhaseCyclePaceOverride(req) {
@@ -13442,6 +13517,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/cycle-planner/preview" && req.method === "POST") {
       sendJson(res, 200, await handleAdminCyclePlannerPreview(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/cycle-planner/push" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminCyclePlannerRetryPush(req));
       return;
     }
 

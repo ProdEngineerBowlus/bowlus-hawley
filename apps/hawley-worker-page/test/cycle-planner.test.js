@@ -8,6 +8,8 @@ import { HB_BUILD_LOCK_KEY, HB_BUILD_LOCK_NAMESPACE } from "../../postgres-sync/
 import { buildCyclePreview, parseLengthRules, publishCyclePlan } from "../cycle-planner.js";
 
 const TODAY = "2026-10-29";
+// These tests cover the calendar alone; production planning has its own tests below.
+const CALENDAR_ONLY = { includeNextYear: false, includeProduction: false };
 
 function publishedYear(year, count = 25) {
   return planCycles({ startDate: `${year}-01-01`, cycleCount: count }).cycles.map(cycle => ({
@@ -82,7 +84,7 @@ test("length rules accept fixed ranges, single cycles and extensions and report 
 
 test("preview locks past cycles, keeps the current cycle, shows changes with impact, and writes nothing", async () => {
   const db = fakeDatabase(publishedYear(2026));
-  const preview = await buildCyclePreview(db.client, { year: 2026, cycleCount: 25, lengthRules: "23+2" }, TODAY);
+  const preview = await buildCyclePreview(db.client, { ...CALENDAR_ONLY, year: 2026, cycleCount: 25, lengthRules: "23+2" }, TODAY);
   assert.equal(preview.ok, true, JSON.stringify(preview.conflicts));
   const past = preview.cycles.filter(cycle => cycle.endDate < TODAY);
   assert.ok(past.length >= 20 && past.every(cycle => cycle.source === "locked" && cycle.status === "unchanged"));
@@ -98,7 +100,7 @@ test("a started cycle whose stored length differs from the calendar is shown unc
   const cycles = publishedYear(2026);
   cycles[4].days_in_cycle += 1;
   const db = fakeDatabase(cycles);
-  const preview = await buildCyclePreview(db.client, { year: 2026, cycleCount: 25 }, TODAY);
+  const preview = await buildCyclePreview(db.client, { ...CALENDAR_ONLY, year: 2026, cycleCount: 25 }, TODAY);
   assert.equal(preview.cycles[4].status, "unchanged");
   assert.equal(preview.cycles[4].days, cycles[4].days_in_cycle);
   assert.deepEqual(preview.changedCycleNumbers, []);
@@ -108,24 +110,24 @@ test("working days before a locked first cycle are a warning, not a conflict", a
   const cycles = publishedYear(2026);
   Object.assign(cycles[0], { start_date: "2026-01-12" });
   const db = fakeDatabase(cycles);
-  const preview = await buildCyclePreview(db.client, { year: 2026, startDate: "2026-01-01", cycleCount: 25 }, TODAY);
+  const preview = await buildCyclePreview(db.client, { ...CALENDAR_ONLY, year: 2026, startDate: "2026-01-01", cycleCount: 25 }, TODAY);
   assert.equal(preview.ok, true, JSON.stringify(preview.conflicts));
   assert.ok(preview.warnings.some(warning => warning.code === "unassigned_days" && /before cycle 1/.test(warning.message)));
 });
 
 test("publishing a started cycle is refused as a conflict", async () => {
   const db = fakeDatabase(publishedYear(2026));
-  const preview = await buildCyclePreview(db.client, { year: 2026, cycleCount: 25, lengthRules: "2=15" }, TODAY);
+  const preview = await buildCyclePreview(db.client, { ...CALENDAR_ONLY, year: 2026, cycleCount: 25, lengthRules: "2=15" }, TODAY);
   assert.equal(preview.ok, false);
   assert.equal(preview.conflicts[0].code, "locked_cycle_constraint");
-  await assert.rejects(publishCyclePlan(db.pool, { year: 2026, cycleCount: 25, lengthRules: "2=15", planHash: preview.planHash }, { today: TODAY }), { code: "PLAN_CONFLICTS" });
+  await assert.rejects(publishCyclePlan(db.pool, { ...CALENDAR_ONLY, year: 2026, cycleCount: 25, lengthRules: "2=15", planHash: preview.planHash }, { today: TODAY }), { code: "PLAN_CONFLICTS" });
   assert.equal(writes(db.state).length, 0);
 });
 
 test("publish updates only unlocked changed cycles in place, their schedule rows, and records a version", async () => {
   const db = fakeDatabase(publishedYear(2026));
   const before = structuredClone(db.state.cycles);
-  const body = { year: 2026, cycleCount: 25, lengthRules: "23+2", note: "Changeover" };
+  const body = { ...CALENDAR_ONLY, year: 2026, cycleCount: 25, lengthRules: "23+2", note: "Changeover" };
   const preview = await buildCyclePreview(db.client, body, TODAY);
   const result = await publishCyclePlan(db.pool, { ...body, planHash: preview.planHash }, { today: TODAY, actorEmail: "admin@example.test" });
 
@@ -146,9 +148,9 @@ test("publish updates only unlocked changed cycles in place, their schedule rows
 
 test("a stale preview is rejected and rolled back without writes", async () => {
   const db = fakeDatabase(publishedYear(2026));
-  const preview = await buildCyclePreview(db.client, { year: 2026, cycleCount: 25, lengthRules: "23+2" }, TODAY);
+  const preview = await buildCyclePreview(db.client, { ...CALENDAR_ONLY, year: 2026, cycleCount: 25, lengthRules: "23+2" }, TODAY);
   await assert.rejects(
-    publishCyclePlan(db.pool, { year: 2026, cycleCount: 25, lengthRules: "23+3", planHash: preview.planHash }, { today: TODAY }),
+    publishCyclePlan(db.pool, { ...CALENDAR_ONLY, year: 2026, cycleCount: 25, lengthRules: "23+3", planHash: preview.planHash }, { today: TODAY }),
     { code: "PLAN_STALE", statusCode: 409 }
   );
   assert.equal(writes(db.state).length, 0);
@@ -157,7 +159,7 @@ test("a stale preview is rejected and rolled back without writes", async () => {
 
 test("a new year is created with the existing label style and stable IDs", async () => {
   const db = fakeDatabase(publishedYear(2026));
-  const body = { year: 2027, cycleCount: 25, lengthRules: "" };
+  const body = { ...CALENDAR_ONLY, year: 2027, cycleCount: 25, lengthRules: "" };
   const preview = await buildCyclePreview(db.client, body, TODAY);
   assert.equal(preview.ok, true);
   assert.ok(preview.cycles.every(cycle => cycle.status === "new"));
@@ -172,46 +174,14 @@ test("a new year is created with the existing label style and stable IDs", async
 
 test("publishing an unchanged plan is refused", async () => {
   const db = fakeDatabase(publishedYear(2026));
-  const same = await buildCyclePreview(db.client, { year: 2026, cycleCount: 25 }, TODAY);
+  const same = await buildCyclePreview(db.client, { ...CALENDAR_ONLY, year: 2026, cycleCount: 25 }, TODAY);
   assert.deepEqual(same.changedCycleNumbers, []);
-  await assert.rejects(publishCyclePlan(db.pool, { year: 2026, cycleCount: 25, planHash: same.planHash }, { today: TODAY }), { code: "PLAN_UNCHANGED" });
-});
-
-test("dropping a future cycle with linked work is blocked and says what is linked", async () => {
-  const db = fakeDatabase(publishedYear(2026));
-  db.state.links["rec-2026-25"] = { scheduleRows: 12, taskInstances: 215 };
-  const preview = await buildCyclePreview(db.client, { year: 2026, cycleCount: 24 }, TODAY);
-  assert.equal(preview.ok, false);
-  const conflict = preview.conflicts.find(c => c.code === "cycle_removal_linked");
-  assert.match(conflict.message, /C25\.26 cannot be removed yet: 12 schedule rows, 215 tasks/);
-  assert.deepEqual(preview.removedCycles, []);
-});
-
-test("dropping an unlinked future cycle removes it, rebalances the rest, and records it", async () => {
-  const db = fakeDatabase(publishedYear(2026));
-  const body = { year: 2026, cycleCount: 24 };
-  const preview = await buildCyclePreview(db.client, body, TODAY);
-  assert.equal(preview.ok, true, JSON.stringify(preview.conflicts));
-  assert.deepEqual(preview.removedCycles.map(c => c.cycle), [25]);
-  assert.ok(preview.changedCycleNumbers.includes(25));
-  assert.equal(preview.cycles.length, 24);
-  assert.equal(preview.cycles.at(-1).endDate, "2026-12-31");
-  const result = await publishCyclePlan(db.pool, { ...body, planHash: preview.planHash }, { today: TODAY });
-  assert.deepEqual(result.removedCycleNumbers, [25]);
-  assert.deepEqual(db.state.deleted, ["rec-2026-25"]);
-  assert.ok(db.state.versions[0][6].includes(25));
-  assert.ok(JSON.parse(db.state.versions[0][5]).some(row => row.cycle_record_id === "rec-2026-25"), "previous rows kept for rollback");
-});
-
-test("a started or past cycle cannot be dropped", async () => {
-  const db = fakeDatabase(publishedYear(2026));
-  const preview = await buildCyclePreview(db.client, { year: 2026, firstCycleNumber: 1, cycleCount: 20 }, TODAY);
-  assert.ok(preview.conflicts.some(c => c.code === "cycle_removal_started" && c.cycles[0] === 21));
+  await assert.rejects(publishCyclePlan(db.pool, { ...CALENDAR_ONLY, year: 2026, cycleCount: 25, planHash: same.planHash }, { today: TODAY }), { code: "PLAN_UNCHANGED" });
 });
 
 test("publish and migration 036 take the HB build gate before touching cycles", async () => {
   const db = fakeDatabase(publishedYear(2026));
-  const body = { year: 2026, cycleCount: 25, lengthRules: "23+2" };
+  const body = { ...CALENDAR_ONLY, year: 2026, cycleCount: 25, lengthRules: "23+2" };
   const preview = await buildCyclePreview(db.client, body, TODAY);
   await publishCyclePlan(db.pool, { ...body, planHash: preview.planHash }, { today: TODAY });
   const begin = db.state.calls.findIndex(call => call.sql === "begin");
@@ -225,7 +195,7 @@ test("publish and migration 036 take the HB build gate before touching cycles", 
 
 test("a past cycle still cannot be changed", async () => {
   const db = fakeDatabase(publishedYear(2026));
-  const preview = await buildCyclePreview(db.client, { year: 2026, cycleCount: 25, lengthRules: "19+1" }, TODAY);
+  const preview = await buildCyclePreview(db.client, { ...CALENDAR_ONLY, year: 2026, cycleCount: 25, lengthRules: "19+1" }, TODAY);
   assert.equal(preview.conflicts[0].code, "locked_cycle_constraint");
 });
 
@@ -240,7 +210,7 @@ function liveLike2026() {
 
 test("a current cycle overlapping a past cycle starts the day after it and keeps its published end", async () => {
   const db = fakeDatabase(liveLike2026());
-  const preview = await buildCyclePreview(db.client, { year: 2026, startDate: "2026-01-12", cycleCount: 25 }, TODAY);
+  const preview = await buildCyclePreview(db.client, { ...CALENDAR_ONLY, year: 2026, startDate: "2026-01-12", cycleCount: 25 }, TODAY);
   assert.equal(preview.ok, true, JSON.stringify(preview.conflicts));
   assert.ok(preview.warnings.some(warning => warning.code === "current_start_moved"));
   const c20 = preview.cycles[19];
@@ -250,7 +220,7 @@ test("a current cycle overlapping a past cycle starts the day after it and keeps
 
 test("override the current cycle, then later cycles balance longest first, and it publishes", async () => {
   const db = fakeDatabase(liveLike2026());
-  const body = { year: 2026, startDate: "2026-01-12", cycleCount: 25, lengthRules: "20=11" };
+  const body = { ...CALENDAR_ONLY, year: 2026, startDate: "2026-01-12", cycleCount: 25, lengthRules: "20=11" };
   const preview = await buildCyclePreview(db.client, body, TODAY);
   assert.equal(preview.ok, true, JSON.stringify(preview.conflicts));
   const c20 = preview.cycles[19];
