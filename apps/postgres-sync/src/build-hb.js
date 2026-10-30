@@ -4,6 +4,7 @@ import { getDatabaseConfig } from "./config.js";
 import { withHbBuildTransaction } from "./hb-build-transaction.js";
 import { linkTaskOccurrences } from "./task-occurrences.js";
 import { promoteTemplateVersions } from "./template-editor.js";
+import { syncTaskHelpers } from "./team-tasks.js";
 import {
   buildCycleIndex,
   dateValue,
@@ -2307,7 +2308,7 @@ async function main() {
       // Template versions whose "applies from" cycle has started become current before tasks are linked.
       const shopToday = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles" }).format(new Date());
       const templatesPromoted = (await promoteTemplateVersions(client, shopToday)).length;
-      const occurrences = { ...(await linkTaskOccurrences(client)), templatesPromoted };
+      const occurrences = { ...(await linkTaskOccurrences(client)), templatesPromoted, teamTaskHelpers: await syncTaskHelpers(client) };
       const rebuilt = await rebuildCalculations(client);
       const capabilityRefresh = (await client.query(
         "select core.refresh_worker_task_capabilities() as summary"

@@ -10,6 +10,7 @@ import { taskAttachmentsFromStorage, createAttachmentUrlProvider } from "./attac
 import { buildTaskTimeTable, saveTaskMappingRules, taskMappingGroups, taskTimeCoverage, taskTimeObservations } from "../postgres-sync/src/task-occurrences.js";
 import { HB_BUILD_LOCK_KEY, HB_BUILD_LOCK_NAMESPACE } from "../postgres-sync/src/hb-build-transaction.js";
 import { listTemplates, saveTemplateVersion, templateDetail, templateEditorOptions } from "../postgres-sync/src/template-editor.js";
+import { parseTrialEmails } from "../postgres-sync/src/team-tasks.js";
 import { ASANA_CYCLE_FIELD_GID, addCycleOptions, pushCycleField } from "./asana-cycle-push.js";
 import { buildCyclePreview, cyclePlannerOverview, pendingAsanaPushes, productionScheduleRows, publishCyclePlan, recordAsanaPushResults } from "./cycle-planner.js";
 import { getDatabaseConfig } from "../postgres-sync/src/config.js";
@@ -2081,6 +2082,8 @@ function taskFromRow(row) {
     title: row.task_name || "(Untitled task)",
     projectName: row.asana_project_name || "",
     trackingMode: isEngineeringChange ? "parallel_admin" : "standard",
+    // Team tasks: helpers log their own time; only the assignee completes the task.
+    assignmentRole: row.assignment_role === "helper" ? "helper" : "assignee",
     completed: Boolean(row.completed),
     status: row.completed ? "Done" : "Open",
     phase,
@@ -3338,13 +3341,26 @@ async function workerAssignments(date) {
         order by
           coalesce(task_instance.asana_task_gid, task_instance.rev1_task_instance_id::text),
           task_instance.assigned_on desc
+      ), crew as (
+        -- Team tasks: the assignee's row plus one row per helper from the Asana Helpers field (trial
+        -- workers only until enabled for everyone). Helper rows carry no estimate.
+        select si.*, si.worker_name as crew_worker_name, si.worker_email as crew_worker_email, 'assignee'::text as assignment_role
+          from scoped_instances si
+        union all
+        select si.*, coalesce(helper.helper_name, helper.helper_email), helper.helper_email, 'helper'::text
+          from scoped_instances si
+          join hb.task_helpers helper on helper.asana_task_gid = si.asana_task_gid
+          cross join hb.team_task_settings settings
+         where lower(helper.helper_email) <> lower(coalesce(si.worker_email, ''))
+           and (settings.enabled_for_all or lower(helper.helper_email) = any(settings.trial_worker_emails))
       )
       select
         task_instance.rev1_task_instance_id as task_instance_id,
         task_instance.airtable_record_id,
         task_instance.asana_task_gid,
-        task_instance.worker_name,
-        task_instance.worker_email,
+        task_instance.crew_worker_name as worker_name,
+        task_instance.crew_worker_email as worker_email,
+        task_instance.assignment_role,
         task_instance.assigned_on,
         task_instance.task_name,
         coalesce(
@@ -3355,7 +3371,8 @@ async function workerAssignments(date) {
         coalesce(task_instance.phase_label, task_instance.section_column) as phase_name,
         task_instance.cycle_label as cycle_name,
         coalesce(task_instance.vin_text, task_instance.vin::text) as vin,
-        round(coalesce(task_instance.estimated_batch_task_time_seconds, task_instance.estimated_task_time_seconds, 0)::numeric / 3600.0, 2)::numeric(10,2) as estimated_hours,
+        case when task_instance.assignment_role = 'helper' then 0::numeric(10,2)
+             else round(coalesce(task_instance.estimated_batch_task_time_seconds, task_instance.estimated_task_time_seconds, 0)::numeric / 3600.0, 2)::numeric(10,2) end as estimated_hours,
         task_instance.actual_time_minutes,
         task_instance.asana_permalink_url,
         ops.jsonb_display_text(task_instance.fields_json -> 'SOP Link') as sop_link,
@@ -3385,13 +3402,13 @@ async function workerAssignments(date) {
         coalesce(bom.part_names, '{}'::text[]) as part_names,
         coalesce(bom.sheet_names, '{}'::text[]) as cnc_sheet_names,
         coalesce(bom.material_names, '{}'::text[]) as material_names
-      from scoped_instances task_instance
+      from crew task_instance
       left join hb.task_templates template
         on template.task_record_id = task_instance.tasks_record_id
       left join reporting.task_template_bom bom
         on bom.task_record_id = template.task_record_id
       order by
-        task_instance.worker_name nulls last,
+        task_instance.crew_worker_name nulls last,
         coalesce(
           task_instance.asana_completed,
           lower(coalesce(task_instance.task_status, '')) = any(array['true', 'complete', 'completed', 'done', 'yes'])
@@ -3902,6 +3919,7 @@ async function cycleDays(date) {
           coalesce(sum(estimated_hours) filter (where not completed), 0)::numeric as remaining_hours
         from reporting.hawley_worker_page_assignments
         where assigned_on is not null
+          and assignment_role = 'assignee'
           and (
             cycle_name = (select cycle_name from selected)
             or (select cycle_name from selected) is null
@@ -5082,7 +5100,7 @@ async function assignedWorkerTaskForWrite(employee, date, taskId, authActor = nu
   const assignmentResult = await pool.query(
     `
       with scoped_assignments as (
-        select distinct on (coalesce(assignment.asana_task_gid, assignment.task_instance_id::text))
+        select distinct on (coalesce(assignment.asana_task_gid, assignment.task_instance_id::text), lower(coalesce(assignment.worker_email, '')))
           assignment.*,
           (assignment.assigned_on < $1::date) as is_carryover
         from reporting.hawley_worker_page_assignments assignment
@@ -5097,6 +5115,7 @@ async function assignedWorkerTaskForWrite(employee, date, taskId, authActor = nu
           )
         order by
           coalesce(assignment.asana_task_gid, assignment.task_instance_id::text),
+          lower(coalesce(assignment.worker_email, '')),
           assignment.assigned_on desc
       )
       select
@@ -5110,7 +5129,7 @@ async function assignedWorkerTaskForWrite(employee, date, taskId, authActor = nu
         on task_instance.rev1_task_instance_id = assignment.task_instance_id
       left join raw.asana_tasks source_task
         on source_task.gid = assignment.asana_task_gid
-      limit 2
+      limit 20
     `,
     [date, String(taskId), date === todayIso()]
   );
@@ -6906,6 +6925,10 @@ async function handleWorkerTaskAction(req) {
 
     if (!worker || !task) {
       ({ worker, task } = await assignedWorkerTaskForWrite(employee, date, taskId, authActor));
+    }
+
+    if (task.assignmentRole === "helper" && (action === "complete" || action === "reopen")) {
+      throw actionError("You are helping on this task. The assignee marks it complete.", 409, { code: "HELPER_CANNOT_COMPLETE" });
     }
 
     const authAudit = actorAuditPayload(authActor, worker.id);
@@ -11285,6 +11308,81 @@ async function handleAdminCyclePlannerPublish(req) {
   return { ...result, asanaPushes: undefined, asanaOptionsToAdd: undefined, asanaPush };
 }
 
+async function teamTaskSettings(db) {
+  const settings = (await db.query("select * from hb.team_task_settings where settings_key = 'default'")).rows[0] || {};
+  const helpers = (await db.query("select count(*)::int as helpers, count(distinct asana_task_gid)::int as tasks from hb.task_helpers")).rows[0];
+  return {
+    helpersFieldGid: settings.helpers_field_gid || null,
+    trialWorkerEmails: settings.trial_worker_emails || [],
+    enabledForAll: Boolean(settings.enabled_for_all),
+    helpers: helpers.helpers,
+    tasksWithHelpers: helpers.tasks
+  };
+}
+
+async function handleAdminTeamTasks(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  return teamTaskSettings(pool);
+}
+
+async function handleAdminTeamTasksSettings(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  await writePool.query(
+    "update hb.team_task_settings set trial_worker_emails = $1::text[], enabled_for_all = $2, updated_by = $3, updated_at = now() where settings_key = 'default'",
+    [parseTrialEmails(body.trialWorkerEmails), Boolean(body.enabledForAll), actor?.email || actor?.username || ""]
+  );
+  return { ok: true, ...(await teamTaskSettings(writePool)) };
+}
+
+// Creates (or finds) the workspace "Helpers" People field and adds it to every VIN project with open work.
+async function handleAdminTeamTasksSetup(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const token = process.env.ASANA_PAT;
+  if (!token) throw actionError("Asana is not configured.", 503);
+  let fieldGid = (await teamTaskSettings(writePool)).helpersFieldGid;
+  if (!fieldGid) {
+    let offset = "";
+    do {
+      const page = await fetch(`https://app.asana.com/api/1.0/workspaces/${ADMIN_ASANA_WORKSPACE_GID}/custom_fields?opt_fields=name,resource_subtype&limit=100${offset ? `&offset=${offset}` : ""}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!page.ok) throw actionError(`Asana custom field list failed (${page.status}).`, page.status);
+      const json = await page.json();
+      fieldGid = (json.data || []).find(field => field.name === "Helpers" && field.resource_subtype === "people")?.gid || fieldGid;
+      offset = json.next_page?.offset || "";
+    } while (!fieldGid && offset);
+    if (!fieldGid) {
+      const created = await adminAsanaRequest(token, "/custom_fields", "POST", {
+        workspace: ADMIN_ASANA_WORKSPACE_GID,
+        name: "Helpers",
+        resource_subtype: "people",
+        description: "People helping on this task. The assignee stays responsible; helpers log their own time in Hawley."
+      }, 0, 15000);
+      fieldGid = created.gid;
+    }
+    await writePool.query("update hb.team_task_settings set helpers_field_gid = $1, updated_by = $2, updated_at = now() where settings_key = 'default'", [fieldGid, actor?.email || ""]);
+  }
+  const projects = (await pool.query(
+    `select distinct asana_project_gid from hb.rev1_task_instances
+      where asana_project_gid is not null and asana_portfolio_name ilike 'VINs%' and not coalesce(task_completed, false)`
+  )).rows.map(row => row.asana_project_gid);
+  let attached = 0;
+  const failed = [];
+  for (const projectGid of projects) {
+    try {
+      await adminAsanaRequest(token, `/projects/${projectGid}/addCustomFieldSetting`, "POST", { custom_field: fieldGid, is_important: true }, 0, 15000);
+      attached += 1;
+    } catch (error) {
+      if (/already/i.test(error.message)) attached += 1;
+      else failed.push(projectGid);
+    }
+  }
+  console.log("[hawley-team-tasks]", JSON.stringify({ action: "setup", fieldGid, projects: projects.length, attached, failed }));
+  return { ok: true, helpersFieldGid: fieldGid, projects: projects.length, attached, failed };
+}
+
 async function handleAdminTemplates(req, url) {
   const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
   requireAdminActor(actor);
@@ -11681,6 +11779,12 @@ async function adminAttachProjectCustomFields(token, projectGid) {
       custom_field: field,
       is_important: false
     });
+  }
+  // Team tasks: new projects get the Helpers field once it is set up. Best effort; never blocks creation.
+  const helpersFieldGid = (await pool.query("select helpers_field_gid from hb.team_task_settings where settings_key = 'default'").catch(() => ({ rows: [] }))).rows[0]?.helpers_field_gid;
+  if (helpersFieldGid) {
+    await adminAsanaRequest(token, `/projects/${projectGid}/addCustomFieldSetting`, "POST", { custom_field: helpersFieldGid, is_important: true })
+      .catch(error => console.warn("[hawley-team-tasks]", JSON.stringify({ action: "attach_helpers_failed", projectGid, error: error.message })));
   }
 }
 
@@ -13612,6 +13716,21 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/cycle-planner/preview" && req.method === "POST") {
       sendJson(res, 200, await handleAdminCyclePlannerPreview(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/team-tasks" && req.method === "GET") {
+      sendJson(res, 200, await handleAdminTeamTasks(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/team-tasks/settings" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminTeamTasksSettings(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/team-tasks/setup" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminTeamTasksSetup(req));
       return;
     }
 
