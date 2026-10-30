@@ -1,28 +1,44 @@
 // Links task instances to work occurrences (task template system, ramp step 2). Runs inside every HB
 // rebuild, so tasks created in Asana or by Project Creator are linked within a rebuild of arriving.
-// Same rules as migration 039: VIN tasks by definition + VIN, VIN-less tasks by schedule row, repeats
-// numbered after the occurrences that already exist for that subject.
+// The definition comes from the task's template key, else from an admin mapping rule (task_mapping_rules:
+// normalized name + phase, then name in any phase). The subject is the VIN (or the VIN at the start of a
+// "VINs - …" project name such as "319 - Frontier"), else the schedule row, else the cycle + phase bucket.
+// Repeats are numbered after the occurrences that already exist for that subject.
+
+// Same normalization in SQL and JS: trimmed, lower case, single spaces.
+export const NORMALIZED_NAME_SQL = "lower(regexp_replace(trim(coalesce(%s, '')), '\\s+', ' ', 'g'))";
+export const normalizeTaskName = name => String(name || "").trim().replace(/\s+/g, " ").toLowerCase();
+const normalized = column => NORMALIZED_NAME_SQL.replace("%s", column);
 
 export async function linkTaskOccurrences(client) {
   const linked = await client.query(`
-    with candidates as (
-      select t.rev1_task_instance_id,
-             t.tasks_key as task_definition_id,
-             case when t.vin is not null then 'vin' else 'batch' end as subject_kind,
-             case when t.vin is not null then t.vin::text else t.line_schedule_record_id end as subject_key,
-             t.line_schedule_record_id,
-             t.cycle_record_id,
-             coalesce(t.task_completed, false) as completed
+    with base as (
+      select t.rev1_task_instance_id, t.tasks_key, ${normalized("t.task_name")} as norm_name, coalesce(t.phase_label, '') as phase,
+             coalesce(t.vin::text, case when t.asana_portfolio_name ilike 'VINs%' then substring(t.asana_project_name from '^\\s*(\\d{2,4})\\M') end) as vin_text,
+             t.line_schedule_record_id, t.cycle_record_id, coalesce(t.task_completed, false) as completed
         from hb.rev1_task_instances t
-        join hb.task_definitions d on d.task_definition_id = t.tasks_key
        where t.occurrence_id is null
-         and (t.vin is not null or t.line_schedule_record_id is not null)
+    ), resolved as (
+      select b.*, coalesce(d.task_definition_id, rp.task_definition_id, ra.task_definition_id) as task_definition_id
+        from base b
+        left join hb.task_definitions d on d.task_definition_id = b.tasks_key
+        left join hb.task_mapping_rules rp on rp.match_name = b.norm_name and rp.match_phase = b.phase and rp.action = 'map'
+        left join hb.task_mapping_rules ra on ra.match_name = b.norm_name and ra.match_phase = '' and ra.action = 'map'
+    ), candidates as (
+      select r.rev1_task_instance_id, r.task_definition_id,
+             case when r.vin_text is not null then 'vin' else 'batch' end as subject_kind,
+             coalesce(r.vin_text, r.line_schedule_record_id,
+                      case when r.cycle_record_id is not null and r.phase <> '' then 'cycle:' || r.cycle_record_id || ':' || r.phase end) as subject_key,
+             r.line_schedule_record_id, r.cycle_record_id, r.completed
+        from resolved r
+       where r.task_definition_id is not null
     ), numbered as (
       select c.*,
              coalesce((select max(o.occurrence_number) from hb.work_occurrences o
                         where o.task_definition_id = c.task_definition_id and o.subject_kind = c.subject_kind and o.subject_key = c.subject_key), 0)
              + row_number() over (partition by c.task_definition_id, c.subject_kind, c.subject_key order by c.rev1_task_instance_id) as occurrence_number
         from candidates c
+       where c.subject_key is not null
     ), keyed as (
       select n.*, 'occ:' || n.task_definition_id || ':' || n.subject_kind || ':' || n.subject_key || ':' || n.occurrence_number as occurrence_id,
              (select max(v.version_number) from hb.task_definition_versions v where v.task_definition_id = n.task_definition_id) as version_number
@@ -148,4 +164,71 @@ export async function taskTimeCoverage(db) {
   );
   const phases = await db.query(`select distinct phase_name from hb.task_definition_versions where phase_name is not null order by phase_name`);
   return { ...result.rows[0], phases: phases.rows.map(row => row.phase_name) };
+}
+
+// Review groups: unlinked tasks grouped by normalized name + phase, with template suggestions by name
+// (exact phase first). Groups already decided as "ignore" are left out.
+export async function taskMappingGroups(db, { search = "", limit = 200 } = {}) {
+  const groups = await db.query(
+    `with u as materialized (
+       select ${normalized("t.task_name")} as norm_name, coalesce(t.phase_label, '') as phase, t.task_name, t.vin,
+              coalesce(t.actual_time_seconds, 0) > 0 and coalesce(t.task_completed, false) as timed,
+              t.asana_project_name, coalesce(t.asana_portfolio_name, '') as portfolio, t.completed_on
+         from hb.rev1_task_instances t
+        where t.occurrence_id is null
+     ), g as materialized (
+       select norm_name, phase, min(task_name) as task_name, count(*)::int as tasks, count(*) filter (where timed)::int as timed_tasks,
+              array_agg(distinct portfolio) as portfolios, (array_agg(distinct asana_project_name))[1:3] as projects,
+              max(completed_on)::text as last_completed
+         from u group by norm_name, phase
+     ), defs as materialized (
+       select distinct on (v.task_definition_id) v.task_definition_id, v.task_name, v.phase_name, ${normalized("v.task_name")} as norm_name
+         from hb.task_definition_versions v order by v.task_definition_id, v.version_number desc
+     ), suggestions as (
+       -- One join for all groups; a per-group subquery came close to the 15 s statement timeout on live data.
+       select g.norm_name, g.phase,
+              json_agg(json_build_object('taskDefinitionId', d.task_definition_id, 'taskName', d.task_name, 'phaseName', d.phase_name,
+                                         'samePhase', d.phase_name = g.phase) order by d.phase_name = g.phase desc, d.phase_name) as suggestions
+         from g join defs d on d.norm_name = g.norm_name
+        group by g.norm_name, g.phase
+     )
+     select g.*, coalesce(s.suggestions, '[]'::json) as suggestions,
+            rp.action as rule_action, coalesce(rp.task_definition_id, ra.task_definition_id) as rule_definition_id
+       from g
+       left join suggestions s on s.norm_name = g.norm_name and s.phase = g.phase
+       left join hb.task_mapping_rules rp on rp.match_name = g.norm_name and rp.match_phase = g.phase
+       left join hb.task_mapping_rules ra on ra.match_name = g.norm_name and ra.match_phase = ''
+      where coalesce(rp.action, ra.action, '') <> 'ignore'
+        and ($1::text = '' or g.norm_name like '%' || lower($1::text) || '%' or lower(g.phase) = lower($1::text))
+      order by g.timed_tasks desc, g.tasks desc
+      limit $2::int`,
+    [String(search || "").trim(), Math.min(Math.max(Number(limit) || 200, 1), 1000)]
+  );
+  const totals = await db.query(
+    `select count(*)::int as unlinked, count(*) filter (where coalesce(actual_time_seconds, 0) > 0 and coalesce(task_completed, false))::int as unlinked_timed
+       from hb.rev1_task_instances where occurrence_id is null`
+  );
+  const definitions = await db.query(
+    `select distinct on (v.task_definition_id) v.task_definition_id as "taskDefinitionId", v.task_name as "taskName", v.phase_name as "phaseName"
+       from hb.task_definition_versions v order by v.task_definition_id, v.version_number desc`
+  );
+  return { ...totals.rows[0], groups: groups.rows, definitions: definitions.rows };
+}
+
+// Saves admin decisions and links the affected tasks right away (inside the HB build gate).
+export async function saveTaskMappingRules(client, rules, decidedBy = "") {
+  for (const rule of rules) {
+    const action = rule.action === "ignore" ? "ignore" : "map";
+    const definitionId = action === "map" ? String(rule.taskDefinitionId || "") : null;
+    if (action === "map" && !definitionId) throw Object.assign(new Error("Pick a template to map to."), { statusCode: 400 });
+    await client.query(
+      `insert into hb.task_mapping_rules (match_name, match_phase, action, task_definition_id, note, decided_by)
+       values ($1, $2, $3, $4, $5, $6)
+       on conflict (match_name, match_phase) do update
+         set action = excluded.action, task_definition_id = excluded.task_definition_id, note = excluded.note,
+             decided_by = excluded.decided_by, decided_at = now()`,
+      [normalizeTaskName(rule.name), String(rule.phase || ""), action, definitionId, String(rule.note || "").slice(0, 500), decidedBy]
+    );
+  }
+  return linkTaskOccurrences(client);
 }
