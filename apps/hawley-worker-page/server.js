@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 import { promisify } from "node:util";
 import pg from "pg";
 import { taskAttachmentsFromStorage, createAttachmentUrlProvider } from "./attachment-storage.js";
+import { buildTaskTimeTable, taskTimeCoverage, taskTimeObservations } from "../postgres-sync/src/task-occurrences.js";
 import { buildCyclePreview, cyclePlannerOverview, pendingAsanaPushes, productionScheduleRows, publishCyclePlan, recordAsanaPushResults } from "./cycle-planner.js";
 import { getDatabaseConfig } from "../postgres-sync/src/config.js";
 
@@ -11312,6 +11313,17 @@ async function handleAdminCyclePlannerPublish(req) {
   return { ...result, asanaPushes: undefined, asanaOptionsToAdd: undefined, asanaPush };
 }
 
+async function handleAdminTaskTimes(req, url) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const phase = url.searchParams.get("phase") || "";
+  const search = url.searchParams.get("q") || "";
+  const mode = url.searchParams.get("mode") === "cycle" ? "cycle" : "vin";
+  const columns = Math.min(Math.max(Number(url.searchParams.get("columns")) || 12, 1), 40);
+  const [observations, coverage] = await Promise.all([taskTimeObservations(pool, { phase, search }), taskTimeCoverage(pool)]);
+  return { phase, search, mode, coverage, ...buildTaskTimeTable(observations, { mode, columns }) };
+}
+
 async function handleAdminProductionSchedule(req, url) {
   const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
   requireAdminActor(actor);
@@ -13560,6 +13572,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/cycle-planner/preview" && req.method === "POST") {
       sendJson(res, 200, await handleAdminCyclePlannerPreview(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/task-times" && req.method === "GET") {
+      sendJson(res, 200, await handleAdminTaskTimes(req, url));
       return;
     }
 
