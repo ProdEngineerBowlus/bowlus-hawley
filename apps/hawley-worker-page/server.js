@@ -167,6 +167,23 @@ const pool = new Pool({
   statement_timeout: 15000
 });
 const writePool = new Pool(runtimeDatabaseConfig);
+// Diagnostics: log failed or slow (>3 s) statements with the first line of SQL, so timeouts name their query.
+for (const [label, target] of [["read", pool], ["write", writePool]]) {
+  const query = target.query.bind(target);
+  target.query = (...args) => {
+    if (typeof args[args.length - 1] === "function") return query(...args);
+    const started = Date.now();
+    const text = String(typeof args[0] === "string" ? args[0] : args[0]?.text || "").replace(/s+/g, " ").trim().slice(0, 240);
+    return query(...args).then(result => {
+      const ms = Date.now() - started;
+      if (ms > 3000) console.warn("[hawley-slow-query]", JSON.stringify({ pool: label, ms, sql: text }));
+      return result;
+    }, error => {
+      console.error("[hawley-query-error]", JSON.stringify({ pool: label, ms: Date.now() - started, error: error.message, sql: text }));
+      throw error;
+    });
+  };
+}
 const migrationsDir = path.join(repoRoot, "db", "migrations");
 const viewsDir = path.join(repoRoot, "db", "views");
 
@@ -13953,6 +13970,7 @@ const server = http.createServer(async (req, res) => {
     await serveStatic(req, res, url);
   } catch (error) {
     const publicError = publicErrorMessage(error);
+    console.error("[hawley-request-error]", JSON.stringify({ path: url?.pathname, status: publicError.status, error: error.message }));
     sendError(res, publicError.status, publicError.message, {
       code: error.code || undefined
     });
