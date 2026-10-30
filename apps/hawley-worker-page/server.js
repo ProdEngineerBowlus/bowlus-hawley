@@ -11195,7 +11195,28 @@ async function handleAdminCyclePlannerOverview(req, url) {
   requireAdminActor(actor);
   const today = todayIso();
   const year = Number(url.searchParams.get("year")) || Number(today.slice(0, 4));
-  return cyclePlannerOverview(pool, year, today);
+  const overview = await cyclePlannerOverview(pool, year, today);
+  // Published cycles of both years that have no option on the Asana Cycle field yet.
+  const options = await asanaCycleFieldOptions();
+  overview.asanaMissingCycleOptions = options ? publishedCycleLabels(overview).filter(label => !options.has(label.toLowerCase())) : null;
+  return overview;
+}
+
+function publishedCycleLabels(overview) {
+  return [...overview.published, ...(overview.nextYear?.published || [])]
+    .map(row => `C${row.cycle}.${String(row.year).slice(-2)}`);
+}
+
+async function handleAdminCyclePlannerAsanaOptions(req, url) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const today = todayIso();
+  const body = await readJsonBody(req);
+  const year = Number(body.year) || Number(today.slice(0, 4));
+  const overview = await cyclePlannerOverview(pool, year, today);
+  const result = await addAsanaCycleOptions(publishedCycleLabels(overview), await asanaCycleFieldOptions());
+  console.log("[hawley-cycle-planner]", JSON.stringify({ action: "add_cycle_options", added: result.added, failed: result.failed }));
+  return { ok: true, added: result.added, failed: result.failed };
 }
 
 
@@ -13626,6 +13647,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/production-schedule" && req.method === "GET") {
       sendJson(res, 200, await handleAdminProductionSchedule(req, url));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/cycle-planner/asana-options" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminCyclePlannerAsanaOptions(req, url));
       return;
     }
 

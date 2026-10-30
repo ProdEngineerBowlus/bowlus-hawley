@@ -1742,6 +1742,7 @@
           <p class="muted">Type a number in Days to fix that cycle's length, then Balance remaining spreads the other cycles (longest first). Reset clears your numbers. Rules: <strong>22-25=8</strong> fixes cycles 22-25 at 8 working days, <strong>20+4</strong> extends cycle 20 by 4 days. Past cycles are locked; the current cycle keeps its start date. The VIN plan for every future cycle in both years is regenerated with the cycles: odd/even sets, A pair, B-H stepping back from the pair. Fewer cycles push VINs into the next year.</p>
           ${planner?.scheduleDateMismatches ? `<div class="notice risk">${escapeHtml(`${formatNumber(planner.scheduleDateMismatches)} production schedule rows have dates that differ from their cycle.`)}</div>` : ""}
           ${state.cyclePlanMessage ? `<div class="notice ${preview && !preview.ok ? "risk" : ""}">${escapeHtml(state.cyclePlanMessage)}</div>` : ""}
+          ${planner?.asanaMissingCycleOptions?.length ? `<div class="notice">${escapeHtml(`Asana's Cycle field is missing ${planner.asanaMissingCycleOptions.length} published cycles (${planner.asanaMissingCycleOptions[0]}${planner.asanaMissingCycleOptions.length > 1 ? ` - ${planner.asanaMissingCycleOptions.at(-1)}` : ""}).`)} <button class="btn compact" type="button" data-action="cycle-plan-asana-options">Add them to Asana</button></div>` : ""}
           ${state.cyclePlanPushFailedVersion ? `<div class="notice risk">Some Asana tasks were not updated. <button class="btn compact" type="button" data-action="cycle-plan-retry-push">Retry Asana push</button></div>` : ""}
           ${(preview?.conflicts || []).map(c => `<div class="notice risk">${escapeHtml(c.message)}</div>`).join("")}
           ${(preview?.warnings || []).map(w => `<div class="notice">${escapeHtml(w.message)}</div>`).join("")}
@@ -2393,6 +2394,19 @@
     } else if (action === "cycle-plan-reset") {
       root.querySelectorAll('[data-cycle-plan="lengthRules"], [data-cycle-plan-next="lengthRules"]').forEach(input => { input.value = ""; });
       root.querySelector('[data-action="cycle-plan-preview"]')?.click();
+    } else if (action === "cycle-plan-asana-options") {
+      state.cyclePlanLoading = true;
+      render();
+      try {
+        const result = await postJson("/api/admin/cycle-planner/asana-options", { year: Number(state.cyclePlanYear) });
+        await loadCyclePlanner();
+        state.cyclePlanMessage = `Added ${result.added.length} Cycle options to Asana${result.failed.length ? `; could not add ${result.failed.join(", ")}` : ""}.`;
+      } catch (error) {
+        state.cyclePlanMessage = error.message || "Could not add Asana options.";
+      } finally {
+        state.cyclePlanLoading = false;
+        render();
+      }
     } else if (action === "cycle-plan-retry-push") {
       state.cyclePlanLoading = true;
       render();
