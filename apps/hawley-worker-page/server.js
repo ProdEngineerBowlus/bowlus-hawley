@@ -173,7 +173,7 @@ for (const [label, target] of [["read", pool], ["write", writePool]]) {
   target.query = (...args) => {
     if (typeof args[args.length - 1] === "function") return query(...args);
     const started = Date.now();
-    const text = String(typeof args[0] === "string" ? args[0] : args[0]?.text || "").replace(/s+/g, " ").trim().slice(0, 240);
+    const text = String(typeof args[0] === "string" ? args[0] : args[0]?.text || "").replace(/\s+/g, " ").trim().slice(0, 240);
     return query(...args).then(result => {
       const ms = Date.now() - started;
       if (ms > 3000) console.warn("[hawley-slow-query]", JSON.stringify({ pool: label, ms, sql: text }));
@@ -4433,7 +4433,7 @@ function isFabPhase(value) {
   const phase = String(value || "")
     .trim()
     .replace(/[–—]/g, "-")
-    .replace(/\s+/g, " ")
+    .replace(/s+/g, " ")
     .toUpperCase();
   return /^FAB(?:\s*-?\s*(?:A|B|1|2|3|1-3))?$/.test(phase);
 }
@@ -6507,7 +6507,7 @@ async function reconcileLiveScheduleForCurrentDate(date) {
 }
 
 function timeStudyLabel(value) {
-  return String(value || "").trim().replace(/\s+/g, " ").slice(0, 80);
+  return String(value || "").trim().replace(/s+/g, " ").slice(0, 80);
 }
 
 async function closeActiveTimeStudyLaps(client, workerId, taskId, date, stoppedAt, reason, actor = null) {
@@ -6856,7 +6856,7 @@ async function handleWorkerAppIssueReport(req) {
   const body = await readJsonBody(req);
   const employee = canonicalWorkerIdForWrites(body.employee || "");
   const date = String(body.date || todayIso()).trim();
-  const detail = String(body.detail || "").trim().replace(/\s+/g, " ").slice(0, 800);
+  const detail = String(body.detail || "").trim().replace(/s+/g, " ").slice(0, 800);
   const issueType = workerAppIssueType(body.issueType);
   const authActor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
   if (!employee || !isIsoDate(date)) throw actionError("Worker and work date are required.", 400);
@@ -8456,7 +8456,7 @@ function projectCreatorNormalizeKey(value) {
     .toLowerCase()
     .replace(/[_-]+/g, " ")
     .replace(/[^\w\s/.]/g, "")
-    .replace(/\s+/g, " ")
+    .replace(/s+/g, " ")
     .trim();
 }
 
