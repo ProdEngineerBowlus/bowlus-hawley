@@ -54,3 +54,18 @@ Intentional differences from the Airtable script: no hard-coded July 3, no quart
 Live check, 2026-10-29 (read-only, `bowlus_readonly`): `hb.cycles` holds 25 cycles for 2026 only, labelled `C1`-`C25` with Airtable record IDs; all 308 linked production schedule rows match their cycle's dates. C20 is stored as 2026-10-01 to 2026-11-02 (23 days), overlapping C18 and C19; as a started cycle it is kept and reported as a warning. With 2026-11-27 confirmed as a closure, a no-rule 2026 preview leaves C21-C25 as published. A 2027 preview creates 25 new cycles with no conflicts.
 
 `npm test` also covers 2026 and 2027 closure dates, an even 25-cycle 2026 plan (255 working days), fixing cycles 22-25 at eight days, extending two upcoming cycles by four days with completed cycles locked, a locked cycle mid-year, and each conflict type.
+
+## Production generator (combined with cycles)
+
+The Cycles tab now plans cycles **and** the VIN position schedule together, for the selected year and the next year. `apps/postgres-sync/src/production-plan.js` ports the Airtable "Production Simulation With Offset - Rev ANT.9" rules: per cycle, FAB bucket, A1/A2 VIN pair, Frame bucket, B-H at pair[0]-2 … pair[0]-8, CNC bucket. Odd cycles (set 1) take the next two VINs ascending and use A1 and -A buckets; even cycles (set 2) reverse the pair and use A2 and -B buckets. Parity continues across years. Task Offset was read but never applied by the original and is not applied here. Phase lookup keeps the original order (exact model, base model, no model, any) and reports non-exact matches; missing phases are conflicts; VINs not yet in Hawley are planned as rows without a VIN record and listed as a warning.
+
+- The plan continues from the last past or current cycle's A1/A2 pair. If none exists, the tab asks for a starting VIN and set.
+- Past and current cycles' schedule rows are never touched. Every future cycle in both years is regenerated.
+- Existing rows keep their `production_record_id` and move with their VIN + phase (bucket rows stay in their own cycle where possible), so task links follow. New rows get `hawley-prod:<uuid>`. Rows with no place in the plan are deleted if no tasks point to them, otherwise publishing is blocked.
+- Lowering a year's cycle count pushes VINs into the next year: on 2026-10-30, dropping 2026 to 24 cycles moves C25's 12 rows and 215 tasks into 2027 C1 (A2 340/339, B 338 … H 332).
+- **Hawley plans; Asana runs day to day.** Tasks on moved rows are relinked in Hawley and, as part of publishing (confirmed by the admin), their Asana "Cycle" field is set once to the new year-qualified option (e.g. `C1.27`). The Asana sync then keeps reading Asana as before, so later moves in Asana win. Asana due dates are not changed. Missing Asana Cycle options block publishing until they are added in Asana. Failed pushes are recorded on the version and can be retried from the tab (`POST /api/admin/cycle-planner/push`).
+- Each publish writes one `hb.cycle_plan_versions` row per year with a shared `plan_group_id`, the production changes (`production_json`) and the push results (`asana_push_json`) (migration 038). An HB rebuild runs afterwards to refresh phase loads and allocations.
+
+This plan is compatible with the upcoming task-template system: VIN + phase is the identity and the cycle is where it sits, the same choice `planning_v2` makes for work occurrences (#5).
+
+Validation: `npm test` (69 tests) including `apps/hawley-worker-page/test/cycle-production.pglite.test.js`, which runs the real migrations and SQL on embedded PostgreSQL with live-shaped 2026 data; a browser harness on the same data (preview, publish, re-preview shows no changes); and a read-only preview against live data.

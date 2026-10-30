@@ -41,7 +41,9 @@
     cyclePlanForm: null,
     cyclePlanPreview: null,
     cyclePlanLoading: false,
-    cyclePlanMessage: ""
+    cyclePlanMessage: "",
+    cyclePlanNextForm: null,
+    cyclePlanPushFailedVersion: ""
   };
 
   function escapeHtml(value) {
@@ -1568,7 +1570,19 @@
       cycleCount: String(published.length || 25),
       firstCycleNumber: String(published[0]?.cycle || 1),
       lengthRules: "",
-      note: ""
+      note: "",
+      startVin: "",
+      startParity: "odd"
+    };
+  }
+
+  function defaultNextYearForm(planner) {
+    const next = planner?.nextYear || {};
+    const published = next.published || [];
+    return {
+      startDate: published[0]?.startDate || `${next.year || Number(state.cyclePlanYear) + 1}-01-01`,
+      cycleCount: String(published.length || 25),
+      lengthRules: ""
     };
   }
 
@@ -1579,6 +1593,7 @@
     try {
       state.cyclePlanner = await fetchJson(`/api/admin/cycle-planner?year=${encodeURIComponent(state.cyclePlanYear)}`);
       state.cyclePlanForm = defaultCyclePlanForm(state.cyclePlanner);
+      state.cyclePlanNextForm = defaultNextYearForm(state.cyclePlanner);
       state.cyclePlanPreview = null;
     } catch (error) {
       state.cyclePlanMessage = error.message || "Could not load cycles.";
@@ -1589,20 +1604,34 @@
   }
 
   function readCyclePlanForm() {
-    const value = name => root.querySelector(`[data-cycle-plan="${name}"]`)?.value ?? "";
+    const value = (attr, name) => root.querySelector(`[${attr}="${name}"]`)?.value ?? "";
     state.cyclePlanForm = {
-      startDate: value("startDate"),
-      cycleCount: value("cycleCount"),
-      firstCycleNumber: value("firstCycleNumber"),
-      lengthRules: value("lengthRules"),
-      note: value("note")
+      startDate: value("data-cycle-plan", "startDate"),
+      cycleCount: value("data-cycle-plan", "cycleCount"),
+      firstCycleNumber: value("data-cycle-plan", "firstCycleNumber"),
+      lengthRules: value("data-cycle-plan", "lengthRules"),
+      note: value("data-cycle-plan", "note"),
+      startVin: value("data-cycle-plan", "startVin"),
+      startParity: value("data-cycle-plan", "startParity") || "odd"
+    };
+    state.cyclePlanNextForm = {
+      startDate: value("data-cycle-plan-next", "startDate"),
+      cycleCount: value("data-cycle-plan-next", "cycleCount"),
+      lengthRules: value("data-cycle-plan-next", "lengthRules")
     };
     return {
       year: Number(state.cyclePlanYear),
       startDate: state.cyclePlanForm.startDate,
       cycleCount: Number(state.cyclePlanForm.cycleCount),
       firstCycleNumber: Number(state.cyclePlanForm.firstCycleNumber),
-      lengthRules: state.cyclePlanForm.lengthRules
+      lengthRules: state.cyclePlanForm.lengthRules,
+      startVin: state.cyclePlanForm.startVin ? Number(state.cyclePlanForm.startVin) : undefined,
+      startParity: state.cyclePlanForm.startParity,
+      nextYear: {
+        startDate: state.cyclePlanNextForm.startDate,
+        cycleCount: Number(state.cyclePlanNextForm.cycleCount),
+        lengthRules: state.cyclePlanNextForm.lengthRules
+      }
     };
   }
 
@@ -1610,79 +1639,127 @@
     return row ? `${formatDate(row.startDate)} - ${formatDate(row.endDate)} (${formatNumber(row.days)}d)` : "";
   }
 
+  // "A 339/340 · B337 C336 D335 E334 F333 G332 H331" for one cycle's VIN plan.
+  function vinPlanText(production) {
+    const rows = production?.rows || [];
+    if (!rows.length) return production?.status === "kept" ? "As published" : "";
+    const pair = rows.filter(r => r.phase === "A1" || r.phase === "A2").map(r => r.vin).join("/");
+    const install = rows.filter(r => /^[B-H]$/.test(r.phase)).map(r => `${r.phase}${r.vin}`).join(" ");
+    const moved = rows.filter(r => r.action === "move").length;
+    const created = rows.filter(r => r.action === "create").length;
+    const notes = [moved ? `${moved} moved here` : "", created && created < rows.length ? `${created} new` : ""].filter(Boolean).join(", ");
+    return `${rows[0]?.phase?.endsWith("A") ? "Set 1" : "Set 2"} · A ${pair} · ${install}${notes ? ` (${notes})` : ""}`;
+  }
+
+  function cycleRowsHtml(rows, year) {
+    return rows.map(row => `
+      <tr class="${row.status === "changed" || row.status === "new" ? "cycle-plan-changed" : row.status === "removed" ? "cycle-plan-removed" : ""}">
+        <td><strong>${escapeHtml(row.cycleLabel || `C${row.cycle}`)}</strong></td>
+        <td>${escapeHtml(`${formatDate(row.startDate)} - ${formatDate(row.endDate)}`)}</td>
+        <td>${row.source === "locked" || row.source === "removed"
+          ? escapeHtml(formatNumber(row.days))
+          : `<input class="table-input cycle-days-input" type="number" min="1" max="99" step="1" data-cycle-days="${escapeAttr(row.cycle)}" data-cycle-year="${escapeAttr(year)}" value="${escapeAttr(row.days)}" aria-label="Working days for ${escapeAttr(row.cycleLabel || `C${row.cycle}`)} ${escapeAttr(year)}" />`}</td>
+        <td>${escapeHtml(row.source)}${row.status === "new" ? " · new" : ""}</td>
+        <td class="cycle-vin-plan">${escapeHtml(row.status === "removed" ? "Moves to the next cycle" : vinPlanText(row.production))}</td>
+        <td>${escapeHtml(row.status === "changed" ? cycleRangeText(row.published) : row.status === "new" ? "Not published" : row.status === "removed" ? "Will be removed" : "Same")}</td>
+        <td>${escapeHtml(row.impact ? `${formatNumber(row.impact.vins)} VINs · ${formatNumber(row.impact.taskInstances)} tasks` : "")}</td>
+        <td>${escapeHtml((row.holidays || []).map(h => h.name).join(", "))}</td>
+      </tr>
+    `).join("");
+  }
+
   function renderCyclePlanner() {
     const planner = state.cyclePlanner;
     const form = state.cyclePlanForm || defaultCyclePlanForm(planner);
+    const nextForm = state.cyclePlanNextForm || defaultNextYearForm(planner);
     const preview = state.cyclePlanPreview;
-    const rows = preview ? [...preview.cycles, ...(preview.removedCycles || [])] : (planner?.published || []).map(row => ({ ...row, source: row.locked ? "locked" : "published", status: "unchanged" }));
-    const closures = preview?.closures || planner?.closures || [];
-    const changedCount = preview ? preview.changedCycleNumbers.length : 0;
-    const canPublish = preview?.ok && changedCount > 0 && !state.cyclePlanLoading;
+    const year = Number(state.cyclePlanYear);
+    const years = preview?.years || [
+      { year, cycles: (planner?.published || []).map(row => ({ ...row, source: row.locked ? "locked" : "published", status: "unchanged" })), removedCycles: [] },
+      { year: year + 1, cycles: (planner?.nextYear?.published || []).map(row => ({ ...row, source: "published", status: "unchanged" })), removedCycles: [] }
+    ];
+    const production = preview?.production;
+    const changeCount = preview?.changeCount || 0;
+    const canPublish = preview?.ok && changeCount > 0 && !state.cyclePlanLoading;
+    const needsStartVin = (preview?.conflicts || []).some(c => c.code === "production_start_unknown") || form.startVin;
+    const disabled = state.cyclePlanLoading || !planner ? "disabled" : "";
     return `
       <section class="panel">
         <div class="panel-header">
-          <h3 class="panel-title">Cycle Calendar</h3>
-          <span class="pill">${escapeHtml(planner ? `${formatNumber(planner.published.length)} published cycles in ${planner.year}` : "Loading")}</span>
+          <h3 class="panel-title">Cycles &amp; Production</h3>
+          <span class="pill">${escapeHtml(planner ? `${formatNumber(planner.published.length)} cycles in ${planner.year} · ${formatNumber(planner.nextYear?.published?.length || 0)} in ${planner.year + 1}` : "Loading")}</span>
         </div>
         <div class="panel-body cycle-plan-form">
           <label class="field"><span>Year</span><input type="number" min="2020" max="2100" data-cycle-plan-year value="${escapeAttr(state.cyclePlanYear)}" /></label>
           <label class="field"><span>First cycle starts</span><input type="date" data-cycle-plan="startDate" value="${escapeAttr(form.startDate)}" /></label>
           <label class="field"><span>First cycle number</span><input type="number" min="1" data-cycle-plan="firstCycleNumber" value="${escapeAttr(form.firstCycleNumber)}" /></label>
-          <label class="field"><span>Cycles in year</span><input type="number" min="1" max="60" data-cycle-plan="cycleCount" value="${escapeAttr(form.cycleCount)}" /></label>
-          <label class="field cycle-plan-rules"><span>Fixed lengths (working days)</span><input type="text" data-cycle-plan="lengthRules" value="${escapeAttr(form.lengthRules)}" placeholder="22-25=8, 20+4" /></label>
+          <label class="field"><span>Cycles in ${escapeHtml(year)}</span><input type="number" min="1" max="60" data-cycle-plan="cycleCount" value="${escapeAttr(form.cycleCount)}" /></label>
+          <label class="field cycle-plan-rules"><span>${escapeHtml(year)} fixed lengths</span><input type="text" data-cycle-plan="lengthRules" value="${escapeAttr(form.lengthRules)}" placeholder="22-25=8, 20+4" /></label>
+        </div>
+        <div class="panel-body cycle-plan-form">
+          <label class="field"><span>${escapeHtml(year + 1)} first cycle starts</span><input type="date" data-cycle-plan-next="startDate" value="${escapeAttr(nextForm.startDate)}" /></label>
+          <label class="field"><span>Cycles in ${escapeHtml(year + 1)}</span><input type="number" min="1" max="60" data-cycle-plan-next="cycleCount" value="${escapeAttr(nextForm.cycleCount)}" /></label>
+          <label class="field cycle-plan-rules"><span>${escapeHtml(year + 1)} fixed lengths</span><input type="text" data-cycle-plan-next="lengthRules" value="${escapeAttr(nextForm.lengthRules)}" placeholder="1-4=10" /></label>
+          ${needsStartVin ? `
+            <label class="field"><span>Starting VIN</span><input type="number" min="1" data-cycle-plan="startVin" value="${escapeAttr(form.startVin)}" /></label>
+            <label class="field"><span>Starting set</span><select data-cycle-plan="startParity"><option value="odd" ${form.startParity !== "even" ? "selected" : ""}>Set 1 (A1, -A)</option><option value="even" ${form.startParity === "even" ? "selected" : ""}>Set 2 (A2, -B)</option></select></label>
+          ` : ""}
+        </div>
+        <div class="panel-body">
           <div class="inline-actions cycle-plan-actions">
             <button class="btn" type="button" data-action="cycle-plan-load" ${state.cyclePlanLoading ? "disabled" : ""}>Load year</button>
-            <button class="btn primary" type="button" data-action="cycle-plan-preview" ${state.cyclePlanLoading || !planner ? "disabled" : ""}>Preview</button>
-            <button class="btn" type="button" data-action="cycle-plan-balance" title="Keep the lengths you typed and spread the remaining working days over the other cycles" ${state.cyclePlanLoading || !planner ? "disabled" : ""}>Balance remaining</button>
-            <button class="btn ghost" type="button" data-action="cycle-plan-reset" title="Clear typed lengths and return to the published cycles" ${state.cyclePlanLoading || !planner ? "disabled" : ""}>Reset</button>
+            <button class="btn primary" type="button" data-action="cycle-plan-preview" ${disabled}>Preview</button>
+            <button class="btn" type="button" data-action="cycle-plan-balance" title="Keep the lengths you typed and spread the remaining working days over the other cycles" ${disabled}>Balance remaining</button>
+            <button class="btn ghost" type="button" data-action="cycle-plan-reset" title="Clear typed lengths and return to the published cycles" ${disabled}>Reset</button>
           </div>
         </div>
         <div class="panel-body">
-          <p class="muted">Type a number in Days to fix that cycle's length, then Balance remaining spreads the other cycles (longest first). Reset clears your numbers. Rules also work: <strong>22-25=8</strong> fixes cycles 22-25 at 8 working days, <strong>20+4</strong> extends cycle 20 by 4 days. Remaining working days are spread evenly over the other cycles. Past cycles are locked. The current cycle keeps its start date and can be extended or shortened.</p>
-          <p class="muted">Closures ${escapeHtml(planner?.year || "")}: ${escapeHtml(closures.map(c => `${c.name} ${formatDate(c.date)}`).join(", ") || "none")}</p>
+          <p class="muted">Type a number in Days to fix that cycle's length, then Balance remaining spreads the other cycles (longest first). Reset clears your numbers. Rules: <strong>22-25=8</strong> fixes cycles 22-25 at 8 working days, <strong>20+4</strong> extends cycle 20 by 4 days. Past cycles are locked; the current cycle keeps its start date. The VIN plan for every future cycle in both years is regenerated with the cycles: odd/even sets, A pair, B-H stepping back from the pair. Fewer cycles push VINs into the next year.</p>
           ${planner?.scheduleDateMismatches ? `<div class="notice risk">${escapeHtml(`${formatNumber(planner.scheduleDateMismatches)} production schedule rows have dates that differ from their cycle.`)}</div>` : ""}
           ${state.cyclePlanMessage ? `<div class="notice ${preview && !preview.ok ? "risk" : ""}">${escapeHtml(state.cyclePlanMessage)}</div>` : ""}
+          ${state.cyclePlanPushFailedVersion ? `<div class="notice risk">Some Asana tasks were not updated. <button class="btn compact" type="button" data-action="cycle-plan-retry-push">Retry Asana push</button></div>` : ""}
           ${(preview?.conflicts || []).map(c => `<div class="notice risk">${escapeHtml(c.message)}</div>`).join("")}
           ${(preview?.warnings || []).map(w => `<div class="notice">${escapeHtml(w.message)}</div>`).join("")}
         </div>
       </section>
+      ${production ? `
+        <section class="panel">
+          <div class="panel-header"><h3 class="panel-title">Production changes</h3></div>
+          <div class="panel-body">
+            <p>${escapeHtml(`${formatNumber(production.moves)} schedule rows move · ${formatNumber(production.creates)} new · ${formatNumber(production.updates)} updated · ${formatNumber(production.deletes)} removed · ${formatNumber(production.relinkCount)} Asana tasks change cycle`)}</p>
+            ${production.relinkCount ? `
+              <details><summary>Tasks that change cycle${production.relinkCount > production.relinks.length ? ` (first ${production.relinks.length})` : ""}</summary>
+                <ul>${production.relinks.map(r => `<li>${escapeHtml(`VIN ${r.vin ?? "-"} · ${r.taskName || "task"}: ${r.from || "?"} → ${r.to}`)}</li>`).join("")}</ul>
+              </details>` : ""}
+          </div>
+        </section>` : ""}
       <section class="panel">
         <div class="panel-header">
-          <h3 class="panel-title">${preview ? `Preview - ${formatNumber(changedCount)} cycles change` : "Published cycles"}</h3>
-          ${preview ? `<span class="pill">${formatNumber(preview.workingDayCount || 0)} working days</span>` : ""}
+          <h3 class="panel-title">${preview ? `Preview - ${formatNumber(changeCount)} changes` : "Published cycles"}</h3>
         </div>
         <div class="panel-body table-wrap">
           <table class="table">
-            <thead><tr><th>Cycle</th><th>Dates</th><th>Days</th><th>Type</th><th>Published now</th><th>Affected</th><th>Holidays</th></tr></thead>
+            <thead><tr><th>Cycle</th><th>Dates</th><th>Days</th><th>Type</th><th>VIN plan</th><th>Published now</th><th>Affected</th><th>Holidays</th></tr></thead>
             <tbody>
-              ${rows.map(row => `
-                <tr class="${row.status === "changed" || row.status === "new" ? "cycle-plan-changed" : row.status === "removed" ? "cycle-plan-removed" : ""}">
-                  <td><strong>${escapeHtml(row.cycleLabel || `C${row.cycle}`)}</strong></td>
-                  <td>${escapeHtml(`${formatDate(row.startDate)} - ${formatDate(row.endDate)}`)}</td>
-                  <td>${row.source === "locked" || row.source === "removed"
-                    ? escapeHtml(formatNumber(row.days))
-                    : `<input class="table-input cycle-days-input" type="number" min="1" max="99" step="1" data-cycle-days="${escapeAttr(row.cycle)}" value="${escapeAttr(row.days)}" aria-label="Working days for ${escapeAttr(row.cycleLabel || `C${row.cycle}`)}" />`}</td>
-                  <td>${escapeHtml(row.source)}${row.status === "new" ? " · new" : ""}</td>
-                  <td>${escapeHtml(row.status === "changed" ? cycleRangeText(row.published) : row.status === "new" ? "Not published" : row.status === "removed" ? "Will be removed" : "Same")}</td>
-                  <td>${escapeHtml(row.impact ? `${formatNumber(row.impact.vins)} VINs · ${formatNumber(row.impact.scheduleRows)} schedule rows · ${formatNumber(row.impact.taskInstances)} tasks` : "")}</td>
-                  <td>${escapeHtml((row.holidays || []).map(h => h.name).join(", "))}</td>
-                </tr>
-              `).join("") || `<tr><td colspan="7">No cycles published for this year. Preview a plan to create them.</td></tr>`}
+              ${years.map(y => `
+                <tr class="cycle-year-row"><td colspan="8"><strong>${escapeHtml(y.year)}</strong>${y.workingDayCount ? ` · ${escapeHtml(formatNumber(y.workingDayCount))} working days` : ""}${y.closures ? ` · Closures: ${escapeHtml(y.closures.map(c => `${c.name} ${formatDate(c.date)}`).join(", "))}` : ""}</td></tr>
+                ${cycleRowsHtml([...y.cycles, ...(y.removedCycles || [])], y.year) || `<tr><td colspan="8">No cycles published for ${escapeHtml(y.year)}. Preview to plan them.</td></tr>`}
+              `).join("")}
             </tbody>
           </table>
         </div>
         ${preview ? `
           <div class="panel-body cycle-plan-publish">
-            <label class="field"><span>Reason for this change</span><input type="text" data-cycle-plan="note" value="${escapeAttr(form.note)}" placeholder="e.g. Extend C20-C21 for model changeover" /></label>
-            <button class="btn primary" type="button" data-action="cycle-plan-publish" ${canPublish ? "" : "disabled"}>Publish ${formatNumber(changedCount)} cycle changes</button>
+            <label class="field"><span>Reason for this change</span><input type="text" data-cycle-plan="note" value="${escapeAttr(form.note)}" placeholder="e.g. 2026 drops to 24 cycles" /></label>
+            <button class="btn primary" type="button" data-action="cycle-plan-publish" ${canPublish ? "" : "disabled"}>${production?.relinkCount ? `Publish and push ${formatNumber(production.relinkCount)} tasks to Asana` : `Publish ${formatNumber(changeCount)} changes`}</button>
           </div>
-          <div class="panel-body"><p class="muted">Publishing updates cycle dates and the production schedule rows in those cycles. Asana tasks that were already created keep their existing dates.</p></div>
+          <div class="panel-body"><p class="muted">Publishing saves cycles and the VIN schedule for both years in one step. Tasks on moved schedule rows get their Asana Cycle field updated once; after that, Asana drives day-to-day changes. Asana due dates are not changed.</p></div>
         ` : ""}
       </section>
       <section class="panel">
         <div class="panel-header"><h3 class="panel-title">Published versions</h3></div>
         <div class="panel-body">
-          ${(planner?.versions || []).map(v => `<p>${escapeHtml(new Date(v.published_at).toLocaleString())} - ${escapeHtml(v.published_by || "admin")} - cycles ${escapeHtml((v.changed_cycle_numbers || []).join(", "))}${v.note ? ` - ${escapeHtml(v.note)}` : ""}</p>`).join("") || `<p class="muted">No calendar versions published from Hawley yet.</p>`}
+          ${(planner?.versions || []).map(v => `<p>${escapeHtml(new Date(v.published_at).toLocaleString())} - ${escapeHtml(v.published_by || "admin")} - ${escapeHtml(v.plan_year)} cycles ${escapeHtml((v.changed_cycle_numbers || []).join(", "))}${v.note ? ` - ${escapeHtml(v.note)}` : ""}</p>`).join("") || `<p class="muted">No calendar versions published from Hawley yet.</p>`}
         </div>
       </section>
     `;
@@ -1798,9 +1875,21 @@
       // Typed lengths stay fixed; every other future cycle shares the remaining working days, longest first.
       root.querySelector('[data-action="cycle-plan-preview"]')?.click();
     } else if (action === "cycle-plan-reset") {
-      const rulesInput = root.querySelector('[data-cycle-plan="lengthRules"]');
-      if (rulesInput) rulesInput.value = "";
+      root.querySelectorAll('[data-cycle-plan="lengthRules"], [data-cycle-plan-next="lengthRules"]').forEach(input => { input.value = ""; });
       root.querySelector('[data-action="cycle-plan-preview"]')?.click();
+    } else if (action === "cycle-plan-retry-push") {
+      state.cyclePlanLoading = true;
+      render();
+      try {
+        const result = await postJson("/api/admin/cycle-planner/push", { cyclePlanVersionId: state.cyclePlanPushFailedVersion });
+        state.cyclePlanPushFailedVersion = result.asanaPush.failed ? result.cyclePlanVersionId : "";
+        state.cyclePlanMessage = `Asana: ${result.asanaPush.pushed} of ${result.asanaPush.total} tasks updated.`;
+      } catch (error) {
+        state.cyclePlanMessage = error.message || "Could not push to Asana.";
+      } finally {
+        state.cyclePlanLoading = false;
+        render();
+      }
     } else if (action === "cycle-plan-preview") {
       const body = readCyclePlanForm();
       state.cyclePlanLoading = true;
@@ -1808,9 +1897,9 @@
       render();
       try {
         state.cyclePlanPreview = await postJson("/api/admin/cycle-planner/preview", body);
-        const count = state.cyclePlanPreview.changedCycleNumbers.length;
+        const count = state.cyclePlanPreview.changeCount;
         state.cyclePlanMessage = state.cyclePlanPreview.ok
-          ? (count ? `${count} cycles would change. Review, then publish.` : "This plan matches the published cycles.")
+          ? (count ? `${count} changes. Review, then publish.` : "This plan matches what is published.")
           : "Fix the problems below before publishing.";
       } catch (error) {
         state.cyclePlanPreview = null;
@@ -1822,13 +1911,19 @@
     } else if (action === "cycle-plan-publish") {
       const preview = state.cyclePlanPreview;
       const body = readCyclePlanForm();
-      if (!preview || !window.confirm(`Publish ${preview.changedCycleNumbers.length} cycle changes for ${state.cyclePlanYear}?`)) return;
+      const pushCount = preview?.production?.relinkCount || 0;
+      const question = pushCount
+        ? `Publish ${preview.changeCount} changes for ${state.cyclePlanYear}-${Number(state.cyclePlanYear) + 1} and push the Cycle field of ${pushCount} Asana tasks?`
+        : `Publish ${preview?.changeCount} changes for ${state.cyclePlanYear}-${Number(state.cyclePlanYear) + 1}?`;
+      if (!preview || !window.confirm(question)) return;
       state.cyclePlanLoading = true;
       render();
       try {
-        const result = await postJson("/api/admin/cycle-planner/publish", { ...body, planHash: preview.planHash, note: state.cyclePlanForm.note });
+        const result = await postJson("/api/admin/cycle-planner/publish", { ...body, planHash: preview.planHash, note: state.cyclePlanForm.note, pushToAsana: pushCount > 0 });
         await loadCyclePlanner();
-        state.cyclePlanMessage = `Published ${result.changedCycleNumbers.length} cycle changes.`;
+        const push = result.asanaPush || { total: 0, pushed: 0, failed: 0 };
+        state.cyclePlanPushFailedVersion = push.failed ? result.cyclePlanVersionId : "";
+        state.cyclePlanMessage = `Published. ${result.production?.moves || 0} schedule rows moved, ${result.production?.creates || 0} created${push.total ? `; Asana: ${push.pushed} of ${push.total} tasks updated` : ""}.`;
       } catch (error) {
         state.cyclePlanMessage = error.message || "Could not publish the plan.";
       } finally {
@@ -2030,7 +2125,8 @@
     if (daysInput) {
       const cycle = Number(daysInput.dataset.cycleDays);
       const days = Number(daysInput.value);
-      const rulesInput = root.querySelector('[data-cycle-plan="lengthRules"]');
+      const isNextYear = Number(daysInput.dataset.cycleYear) === Number(state.cyclePlanYear) + 1;
+      const rulesInput = root.querySelector(isNextYear ? '[data-cycle-plan-next="lengthRules"]' : '[data-cycle-plan="lengthRules"]');
       if (!Number.isInteger(days) || days < 1 || !rulesInput) return;
       const ownRule = new RegExp(`^c?${cycle}\\s*[=+]`, "i");
       const rules = rulesInput.value.split(",").map(rule => rule.trim()).filter(rule => rule && !ownRule.test(rule));
