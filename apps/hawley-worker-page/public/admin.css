@@ -1733,3 +1733,11 @@ a {
   font-size: 0.82rem;
   white-space: nowrap;
 }
+
+.production-checks > span:not(:first-child) {
+  color: var(--ink);
+  font-weight: 500;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}

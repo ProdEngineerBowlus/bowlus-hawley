@@ -43,7 +43,11 @@
     cyclePlanLoading: false,
     cyclePlanMessage: "",
     cyclePlanNextForm: null,
-    cyclePlanPushFailedVersion: ""
+    cyclePlanPushFailedVersion: "",
+    production: null,
+    productionLoading: false,
+    productionMessage: "",
+    productionFilters: { year: String(new Date().getFullYear()), cycle: "", phase: "", vin: "", vinsOnly: false, withTasks: false }
   };
 
   function escapeHtml(value) {
@@ -630,6 +634,7 @@
           <button class="nav-tab ${state.activeView === "dashboard" ? "active" : ""}" type="button" data-view="dashboard">Dashboard</button>
           <button class="nav-tab ${state.activeView === "project" ? "active" : ""}" type="button" data-view="project">Project Creator</button>
           <button class="nav-tab ${state.activeView === "cycles" ? "active" : ""}" type="button" data-view="cycles">Cycles</button>
+          <button class="nav-tab ${state.activeView === "production" ? "active" : ""}" type="button" data-view="production">Production</button>
         </nav>
         <div class="top-actions">
           <a class="btn ghost" href="/">Live app</a>
@@ -1766,6 +1771,88 @@
     `;
   }
 
+  async function loadProductionTable() {
+    state.productionLoading = true;
+    state.productionMessage = "";
+    render();
+    try {
+      state.production = await fetchJson(`/api/admin/production-schedule?year=${encodeURIComponent(state.productionFilters.year)}`);
+    } catch (error) {
+      state.productionMessage = error.message || "Could not load the production schedule.";
+    } finally {
+      state.productionLoading = false;
+      render();
+    }
+  }
+
+  function filteredProductionRows() {
+    const f = state.productionFilters;
+    const vinTerms = String(f.vin || "").split(/[\s,]+/).filter(Boolean);
+    const phase = String(f.phase || "").trim().toLowerCase();
+    return (state.production?.rows || []).filter(row =>
+      (!f.cycle || String(row.cycle) === String(f.cycle) || `${row.cycle}.${String(row.year).slice(-2)}` === String(f.cycle).replace(/^c/i, "")) &&
+      (!phase || String(row.phase_name || "").toLowerCase() === phase || String(row.section_column || "").toLowerCase().includes(phase)) &&
+      (!vinTerms.length || vinTerms.includes(String(row.vin || ""))) &&
+      (!f.vinsOnly || row.vin) &&
+      (!f.withTasks || row.tasks > 0)
+    );
+  }
+
+  function renderProductionTable() {
+    const data = state.production;
+    const f = state.productionFilters;
+    const rows = filteredProductionRows();
+    const all = data?.rows || [];
+    const phases = [...new Set(all.map(row => row.phase_name).filter(Boolean))];
+    const cycles = [...new Map(all.map(row => [`${row.year}-${row.cycle}`, row])).values()];
+    const shown = rows.slice(0, 1500);
+    return `
+      <section class="panel">
+        <div class="panel-header">
+          <h3 class="panel-title">Production Schedule</h3>
+          <span class="pill">${escapeHtml(data ? `${formatNumber(rows.length)} of ${formatNumber(all.length)} rows · ${data.year}-${data.year + 1}` : "Loading")}</span>
+        </div>
+        <div class="panel-body cycle-plan-form">
+          <label class="field"><span>Year (shows it and the next)</span><input type="number" min="2020" max="2100" data-production-filter="year" value="${escapeAttr(f.year)}" /></label>
+          <label class="field"><span>Cycle</span><select data-production-filter="cycle"><option value="">All cycles</option>${cycles.map(c => `<option value="${escapeAttr(`${c.cycle}.${String(c.year).slice(-2)}`)}" ${f.cycle === `${c.cycle}.${String(c.year).slice(-2)}` ? "selected" : ""}>${escapeHtml(`C${c.cycle}.${String(c.year).slice(-2)} (${formatDate(c.start_date)})`)}</option>`).join("")}</select></label>
+          <label class="field"><span>Phase</span><select data-production-filter="phase"><option value="">All phases</option>${phases.map(p => `<option value="${escapeAttr(p)}" ${f.phase === p ? "selected" : ""}>${escapeHtml(p)}</option>`).join("")}</select></label>
+          <label class="field"><span>VIN(s)</span><input type="text" data-production-filter="vin" value="${escapeAttr(f.vin)}" placeholder="e.g. 332 or 332, 340" /></label>
+          <label class="field production-checks"><span>Show</span>
+            <span><input type="checkbox" data-production-filter="vinsOnly" ${f.vinsOnly ? "checked" : ""} /> VIN rows only</span>
+            <span><input type="checkbox" data-production-filter="withTasks" ${f.withTasks ? "checked" : ""} /> With tasks</span>
+          </label>
+        </div>
+        <div class="panel-body">
+          <div class="inline-actions">
+            <button class="btn" type="button" data-action="production-load" ${state.productionLoading ? "disabled" : ""}>Load</button>
+            <button class="btn ghost" type="button" data-action="production-clear">Clear filters</button>
+          </div>
+          ${state.productionMessage ? `<div class="notice risk" style="margin-top: 12px;">${escapeHtml(state.productionMessage)}</div>` : ""}
+        </div>
+        <div class="panel-body table-wrap">
+          <table class="table">
+            <thead><tr><th>Cycle</th><th>Dates</th><th>Phase</th><th>Section</th><th>VIN</th><th>Model</th><th>Tasks</th><th>Source</th></tr></thead>
+            <tbody>
+              ${shown.map(row => `
+                <tr>
+                  <td><strong>${escapeHtml(`C${row.cycle}.${String(row.year).slice(-2)}`)}</strong></td>
+                  <td>${escapeHtml(`${formatDate(row.start_date)} - ${formatDate(row.end_date)}`)}</td>
+                  <td>${escapeHtml(row.phase_name || "")}</td>
+                  <td>${escapeHtml(row.section_column || "")}</td>
+                  <td>${row.vin ? `<button class="btn ghost compact" type="button" data-production-vin="${escapeAttr(row.vin)}">${escapeHtml(row.vin)}</button>` : "-"}</td>
+                  <td>${escapeHtml(row.model_name || "")}</td>
+                  <td>${escapeHtml(row.tasks ? `${formatNumber(row.tasksDone)}/${formatNumber(row.tasks)} done` : "")}</td>
+                  <td>${escapeHtml(row.source_system === "hawley_production_generator" ? "Hawley plan" : row.source_system === "airtable_production" ? "Airtable" : row.source_system || "")}</td>
+                </tr>
+              `).join("") || `<tr><td colspan="8">${state.productionLoading ? "Loading…" : "No rows match these filters."}</td></tr>`}
+            </tbody>
+          </table>
+          ${rows.length > shown.length ? `<p class="muted">Showing the first ${formatNumber(shown.length)} rows; narrow the filters to see the rest.</p>` : ""}
+        </div>
+      </section>
+    `;
+  }
+
   function renderApp() {
     if (state.loading) {
       return `
@@ -1787,7 +1874,7 @@
       <div class="admin-shell">
         ${renderTopbar()}
         <main class="admin-main">
-          ${state.activeView === "project" ? renderProjectCreator() : state.activeView === "cycles" ? renderCyclePlanner() : renderDashboard()}
+          ${state.activeView === "project" ? renderProjectCreator() : state.activeView === "cycles" ? renderCyclePlanner() : state.activeView === "production" ? renderProductionTable() : renderDashboard()}
         </main>
       </div>
     `;
@@ -1809,10 +1896,12 @@
   root.addEventListener("click", async event => {
     const viewButton = event.target.closest("[data-view]");
     if (viewButton) {
-      state.activeView = ["project", "cycles"].includes(viewButton.dataset.view) ? viewButton.dataset.view : "dashboard";
+      state.activeView = ["project", "cycles", "production"].includes(viewButton.dataset.view) ? viewButton.dataset.view : "dashboard";
       render();
       if (state.activeView === "cycles") {
         if (!state.cyclePlanner) await loadCyclePlanner();
+      } else if (state.activeView === "production") {
+        if (!state.production) await loadProductionTable();
       } else if (state.activeView === "project" && !state.project && !state.projectLoading) {
         try {
           await loadProjectCreator();
@@ -1864,11 +1953,25 @@
       return;
     }
 
+    const vinLink = event.target.closest("[data-production-vin]");
+    if (vinLink) {
+      state.productionFilters = { ...state.productionFilters, vin: vinLink.dataset.productionVin, cycle: "", phase: "" };
+      render();
+      return;
+    }
+
     const action = event.target.closest("[data-action]")?.dataset.action;
     if (action === "reload") {
       await loadAll();
     } else if (action === "logout") {
       await logout();
+    } else if (action === "production-load") {
+      state.productionFilters.year = root.querySelector('[data-production-filter="year"]')?.value || state.productionFilters.year;
+      state.productionFilters.cycle = "";
+      await loadProductionTable();
+    } else if (action === "production-clear") {
+      state.productionFilters = { ...state.productionFilters, cycle: "", phase: "", vin: "", vinsOnly: false, withTasks: false };
+      render();
     } else if (action === "cycle-plan-load") {
       state.cyclePlanYear = root.querySelector("[data-cycle-plan-year]")?.value || state.cyclePlanYear;
       await loadCyclePlanner();
@@ -2120,7 +2223,28 @@
     state.projectNameDirty = true;
   });
 
+  const applyProductionFilter = input => {
+    const key = input.dataset.productionFilter;
+    if (key === "year") return;
+    state.productionFilters = { ...state.productionFilters, [key]: input.type === "checkbox" ? input.checked : input.value };
+    render();
+    if (key === "vin") {
+      const next = root.querySelector('[data-production-filter="vin"]');
+      next?.focus();
+      next?.setSelectionRange(next.value.length, next.value.length);
+    }
+  };
+  root.addEventListener("input", event => {
+    const input = event.target.closest('[data-production-filter="vin"]');
+    if (input) applyProductionFilter(input);
+  });
+
   root.addEventListener("change", event => {
+    const productionInput = event.target.closest("[data-production-filter]");
+    if (productionInput && productionInput.dataset.productionFilter !== "vin") {
+      applyProductionFilter(productionInput);
+      return;
+    }
     // Typing a cycle's days writes a "cycle=days" rule (replacing that cycle's single-cycle rules)
     // and re-previews, so the other cycles rebalance around it.
     const daysInput = event.target.closest("[data-cycle-days]");
