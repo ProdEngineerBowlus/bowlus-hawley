@@ -200,13 +200,21 @@ async function loadScheduleRows(db, cycleRecordIds) {
   if (!cycleRecordIds.length) return [];
   const result = await db.query(
     `select ps.production_record_id, ps.cycle_record_id, ps.cycle_number, ps.phase_name, ps.phase_record_id, ps.vin,
-            ps.vin_record_ids, ps.model_type,
-            (select count(*)::int from hb.rev1_task_instances t where t.line_schedule_record_id = ps.production_record_id) as task_count
+            ps.vin_record_ids, ps.model_type
        from hb.production_schedule ps
       where ps.cycle_record_id = any($1::text[])`,
     [cycleRecordIds]
   );
-  return result.rows;
+  // One grouped pass over task instances; a per-row subquery exceeded the app's 15 s statement timeout.
+  const counts = await db.query(
+    `select line_schedule_record_id, count(*)::int as task_count
+       from hb.rev1_task_instances
+      where line_schedule_record_id = any($1::text[])
+      group by line_schedule_record_id`,
+    [result.rows.map(row => row.production_record_id)]
+  );
+  const countById = new Map(counts.rows.map(row => [row.line_schedule_record_id, row.task_count]));
+  return result.rows.map(row => ({ ...row, task_count: countById.get(row.production_record_id) || 0 }));
 }
 
 // State after the last cycle that is not regenerated: the latest kept cycle, else the latest earlier cycle.
