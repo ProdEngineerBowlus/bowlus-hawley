@@ -3310,16 +3310,16 @@ async function reportingNavigation(date) {
 
 async function latestImportRuns() {
   const result = await pool.query(`
-    select distinct on (job_name)
-      job_name,
-      status,
-      ended_at,
-      records_read,
-      records_written,
-      error_count
-    from sync.run_log
-    where job_name in ('pull_airtable', 'pull_worker_daily_actuals', 'pull_asana', 'pull_asana_events', 'pull_daily_tracker', 'backfill_airtable_worker_actuals')
-    order by job_name, id desc
+    select run.*
+    from unnest(array['pull_airtable', 'pull_worker_daily_actuals', 'pull_asana', 'pull_asana_events', 'pull_daily_tracker', 'backfill_airtable_worker_actuals']) as job(job_name)
+    cross join lateral (
+      -- Newest run per job straight from run_log_job_name_id_idx; distinct on read every row of busy jobs.
+      select run_log.job_name, status, ended_at, records_read, records_written, error_count
+      from sync.run_log
+      where run_log.job_name = job.job_name
+      order by id desc
+      limit 1
+    ) run
   `);
 
   return Object.fromEntries(result.rows.map(row => [row.job_name, row]));
@@ -10977,16 +10977,17 @@ async function adminDashboardPayload() {
       limit 8
     `),
     pool.query(`
-      select
-        job_name,
-        status,
-        ended_at::text,
-        records_read,
-        records_written,
-        error_count
-      from sync.run_log
-      where job_name in ('pull_airtable', 'pull_asana', 'pull_daily_tracker', 'pull_worker_daily_actuals')
-      order by ended_at desc nulls last, id desc
+      select run.job_name, run.status, run.ended_at::text, run.records_read, run.records_written, run.error_count
+      from unnest(array['pull_airtable', 'pull_asana', 'pull_daily_tracker', 'pull_worker_daily_actuals']) as job(job_name)
+      cross join lateral (
+        -- Recent runs per job from run_log_job_name_id_idx instead of sorting the whole table.
+        select run_log.job_name, status, ended_at, records_read, records_written, error_count, id
+        from sync.run_log
+        where run_log.job_name = job.job_name
+        order by id desc
+        limit 8
+      ) run
+      order by run.ended_at desc nulls last, run.id desc
       limit 8
     `),
     pool.query(`

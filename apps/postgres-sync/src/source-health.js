@@ -202,16 +202,16 @@ async function tableCount(client, fullTableName) {
 
 async function latestRuns(client) {
   const result = await client.query(`
-    select distinct on (job_name)
-      job_name,
-      status,
-      ended_at,
-      records_read,
-      records_written,
-      error_count
-    from sync.run_log
-    where job_name in ('pull_airtable', 'pull_asana', 'pull_daily_tracker')
-    order by job_name, id desc
+    select run.*
+    from unnest(array['pull_airtable', 'pull_asana', 'pull_daily_tracker']) as job(job_name)
+    cross join lateral (
+      -- Newest run per job straight from run_log_job_name_id_idx; distinct on read every row of busy jobs.
+      select run_log.job_name, status, ended_at, records_read, records_written, error_count
+      from sync.run_log
+      where run_log.job_name = job.job_name
+      order by id desc
+      limit 1
+    ) run
   `);
   return Object.fromEntries(result.rows.map(row => [row.job_name, row]));
 }
