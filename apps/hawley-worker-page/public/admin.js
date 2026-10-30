@@ -1727,6 +1727,7 @@
           <div class="panel-header"><h3 class="panel-title">Production changes</h3></div>
           <div class="panel-body">
             <p>${escapeHtml(`${formatNumber(production.moves)} schedule rows move · ${formatNumber(production.creates)} new · ${formatNumber(production.updates)} updated · ${formatNumber(production.deletes)} removed · ${formatNumber(production.relinkCount)} Asana tasks change cycle`)}</p>
+            ${production.asanaOptionsToAdd?.length ? `<p>${escapeHtml(`Asana "Cycle" options to add: ${production.asanaOptionsToAdd.length} (${production.asanaOptionsToAdd[0]}${production.asanaOptionsToAdd.length > 1 ? ` - ${production.asanaOptionsToAdd.at(-1)}` : ""})`)}</p>` : ""}
             ${production.relinkCount ? `
               <details><summary>Tasks that change cycle${production.relinkCount > production.relinks.length ? ` (first ${production.relinks.length})` : ""}</summary>
                 <ul>${production.relinks.map(r => `<li>${escapeHtml(`VIN ${r.vin ?? "-"} · ${r.taskName || "task"}: ${r.from || "?"} → ${r.to}`)}</li>`).join("")}</ul>
@@ -1751,7 +1752,7 @@
         ${preview ? `
           <div class="panel-body cycle-plan-publish">
             <label class="field"><span>Reason for this change</span><input type="text" data-cycle-plan="note" value="${escapeAttr(form.note)}" placeholder="e.g. 2026 drops to 24 cycles" /></label>
-            <button class="btn primary" type="button" data-action="cycle-plan-publish" ${canPublish ? "" : "disabled"}>${production?.relinkCount ? `Publish and push ${formatNumber(production.relinkCount)} tasks to Asana` : `Publish ${formatNumber(changeCount)} changes`}</button>
+            <button class="btn primary" type="button" data-action="cycle-plan-publish" ${canPublish ? "" : "disabled"}>${production?.relinkCount || production?.asanaOptionsToAdd?.length ? `Publish and update Asana` : `Publish ${formatNumber(changeCount)} changes`}</button>
           </div>
           <div class="panel-body"><p class="muted">Publishing saves cycles and the VIN schedule for both years in one step. Tasks on moved schedule rows get their Asana Cycle field updated once; after that, Asana drives day-to-day changes. Asana due dates are not changed.</p></div>
         ` : ""}
@@ -1912,18 +1913,19 @@
       const preview = state.cyclePlanPreview;
       const body = readCyclePlanForm();
       const pushCount = preview?.production?.relinkCount || 0;
-      const question = pushCount
-        ? `Publish ${preview.changeCount} changes for ${state.cyclePlanYear}-${Number(state.cyclePlanYear) + 1} and push the Cycle field of ${pushCount} Asana tasks?`
+      const optionCount = preview?.production?.asanaOptionsToAdd?.length || 0;
+      const question = pushCount || optionCount
+        ? `Publish ${preview.changeCount} changes for ${state.cyclePlanYear}-${Number(state.cyclePlanYear) + 1}, add ${optionCount} Asana Cycle options and update ${pushCount} Asana tasks?`
         : `Publish ${preview?.changeCount} changes for ${state.cyclePlanYear}-${Number(state.cyclePlanYear) + 1}?`;
       if (!preview || !window.confirm(question)) return;
       state.cyclePlanLoading = true;
       render();
       try {
-        const result = await postJson("/api/admin/cycle-planner/publish", { ...body, planHash: preview.planHash, note: state.cyclePlanForm.note, pushToAsana: pushCount > 0 });
+        const result = await postJson("/api/admin/cycle-planner/publish", { ...body, planHash: preview.planHash, note: state.cyclePlanForm.note, pushToAsana: pushCount > 0 || optionCount > 0 });
         await loadCyclePlanner();
         const push = result.asanaPush || { total: 0, pushed: 0, failed: 0 };
         state.cyclePlanPushFailedVersion = push.failed ? result.cyclePlanVersionId : "";
-        state.cyclePlanMessage = `Published. ${result.production?.moves || 0} schedule rows moved, ${result.production?.creates || 0} created${push.total ? `; Asana: ${push.pushed} of ${push.total} tasks updated` : ""}.`;
+        state.cyclePlanMessage = `Published. ${result.production?.moves || 0} schedule rows moved, ${result.production?.creates || 0} created${push.optionsAdded ? `; ${push.optionsAdded} Asana Cycle options added` : ""}${push.total ? `; Asana: ${push.pushed} of ${push.total} tasks updated` : ""}${push.optionsFailed?.length ? `; could not add options ${push.optionsFailed.join(", ")}` : ""}.`;
       } catch (error) {
         state.cyclePlanMessage = error.message || "Could not publish the plan.";
       } finally {
