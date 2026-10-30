@@ -1092,7 +1092,7 @@ function automaticBendingTemplateRefreshDue(now = Date.now()) {
 async function reconcileAutomaticBendingStudies() {
   const date = todayIso();
   const [rows, configuredRows] = await Promise.all([
-    workerAssignments(date),
+    sharedWorkerAssignmentRows(date),
     configuredWorkers()
   ]);
   const workers = ensureLivePilotWorkers(
@@ -3325,6 +3325,27 @@ async function latestImportRuns() {
   return Object.fromEntries(result.rows.map(row => [row.job_name, row]));
 }
 
+// Every open worker page polls assignments and the bending-study check reads them too; under load those
+// overlapping copies of the same query timed each other out. Requests for the same date share one query for
+// up to 15 s, and any write request clears the cache so changes show immediately.
+const WORKER_ASSIGNMENTS_SHARE_MS = 15000;
+const sharedWorkerAssignments = new Map();
+
+function clearSharedWorkerAssignments() {
+  sharedWorkerAssignments.clear();
+}
+
+async function sharedWorkerAssignmentRows(date) {
+  const hit = sharedWorkerAssignments.get(date);
+  if (hit && Date.now() - hit.at < WORKER_ASSIGNMENTS_SHARE_MS) return (await hit.promise).map(row => ({ ...row }));
+  const entry = { at: Date.now(), promise: workerAssignments(date) };
+  entry.promise.catch(() => {
+    if (sharedWorkerAssignments.get(date) === entry) sharedWorkerAssignments.delete(date);
+  });
+  sharedWorkerAssignments.set(date, entry);
+  return (await entry.promise).map(row => ({ ...row }));
+}
+
 async function workerAssignments(date) {
   // The live shop view must retain unfinished work after its originally
   // assigned day.  Historical dates intentionally remain an exact snapshot.
@@ -4333,7 +4354,7 @@ async function dailyAssignmentsPayload(url, authActor = null) {
   await reconcileLiveScheduleForCurrentDate(date);
 
   const [rows, configuredRows, latestRuns, latestDate, trackerSnapshots, actualRows] = await Promise.all([
-    workerAssignments(date),
+    sharedWorkerAssignmentRows(date),
     configuredWorkers(),
     latestImportRuns(),
     latestAssignmentDate(),
@@ -13662,6 +13683,7 @@ async function serveStatic(req, res, url) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || `${HOST}:${PORT}`}`);
+  if (req.method !== "GET" && req.method !== "HEAD") clearSharedWorkerAssignments();
 
   try {
     if (url.pathname === "/api/health") {
