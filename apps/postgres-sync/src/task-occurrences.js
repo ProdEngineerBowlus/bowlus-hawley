@@ -59,19 +59,64 @@ export async function linkTaskOccurrences(client) {
     returning t.rev1_task_instance_id
   `);
 
-  // Keep each occurrence's cycle and status in step with its task (Asana stays the day-to-day source).
+  const folded = await foldTeamDuplicates(client);
+
+  // Keep each occurrence's cycle and status in step with its tasks (Asana stays the day-to-day source).
+  // A team occurrence is completed only when every linked task is.
   const refreshed = await client.query(`
+    with agg as (
+      select t.occurrence_id,
+             (array_agg(t.cycle_record_id order by t.rev1_task_instance_id desc))[1] as cycle_record_id,
+             case when bool_and(coalesce(t.task_completed, false)) then 'completed' else 'released' end as status
+        from hb.rev1_task_instances t
+       where t.occurrence_id is not null
+       group by t.occurrence_id
+    )
     update hb.work_occurrences o
-       set cycle_record_id = t.cycle_record_id,
-           status = case when coalesce(t.task_completed, false) then 'completed' else 'released' end
-      from hb.rev1_task_instances t
-     where t.occurrence_id = o.occurrence_id
+       set cycle_record_id = agg.cycle_record_id, status = agg.status
+      from agg
+     where agg.occurrence_id = o.occurrence_id
        and o.status <> 'cancelled'
-       and (o.cycle_record_id is distinct from t.cycle_record_id
-            or o.status is distinct from case when coalesce(t.task_completed, false) then 'completed' else 'released' end)
+       and (o.cycle_record_id is distinct from agg.cycle_record_id or o.status is distinct from agg.status)
     returning o.occurrence_id
   `);
-  return { linked: linked.rowCount || 0, refreshed: refreshed.rowCount || 0 };
+  return { linked: linked.rowCount || 0, refreshed: refreshed.rowCount || 0, ...folded };
+}
+
+// Team work used to be logged by duplicating a task per person (one assignee each). Copies of the same
+// definition on the same VIN belong to one occurrence: each person's k-th copy joins occurrence k, so
+// genuine repeats by the same person stay separate. Emptied occurrences are removed.
+export async function foldTeamDuplicates(client) {
+  const moved = await client.query(`
+    with linked as (
+      select t.rev1_task_instance_id, t.occurrence_id, o.task_definition_id, o.subject_key, o.occurrence_number,
+             lower(coalesce(nullif(t.worker_email, ''), nullif(t.assignee_email, ''), '')) as who
+        from hb.rev1_task_instances t
+        join hb.work_occurrences o on o.occurrence_id = t.occurrence_id
+       where o.subject_kind = 'vin'
+    ), ranked as (
+      select l.*, row_number() over (partition by l.task_definition_id, l.subject_key, l.who order by l.rev1_task_instance_id) as k
+        from linked l
+    ), targeted as (
+      select r.*, first_value(r.occurrence_id) over (partition by r.task_definition_id, r.subject_key, r.k order by r.occurrence_number) as target_id
+        from ranked r
+    )
+    update hb.rev1_task_instances t
+       set occurrence_id = targeted.target_id
+      from targeted
+     where t.rev1_task_instance_id = targeted.rev1_task_instance_id
+       and targeted.occurrence_id <> targeted.target_id
+    returning t.rev1_task_instance_id
+  `);
+  const removed = moved.rowCount ? await client.query(`
+    delete from hb.work_occurrences o
+     where o.subject_kind = 'vin'
+       and not exists (select 1 from hb.rev1_task_instances t where t.occurrence_id = o.occurrence_id)
+       -- Only occurrences created by linking tasks; planned work released later has no task yet by design.
+       and (o.source like 'migration 039%' or o.source like 'hb rebuild%')
+    returning o.occurrence_id
+  `) : { rowCount: 0 };
+  return { teamTasksFolded: moved.rowCount || 0, emptyOccurrencesRemoved: removed.rowCount || 0 };
 }
 
 // Qualification rule shared with the template average-time model: actual time above zero and no more than
@@ -83,67 +128,115 @@ export function qualifiesForAverage(actualSeconds, estimateSeconds) {
 
 const average = values => (values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : null);
 
-// Task-time table: one row per definition, one cell per VIN (or per cycle), with averages.
+// Per-person seconds for one task: Hawley timer sessions when present (helpers included), else the task's
+// recorded actual time credited to its assignee.
+function taskPeople(obs) {
+  const split = obs.session_minutes && typeof obs.session_minutes === "object" ? obs.session_minutes : null;
+  const people = {};
+  if (split && Object.keys(split).length) {
+    for (const [name, minutes] of Object.entries(split)) if (Number(minutes) > 0) people[name] = Number(minutes) * 60;
+  } else {
+    people[obs.worker || "Unknown"] = Number(obs.actual_seconds);
+  }
+  return people;
+}
+
+const mergePeople = (into, from) => {
+  for (const [name, seconds] of Object.entries(from)) into[name] = (into[name] || 0) + seconds;
+  return into;
+};
+
+// Task-time table: one row per definition, one cell per VIN (or per cycle), with averages. Team work is
+// counted per occurrence, so two people's time on one task is one crew total (with a per-person split),
+// not two half-tasks.
 export function buildTaskTimeTable(observations, { mode = "vin", columns = 12, recent = 5 } = {}) {
+  const occurrences = new Map();
+  observations.forEach((obs, index) => {
+    const id = obs.occurrence_id || `obs-${index}`;
+    const occ = occurrences.get(id) || { ...obs, actual_seconds: 0, people: {}, completed_on: null };
+    occ.actual_seconds += Number(obs.actual_seconds);
+    mergePeople(occ.people, taskPeople(obs));
+    if (!occ.completed_on || String(obs.completed_on || "") > String(occ.completed_on)) occ.completed_on = obs.completed_on;
+    occurrences.set(id, occ);
+  });
+
+  const columnKey = occ => (mode === "cycle" ? occ.cycle_key || "no cycle" : occ.vin != null ? String(occ.vin) : `batch ${occ.cycle_key || ""}`.trim());
   const byDefinition = new Map();
-  for (const obs of observations) {
-    const row = byDefinition.get(obs.task_definition_id) || {
-      taskDefinitionId: obs.task_definition_id,
-      taskName: obs.task_name,
-      phaseName: obs.phase_name,
-      estimateSeconds: obs.estimate_seconds,
-      observations: [],
-      cells: new Map()
+  for (const occ of occurrences.values()) {
+    const row = byDefinition.get(occ.task_definition_id) || {
+      taskDefinitionId: occ.task_definition_id,
+      taskName: occ.task_name,
+      phaseName: occ.phase_name,
+      estimateSeconds: occ.estimate_seconds,
+      occurrences: [],
+      cells: new Map(),
+      cellPeople: new Map()
     };
-    row.observations.push(obs);
-    const key = mode === "cycle" ? obs.cycle_key || "no cycle" : obs.vin != null ? String(obs.vin) : `batch ${obs.cycle_key || ""}`.trim();
-    row.cells.set(key, (row.cells.get(key) || 0) + Number(obs.actual_seconds));
-    byDefinition.set(obs.task_definition_id, row);
+    row.occurrences.push(occ);
+    const key = columnKey(occ);
+    row.cells.set(key, (row.cells.get(key) || 0) + occ.actual_seconds);
+    row.cellPeople.set(key, mergePeople(row.cellPeople.get(key) || {}, occ.people));
+    byDefinition.set(occ.task_definition_id, row);
   }
 
   // Columns: the most recent VINs (or cycles) that have any data, newest first.
   const columnLatest = new Map();
-  for (const obs of observations) {
-    const key = mode === "cycle" ? obs.cycle_key || "no cycle" : obs.vin != null ? String(obs.vin) : null;
+  for (const occ of occurrences.values()) {
+    const key = mode === "cycle" ? occ.cycle_key || "no cycle" : occ.vin != null ? String(occ.vin) : null;
     if (!key) continue;
-    const order = mode === "cycle" ? obs.cycle_order ?? 0 : Number(obs.vin);
+    const order = mode === "cycle" ? occ.cycle_order ?? 0 : Number(occ.vin);
     columnLatest.set(key, Math.max(columnLatest.get(key) ?? -Infinity, order));
   }
   const columnKeys = [...columnLatest.entries()].sort((a, b) => b[1] - a[1]).slice(0, columns).map(([key]) => key);
 
   const rows = [...byDefinition.values()].map(row => {
-    const qualified = row.observations
-      .filter(obs => qualifiesForAverage(Number(obs.actual_seconds), Number(row.estimateSeconds)))
+    const qualified = row.occurrences
+      .filter(occ => qualifiesForAverage(occ.actual_seconds, Number(row.estimateSeconds)))
       .sort((a, b) => String(b.completed_on || "").localeCompare(String(a.completed_on || "")));
-    const seconds = qualified.map(obs => Number(obs.actual_seconds));
+    const seconds = qualified.map(occ => occ.actual_seconds);
+    const crew = qualified.map(occ => Object.values(occ.people).filter(value => value > 0).length || 1);
+    const pick = keys => Object.fromEntries(keys.filter(key => row.cells.has(key)).map(key => [key, row.cells.get(key)]));
     return {
       taskDefinitionId: row.taskDefinitionId,
       taskName: row.taskName,
       phaseName: row.phaseName,
       estimateSeconds: row.estimateSeconds,
       count: seconds.length,
-      excluded: row.observations.length - seconds.length,
+      excluded: row.occurrences.length - seconds.length,
       averageSeconds: average(seconds),
       recentAverageSeconds: average(seconds.slice(0, recent)),
+      averageCrew: crew.length ? Math.round((crew.reduce((a, b) => a + b, 0) / crew.length) * 10) / 10 : null,
       lastCompletedOn: qualified[0]?.completed_on || null,
-      cells: Object.fromEntries(columnKeys.filter(key => row.cells.has(key)).map(key => [key, row.cells.get(key)]))
+      cells: pick(columnKeys),
+      cellPeople: Object.fromEntries(columnKeys.filter(key => row.cellPeople.has(key)).map(key => [key, row.cellPeople.get(key)]))
     };
   }).sort((a, b) => String(a.phaseName || "").localeCompare(String(b.phaseName || "")) || String(a.taskName).localeCompare(String(b.taskName)));
 
   return { columns: columnKeys, rows };
 }
 
-// Completed, timed work per occurrence for the task-time table, newest first.
+// Completed, timed work per task for the task-time table, newest first, with each task's occurrence,
+// assignee and per-person Hawley timer minutes.
 export async function taskTimeObservations(db, { phase = "", search = "" } = {}) {
   const result = await db.query(
-    `select o.task_definition_id, v.task_name, v.phase_name, v.estimated_task_time_seconds as estimate_seconds,
+    `with sessions as (
+       select s.asana_task_gid, jsonb_object_agg(s.person, s.minutes) as session_minutes
+         from (select asana_task_gid, coalesce(nullif(worker_name, ''), worker_key) as person, sum(coalesce(duration_minutes, 0))::int as minutes
+                 from core.time_sessions group by 1, 2) s
+        where s.minutes > 0
+        group by s.asana_task_gid
+     )
+     select o.occurrence_id, o.task_definition_id, v.task_name, v.phase_name, v.estimated_task_time_seconds as estimate_seconds,
             t.vin, t.actual_time_seconds as actual_seconds, t.completed_on::text as completed_on,
+            coalesce(nullif(t.worker_name, ''), nullif(t.worker_email, ''), nullif(t.assignee_name, '')) as worker,
+            sessions.session_minutes,
             case when c.cycle_number is null then null else 'C' || c.cycle_number || '.' || to_char(c.start_date, 'YY') end as cycle_key,
             extract(epoch from c.start_date)::bigint as cycle_order
        from hb.work_occurrences o
        join hb.task_definition_versions v on v.task_definition_id = o.task_definition_id and v.version_number = o.version_number
        join hb.rev1_task_instances t on t.occurrence_id = o.occurrence_id
        left join hb.cycles c on c.cycle_record_id = t.cycle_record_id
+       left join sessions on sessions.asana_task_gid = t.asana_task_gid
       where coalesce(t.task_completed, false)
         and coalesce(t.actual_time_seconds, 0) > 0
         and ($1::text = '' or v.phase_name = $1::text)

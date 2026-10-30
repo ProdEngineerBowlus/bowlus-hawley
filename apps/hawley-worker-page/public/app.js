@@ -1865,6 +1865,11 @@
     const parallelAdminChip = task.trackingMode === "parallel_admin"
       ? `<span class="chip purple" title="Can run with other Engineering Changes tasks; follows the normal shop-day and break clock.">Engineering Changes · parallel</span>`
       : "";
+    // Team tasks: a helper logs their own time on the assignee's task but does not complete it.
+    const isHelper = task.assignmentRole === "helper";
+    const helpingChip = isHelper
+      ? `<span class="chip purple" title="You are helping on this task. Log your own time here; the assignee marks it complete.">Helping</span>`
+      : "";
     const estimateChip = renderEstimateChip(task);
     const taskLoggedMinutes = taskActualLoggedMinutes(task);
     const taskWipMinutes = taskActualWipMinutes(task);
@@ -1897,7 +1902,8 @@
           <div class="task-meta">
             <span class="chip blue">${escapeHtml(task.cycle || "Cycle")}</span>
             ${task.carriedOver ? `<span class="chip yellow" title="Unfinished work assigned on an earlier day remains available today.">Carryover</span>` : ""}
-            ${locked ? "" : `<span class="chip">${formatHours(task.assignedHours)}</span>`}
+            ${locked || isHelper ? "" : `<span class="chip">${formatHours(task.assignedHours)}</span>`}
+            ${helpingChip}
             ${locked ? "" : estimateChip}
             ${!locked && task.workedTimeRecovered ? `<span class="chip yellow">Worked this day</span>` : ""}
             ${!locked && task.ledgerBackfilled ? `<span class="chip yellow">Ledger</span>` : ""}
@@ -1916,14 +1922,16 @@
             canControl
               ? `<div class="work-actions${cncMachine ? " cnc-actions" : ""}" data-task-id="${escapeAttr(task.id)}">
                   <a class="btn ${hasSop ? "ghost" : "disabled"}" ${hasSop ? `href="${escapeAttr(sopUrl)}" target="_blank" rel="noreferrer"` : ""} aria-disabled="${hasSop ? "false" : "true"}">${icons.open}<span>SOP</span></a>
-                  ${task.completed
+                  ${task.completed && isHelper
+                    ? ""
+                    : task.completed
                     ? `<button class="btn ghost" type="button" data-action="reopen-task" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>${busy ? "Saving..." : "Mark incomplete"}</button>`
                     : cncMachine
                       ? `<button class="btn ${cncRun?.overrun ? "danger" : "primary"}" type="button" data-action="${cncRun ? "stop-cnc-run" : "start-cnc-run"}" data-task-id="${escapeAttr(task.id)}" ${cncRun ? `data-machine-run-id="${escapeAttr(cncRun.id)}"` : ""} ${busy ? "disabled" : ""}>${cncRun ? "Stop cut" : "Start cut"}</button>
                          <button class="btn ghost" type="button" data-action="complete-task" data-task-id="${escapeAttr(task.id)}" ${cncRun || !Number(cncMachine.stoppedRunCount || 0) || busy ? "disabled" : ""}>${busy ? "Saving..." : "Complete sheet"}</button>`
                       : `<button class="btn ghost" type="button" data-action="start-timer" data-task-id="${escapeAttr(task.id)}" ${timerRunning || busy ? "disabled" : ""}>${timerRunning ? "Running" : startLabel}</button>
                          ${timerRunning ? `<button class="btn ghost" type="button" data-action="stop-timer" data-task-id="${escapeAttr(task.id)}" ${busy ? "disabled" : ""}>Stop</button>` : ""}
-                         <button class="btn primary" type="button" data-action="complete-task" data-task-id="${escapeAttr(task.id)}" ${!timerHasTime || busy ? "disabled" : ""}>${busy ? "Saving..." : "Complete"}</button>`}
+                         ${isHelper ? "" : `<button class="btn primary" type="button" data-action="complete-task" data-task-id="${escapeAttr(task.id)}" ${!timerHasTime || busy ? "disabled" : ""}>${busy ? "Saving..." : "Complete"}</button>`}`}
                   ${timeStudy
                     ? `<button class="btn ${studyLapRunning ? "danger" : "ghost"}" type="button" data-action="${studyLapRunning ? "stop-time-study" : "start-time-study"}" data-task-id="${escapeAttr(task.id)}" data-study-key="${escapeAttr(timeStudy.id)}" ${(!studyLapRunning && !timerRunning) || busy ? "disabled" : ""}>${studyLapRunning ? `Stop ${escapeHtml(timeStudy.label)}` : `Start ${escapeHtml(timeStudy.label)}`}</button>
                        ${timeStudyAdminEnabled() ? `<button class="btn ghost" type="button" data-action="record-time-study" data-task-id="${escapeAttr(task.id)}" data-study-key="${escapeAttr(timeStudy.id)}" data-study-label="${escapeAttr(timeStudy.label)}" ${busy ? "disabled" : ""}>Record past time</button><button class="btn ghost" type="button" data-action="end-time-study" data-task-id="${escapeAttr(task.id)}" data-study-key="${escapeAttr(timeStudy.id)}" ${busy ? "disabled" : ""}>End study</button>` : ""}`

@@ -61,7 +61,7 @@ test("HB rebuild linking adds new tasks as the next occurrence and keeps status 
   await db.query("insert into hb.rev1_task_instances (tasks_key, vin, cycle_record_id, task_completed, task_name) values ('recShower', 335, 'c1-27', false, 'new')");
   await db.query("update hb.rev1_task_instances set task_completed = true, cycle_record_id = 'c24' where vin = 334");
   const result = await linkTaskOccurrences(db);
-  assert.deepEqual(result, { linked: 1, refreshed: 1 });
+  assert.deepEqual(result, { linked: 1, refreshed: 1, teamTasksFolded: 0, emptyOccurrencesRemoved: 0 });
   const occ = await db.query("select occurrence_id, cycle_record_id, status from hb.work_occurrences where subject_key in ('334', '335') order by occurrence_id");
   assert.deepEqual(occ.rows.map(o => [o.occurrence_id, o.cycle_record_id, o.status]), [
     ["occ:recShower:vin:334:1", "c24", "completed"],
@@ -69,7 +69,7 @@ test("HB rebuild linking adds new tasks as the next occurrence and keeps status 
     ["occ:recShower:vin:335:2", "c25", "released"],
     ["occ:recShower:vin:335:3", "c1-27", "released"]
   ]);
-  assert.deepEqual(await linkTaskOccurrences(db), { linked: 0, refreshed: 0 }, "second run is a no-op");
+  assert.deepEqual(await linkTaskOccurrences(db), { linked: 0, refreshed: 0, teamTasksFolded: 0, emptyOccurrencesRemoved: 0 }, "second run is a no-op");
 });
 
 test("task-time table: averages use the 5-hour rule, last 5 are most recent, columns are newest VINs", async () => {
@@ -122,4 +122,33 @@ test("review rules map unkeyed tasks (VIN from project name, cycle buckets) and 
   const after = await taskMappingGroups(db);
   assert.ok(!after.groups.some(g => g.norm_name.includes("ecn")), "ignored groups leave the review");
   await assert.rejects(saveTaskMappingRules(db, [{ name: "x", phase: "B", action: "map" }]), /Pick a template/);
+});
+
+test("duplicated team tasks (one copy per person) fold into one occurrence; same-person repeats stay separate", async () => {
+  const { linkTaskOccurrences, buildTaskTimeTable } = await import("../src/task-occurrences.js");
+  const db = await database();
+  await db.exec(await migration("039_task_definitions_occurrences.sql"));
+  await db.exec(await migration("040_task_mapping_rules.sql"));
+  const add = (email, done, seconds) => db.query(
+    "insert into hb.rev1_task_instances (tasks_key, vin, cycle_record_id, task_completed, actual_time_seconds, worker_email, worker_name, task_name) values ('recShower', 340, 'c24', $1, $2, $3, $3, 'Rivet')",
+    [done, seconds, email]);
+  await add("mauricer@x.com", true, 4200);
+  await add("luisg@x.com", false, 3000);
+  await add("mauricer@x.com", true, 600);
+  const result = await linkTaskOccurrences(db);
+  assert.deepEqual([result.linked, result.teamTasksFolded, result.emptyOccurrencesRemoved], [3, 1, 1]);
+  const occ = await db.query("select o.occurrence_id, o.status, count(t.*)::int as tasks from hb.work_occurrences o join hb.rev1_task_instances t on t.occurrence_id = o.occurrence_id where o.subject_key = '340' group by 1, 2 order by 1");
+  assert.deepEqual(occ.rows, [
+    { occurrence_id: "occ:recShower:vin:340:1", status: "released", tasks: 2 },
+    { occurrence_id: "occ:recShower:vin:340:3", status: "completed", tasks: 1 }
+  ], "team occurrence stays open until every copy is complete");
+
+  await db.query("update hb.rev1_task_instances set task_completed = true where worker_email = 'luisg@x.com'");
+  await linkTaskOccurrences(db);
+  const obs = (await db.query(`select t.occurrence_id, 'recShower' as task_definition_id, 'Rivet' as task_name, 'F' as phase_name, 7200 as estimate_seconds,
+      t.vin, t.actual_time_seconds as actual_seconds, '2026-10-30' as completed_on, t.worker_name as worker, null::jsonb as session_minutes
+      from hb.rev1_task_instances t where t.vin = 340 and t.task_completed`)).rows;
+  const row = buildTaskTimeTable(obs).rows[0];
+  assert.deepEqual([row.count, row.averageSeconds, row.averageCrew], [2, Math.round((7200 + 600) / 2), 1.5]);
+  assert.deepEqual(row.cellPeople["340"], { "mauricer@x.com": 4800, "luisg@x.com": 3000 });
 });

@@ -1906,6 +1906,14 @@
     return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}`;
   }
 
+  // One VIN/cycle cell: crew hours, with each person's share in the tooltip when more than one person worked it.
+  function taskTimeCell(seconds, people) {
+    const names = Object.entries(people || {}).filter(([, value]) => value > 0);
+    if (names.length < 2) return `<td>${escapeHtml(formatDuration(seconds))}</td>`;
+    const title = names.map(([who, value]) => `${who.split("@")[0]} ${formatDuration(value)}`).join(", ");
+    return `<td title="${escapeHtml(title)}">${escapeHtml(formatDuration(seconds))} <span class="muted">· ${names.length}</span></td>`;
+  }
+
   function renderTaskTimes() {
     const data = state.taskTimes;
     const f = state.taskTimesFilters;
@@ -1927,12 +1935,12 @@
         </div>
         <div class="panel-body">
           <div class="inline-actions"><button class="btn primary" type="button" data-action="task-times-load" ${state.taskTimesLoading ? "disabled" : ""}>Show</button></div>
-          <p class="muted">Actual time per task (h:mm), from completed tasks. Average and Last 5 use the same rule as the template averages: above zero and no more than 5 hours over the estimate. ${coverage.unlinked_tasks ? escapeHtml(`${formatNumber(coverage.unlinked_tasks)} older or one-off tasks are not linked to a template yet; the review step will add them.`) : ""}</p>
+          <p class="muted">Crew hours per task (h:mm), from completed tasks; team tasks add every person's time, and hovering a cell shows who logged what. Average and Last 5 use the same rule as the template averages: above zero and no more than 5 hours over the estimate. ${coverage.unlinked_tasks ? escapeHtml(`${formatNumber(coverage.unlinked_tasks)} older or one-off tasks are not linked to a template yet; the review step will add them.`) : ""}</p>
           ${state.taskTimesMessage ? `<div class="notice risk">${escapeHtml(state.taskTimesMessage)}</div>` : ""}
         </div>
         <div class="panel-body table-wrap">
           <table class="table task-times-table">
-            <thead><tr><th>Task</th><th>Phase</th><th>Est.</th><th>Avg (n)</th><th>Last 5</th>${columns.map(c => `<th>${escapeHtml(f.mode === "cycle" ? c : `VIN ${c}`)}</th>`).join("")}</tr></thead>
+            <thead><tr><th>Task</th><th>Phase</th><th>Est.</th><th>Avg (n)</th><th>Crew</th><th>Last 5</th>${columns.map(c => `<th>${escapeHtml(f.mode === "cycle" ? c : `VIN ${c}`)}</th>`).join("")}</tr></thead>
             <tbody>
               ${rows.map(row => `
                 <tr>
@@ -1940,10 +1948,11 @@
                   <td>${escapeHtml(row.phaseName || "")}</td>
                   <td>${escapeHtml(formatDuration(row.estimateSeconds))}</td>
                   <td>${escapeHtml(row.averageSeconds ? `${formatDuration(row.averageSeconds)} (${row.count})` : "")}</td>
+                  <td>${escapeHtml(row.averageCrew ? String(row.averageCrew) : "")}</td>
                   <td>${escapeHtml(formatDuration(row.recentAverageSeconds))}</td>
-                  ${columns.map(c => `<td>${escapeHtml(formatDuration(row.cells[c]))}</td>`).join("")}
+                  ${columns.map(c => taskTimeCell(row.cells[c], row.cellPeople?.[c])).join("")}
                 </tr>
-              `).join("") || `<tr><td colspan="${5 + columns.length}">${state.taskTimesLoading ? "Loading…" : "No timed tasks match these filters."}</td></tr>`}
+              `).join("") || `<tr><td colspan="${6 + columns.length}">${state.taskTimesLoading ? "Loading…" : "No timed tasks match these filters."}</td></tr>`}
             </tbody>
           </table>
         </div>
