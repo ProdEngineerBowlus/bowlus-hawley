@@ -1741,3 +1741,20 @@ a {
   gap: 6px;
   align-items: center;
 }
+
+.cycle-year-filter {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.cycle-year-filter select {
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: #121710;
+  padding: 0 8px;
+}
