@@ -45,6 +45,9 @@ const TASK_OPT_FIELDS = [
   "custom_fields.enum_value.name",
   "custom_fields.multi_enum_values.gid",
   "custom_fields.multi_enum_values.name",
+  "custom_fields.people_value.gid",
+  "custom_fields.people_value.name",
+  "custom_fields.people_value.email",
   "notes",
   "permalink_url"
 ].join(",");

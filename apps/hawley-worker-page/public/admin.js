@@ -57,6 +57,8 @@
     templatesFilters: { phase: "", q: "", retired: false },
     templateEdit: null,
     templateDetail: null,
+    teamTasks: null,
+    teamTasksMessage: "",
     taskMapping: null,
     taskMappingLoading: false,
     taskMappingMessage: "",
@@ -1953,6 +1955,7 @@
     state.taskMappingLoading = true;
     render();
     try {
+      fetchJson("/api/admin/team-tasks").then(result => { state.teamTasks = result; render(); }).catch(() => {});
       state.taskMapping = await fetchJson(`/api/admin/task-mapping?q=${encodeURIComponent(state.taskMappingSearch)}&limit=200`);
     } catch (error) {
       state.taskMappingMessage = error.message || "Could not load unmapped tasks.";
@@ -1983,6 +1986,29 @@
     return same.length === 1 ? same[0] : null;
   }
 
+  function renderTeamTasks() {
+    const t = state.teamTasks;
+    if (!t) return "";
+    return `
+      <section class="panel">
+        <div class="panel-header">
+          <h3 class="panel-title">Team tasks (Asana Helpers field)</h3>
+          <span class="pill">${escapeHtml(t.helpersFieldGid ? `${formatNumber(t.tasksWithHelpers)} tasks with helpers` : "Not set up")}</span>
+        </div>
+        <div class="panel-body">
+          <p class="muted">Instead of duplicating a task for a second person, the lead keeps one assignee and adds teammates to the task's <strong>Helpers</strong> field in Asana. Helpers see the task on their worker page and log their own time; only the assignee completes it. Helper tasks appear only for the trial workers below until enabled for everyone.</p>
+          <div class="inline-actions">
+            <button class="btn" type="button" data-action="team-tasks-setup">${t.helpersFieldGid ? "Add Helpers field to open VIN projects" : "Create Helpers field in Asana"}</button>
+          </div>
+          <label class="field" style="margin-top: 12px;"><span>Trial workers (emails, comma separated)</span><input type="text" class="table-input" data-team-trial value="${escapeAttr((t.trialWorkerEmails || []).join(", "))}" /></label>
+          <label class="field production-checks"><span>Rollout</span><span><input type="checkbox" data-team-all ${t.enabledForAll ? "checked" : ""} /> Enabled for everyone</span></label>
+          <div class="inline-actions"><button class="btn primary" type="button" data-action="team-tasks-save">Save team task settings</button></div>
+          ${state.teamTasksMessage ? `<div class="notice" style="margin-top: 12px;">${escapeHtml(state.teamTasksMessage)}</div>` : ""}
+        </div>
+      </section>
+    `;
+  }
+
   function renderTaskMapping() {
     const data = state.taskMapping;
     const groups = data?.groups || [];
@@ -1995,6 +2021,7 @@
       return pick.map(d => `<option value="${escapeAttr(d.taskDefinitionId)}">${escapeHtml(`${d.taskName} · ${d.phaseName || "no phase"}`)}</option>`).join("");
     };
     return `
+      ${renderTeamTasks()}
       <section class="panel">
         <div class="panel-header">
           <h3 class="panel-title">Task Review</h3>
@@ -2355,6 +2382,29 @@
         state.templatesLoading = false;
         render();
       }
+    } else if (action === "team-tasks-setup") {
+      if (!window.confirm("Create (if needed) the Asana Helpers field and add it to every VIN project with open work?")) return;
+      state.teamTasksMessage = "Working…";
+      render();
+      try {
+        const result = await postJson("/api/admin/team-tasks/setup", {});
+        state.teamTasksMessage = `Helpers field ready; added to ${result.attached} of ${result.projects} open VIN projects${result.failed.length ? ` (${result.failed.length} failed)` : ""}.`;
+        state.teamTasks = await fetchJson("/api/admin/team-tasks");
+      } catch (error) {
+        state.teamTasksMessage = error.message || "Could not set up the Helpers field.";
+      }
+      render();
+    } else if (action === "team-tasks-save") {
+      try {
+        state.teamTasks = await postJson("/api/admin/team-tasks/settings", {
+          trialWorkerEmails: root.querySelector("[data-team-trial]")?.value || "",
+          enabledForAll: Boolean(root.querySelector("[data-team-all]")?.checked)
+        });
+        state.teamTasksMessage = state.teamTasks.enabledForAll ? "Team tasks enabled for everyone." : `Trial workers: ${state.teamTasks.trialWorkerEmails.join(", ") || "none"}.`;
+      } catch (error) {
+        state.teamTasksMessage = error.message || "Could not save.";
+      }
+      render();
     } else if (action === "task-mapping-search") {
       state.taskMappingSearch = root.querySelector("[data-task-mapping-search]")?.value || "";
       await loadTaskMapping();
