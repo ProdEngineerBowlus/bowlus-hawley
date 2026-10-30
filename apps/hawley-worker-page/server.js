@@ -11209,6 +11209,41 @@ async function asanaCycleFieldOptions() {
   }
 }
 
+// Adds missing Cycle options in plan order, each after its predecessor (e.g. C1.27 after C25.26), so the
+// dropdown stays chronological. Returns the refreshed option map.
+async function addAsanaCycleOptions(labels, options) {
+  const token = process.env.ASANA_PAT;
+  const added = [];
+  const failed = [];
+  if (!labels.length || !token || !options) return { options, added, failed: labels.length && (!token || !options) ? labels : failed };
+  const ordered = [...options.keys()];
+  for (const label of labels) {
+    const key = label.toLowerCase();
+    if (options.has(key)) continue;
+    const match = /^c(\d+)\.(\d{2})$/.exec(key);
+    const previous = match ? ordered.filter(name => {
+      const other = /^c(\d+)\.(\d{2})$/.exec(name);
+      return other && (Number(other[2]) < Number(match[2]) || (other[2] === match[2] && Number(other[1]) < Number(match[1])));
+    }).sort((a, b) => {
+      const [, an, ay] = /^c(\d+)\.(\d{2})$/.exec(a);
+      const [, bn, by] = /^c(\d+)\.(\d{2})$/.exec(b);
+      return Number(ay) - Number(by) || Number(an) - Number(bn);
+    }).at(-1) : null;
+    try {
+      const data = { name: label, enabled: true };
+      if (previous && options.get(previous)) data.insert_after = options.get(previous);
+      const option = await adminAsanaRequest(token, `/custom_fields/${ASANA_CYCLE_FIELD_GID}/enum_options`, "POST", { data }, 0, 15000);
+      options.set(key, option.gid);
+      ordered.push(key);
+      added.push(label);
+    } catch (error) {
+      failed.push(label);
+      console.warn("[hawley-cycle-planner]", JSON.stringify({ action: "asana_cycle_option_failed", label, error: error.message }));
+    }
+  }
+  return { options, added, failed };
+}
+
 // One-time push of a published plan: set the Cycle field on moved Asana tasks. Afterwards the Asana sync
 // owns day-to-day cycle changes again.
 async function pushCyclePlanToAsana(versionId, pushes, options) {
@@ -11268,12 +11303,13 @@ async function handleAdminCyclePlannerPublish(req) {
     actorEmail: actor?.email || actor?.username || "",
     asanaCycleOptions: options ? new Set(options.keys()) : null
   });
-  const pushes = await pushCyclePlanToAsana(result.cyclePlanVersionId, result.asanaPushes, options);
-  const asanaPush = summarizePushes(pushes);
+  const optionResult = await addAsanaCycleOptions(result.asanaOptionsToAdd || [], options);
+  const pushes = await pushCyclePlanToAsana(result.cyclePlanVersionId, result.asanaPushes, optionResult.options);
+  const asanaPush = { ...summarizePushes(pushes), optionsAdded: optionResult.added.length, optionsFailed: optionResult.failed };
   console.log("[hawley-cycle-planner]", JSON.stringify({ action: "publish", ...result, asanaPushes: undefined, asanaPush }));
   // Refresh phase loads and allocations for the new plan; the publish itself is already committed.
   runAdminProjectDownstreamRebuild().catch(error => console.warn("[hawley-cycle-planner]", JSON.stringify({ action: "rebuild_failed", error: error.message })));
-  return { ...result, asanaPushes: undefined, asanaPush };
+  return { ...result, asanaPushes: undefined, asanaOptionsToAdd: undefined, asanaPush };
 }
 
 async function handleAdminCyclePlannerRetryPush(req) {

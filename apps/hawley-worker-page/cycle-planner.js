@@ -374,13 +374,19 @@ async function previewCombined(db, inputs, publishedByYear, calendar, ctx = {}) 
     }
   }
 
-  if (production.relinks.length) {
-    const needed = [...new Set(production.relinks.map(r => r.toAsanaLabel))];
-    if (!ctx.asanaCycleOptions) {
+  // Every planned cycle gets an option on the Asana "Cycle" field (e.g. "C1.27") so tasks can be moved
+  // there and filtered by it. Missing options are created when the plan is published.
+  const asanaOptionsToAdd = [];
+  if (!ctx.asanaCycleOptions) {
+    if (production.relinks.length) {
       conflicts.push({ code: "asana_unavailable", message: `${production.relinks.length} Asana tasks change cycle, but Hawley cannot read the Asana Cycle field right now.` });
     } else {
-      const missing = needed.filter(label => !ctx.asanaCycleOptions.has(label.toLowerCase()));
-      if (missing.length) conflicts.push({ code: "asana_cycle_option_missing", message: `Add these options to the Asana "Cycle" field before publishing: ${missing.join(", ")}.` });
+      warnings.push({ code: "asana_options_unchecked", message: "Hawley could not read the Asana Cycle field, so missing cycle options will not be added." });
+    }
+  } else {
+    for (const cycle of allCycles) {
+      const label = asanaCycleLabel(cycle.year, cycle.cycle);
+      if (!ctx.asanaCycleOptions.has(label.toLowerCase())) asanaOptionsToAdd.push(label);
     }
   }
 
@@ -434,10 +440,11 @@ async function previewCombined(db, inputs, publishedByYear, calendar, ctx = {}) 
       updates: production.updates,
       deletes: production.deletes.length,
       relinks: production.relinks.slice(0, 50).map(r => ({ vin: r.vin, taskName: r.taskName, from: r.fromLabel, to: r.toAsanaLabel })),
-      relinkCount: production.relinks.length
+      relinkCount: production.relinks.length,
+      asanaOptionsToAdd
     },
     changedCycleNumbers: [...changedCycles.map(c => c.cycle), ...removedCycles.map(c => c.cycle)],
-    changeCount: changedCycles.length + removedCycles.length + productionChanges,
+    changeCount: changedCycles.length + removedCycles.length + productionChanges + asanaOptionsToAdd.length,
     planHash: hash,
     _internal: { years, production, removedCycles }
   };
@@ -615,8 +622,9 @@ export async function publishCyclePlan(pool, body, { today, actorEmail = "", cal
     }
     if (!preview.changeCount) throw plannerError("Nothing to publish: the plan matches what is published.", 409, { code: "PLAN_UNCHANGED" });
     const { years, production, removedCycles } = preview._internal;
-    if (production.relinks.length && body.pushToAsana !== true) {
-      throw plannerError(`${production.relinks.length} Asana tasks change cycle. Confirm the Asana push to publish.`, 409, { code: "ASANA_PUSH_REQUIRED" });
+    const asanaOptionsToAdd = preview.production.asanaOptionsToAdd;
+    if ((production.relinks.length || asanaOptionsToAdd.length) && body.pushToAsana !== true) {
+      throw plannerError("This plan changes Asana (Cycle options or task cycles). Confirm the Asana push to publish.", 409, { code: "ASANA_PUSH_REQUIRED" });
     }
 
     const groupId = `cycle-plan-group:${randomUUID()}`;
@@ -669,7 +677,8 @@ export async function publishCyclePlan(pool, body, { today, actorEmail = "", cal
       changedCycleNumbers: preview.changedCycleNumbers,
       removedCycleNumbers: removedCycles.map(c => c.cycle),
       production: { moves: production.moves.length, creates: production.creates, updates: production.updates, deletes: production.deletes.length },
-      asanaPushes: pushes
+      asanaPushes: pushes,
+      asanaOptionsToAdd
     };
   } catch (error) {
     await client.query("rollback").catch(() => {});

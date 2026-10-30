@@ -105,11 +105,17 @@ test("dropping C25 moves its VIN rows and tasks into 2027 C1 and keeps parity", 
   assert.equal(again.changeCount, 0, JSON.stringify(again.conflicts));
 });
 
-test("a missing Asana Cycle option blocks publishing until it is added", async () => {
-  const { client } = await liveLikeDatabase();
-  const preview = await buildCyclePreview(client, BODY, TODAY, undefined, { asanaCycleOptions: new Set(["c25.26"]) });
-  assert.ok(preview.conflicts.some(c => c.code === "asana_cycle_option_missing" && /C1\.27/.test(c.message)));
-  const offline = await buildCyclePreview(client, BODY, TODAY, undefined, {});
+test("missing Asana Cycle options are listed for publishing in plan order, and Asana outages block task moves", async () => {
+  const { client, pool } = await liveLikeDatabase();
+  const existing = new Set([...Array(26).keys()].map(n => `c${n}.26`));
+  const preview = await buildCyclePreview(client, BODY, TODAY, undefined, { asanaCycleOptions: existing });
+  assert.equal(preview.ok, true, JSON.stringify(preview.conflicts));
+  assert.equal(preview.production.asanaOptionsToAdd.length, 25);
+  assert.deepEqual([preview.production.asanaOptionsToAdd[0], preview.production.asanaOptionsToAdd.at(-1)], ["C1.27", "C25.27"]);
+  const result = await publishCyclePlan(pool, { ...BODY, planHash: preview.planHash, pushToAsana: true }, { today: TODAY, asanaCycleOptions: existing });
+  assert.equal(result.asanaOptionsToAdd.length, 25);
+  const fresh = await liveLikeDatabase();
+  const offline = await buildCyclePreview(fresh.client, BODY, TODAY, undefined, {});
   assert.ok(offline.conflicts.some(c => c.code === "asana_unavailable"));
 });
 
