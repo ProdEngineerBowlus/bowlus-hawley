@@ -44,6 +44,7 @@
     cyclePlanMessage: "",
     cyclePlanNextForm: null,
     cyclePlanPushFailedVersion: "",
+    cyclePlanShowYear: "",
     production: null,
     productionLoading: false,
     productionMessage: "",
@@ -1688,6 +1689,8 @@
     const canPublish = preview?.ok && changeCount > 0 && !state.cyclePlanLoading;
     const needsStartVin = (preview?.conflicts || []).some(c => c.code === "production_start_unknown") || form.startVin;
     const disabled = state.cyclePlanLoading || !planner ? "disabled" : "";
+    // The plan always covers both years; the table shows one at a time unless "Both years" is picked.
+    const shownYear = state.cyclePlanShowYear || String(year);
     return `
       <section class="panel">
         <div class="panel-header">
@@ -1742,12 +1745,18 @@
       <section class="panel">
         <div class="panel-header">
           <h3 class="panel-title">${preview ? `Preview - ${formatNumber(changeCount)} changes` : "Published cycles"}</h3>
+          <label class="cycle-year-filter"><span>Show</span>
+            <select data-cycle-show-year>
+              ${years.map(y => `<option value="${escapeAttr(y.year)}" ${String(shownYear) === String(y.year) ? "selected" : ""}>${escapeHtml(y.year)}</option>`).join("")}
+              <option value="all" ${shownYear === "all" ? "selected" : ""}>Both years</option>
+            </select>
+          </label>
         </div>
         <div class="panel-body table-wrap">
           <table class="table">
             <thead><tr><th>Cycle</th><th>Dates</th><th>Days</th><th>Type</th><th>VIN plan</th><th>Published now</th><th>Affected</th><th>Holidays</th></tr></thead>
             <tbody>
-              ${years.map(y => `
+              ${years.filter(y => shownYear === "all" || String(y.year) === String(shownYear)).map(y => `
                 <tr class="cycle-year-row"><td colspan="8"><strong>${escapeHtml(y.year)}</strong>${y.workingDayCount ? ` · ${escapeHtml(formatNumber(y.workingDayCount))} working days` : ""}${y.closures ? ` · Closures: ${escapeHtml(y.closures.map(c => `${c.name} ${formatDate(c.date)}`).join(", "))}` : ""}</td></tr>
                 ${cycleRowsHtml([...y.cycles, ...(y.removedCycles || [])], y.year) || `<tr><td colspan="8">No cycles published for ${escapeHtml(y.year)}. Preview to plan them.</td></tr>`}
               `).join("")}
@@ -1974,6 +1983,7 @@
       render();
     } else if (action === "cycle-plan-load") {
       state.cyclePlanYear = root.querySelector("[data-cycle-plan-year]")?.value || state.cyclePlanYear;
+      state.cyclePlanShowYear = "";
       await loadCyclePlanner();
     } else if (action === "cycle-plan-balance") {
       // Typed lengths stay fixed; every other future cycle shares the remaining working days, longest first.
@@ -2240,6 +2250,12 @@
   });
 
   root.addEventListener("change", event => {
+    const showYear = event.target.closest("[data-cycle-show-year]");
+    if (showYear) {
+      state.cyclePlanShowYear = showYear.value;
+      render();
+      return;
+    }
     const productionInput = event.target.closest("[data-production-filter]");
     if (productionInput && productionInput.dataset.productionFilter !== "vin") {
       applyProductionFilter(productionInput);
