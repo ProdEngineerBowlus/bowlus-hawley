@@ -36,3 +36,21 @@ test('Asana completion updates the existing task identity without touching refer
 test('empty reference data fails closed rather than restoring an Airtable bootstrap',async()=>{
   const f=fixture();f.tables['hb.work_force']=[];await assert.rejects(normalizeHawleyTables(f.client),/must be populated/);
 });
+test('clearing Asana Assigned On takes an open task off the worker page only after Hawley saw a date',async()=>{
+  const assignedOn=value=>[{gid:'local-assigned-on',name:'Assigned On',display_value:value,date_value:value?{date:value}:null}];
+  const run=async(row,asana)=>{
+    const f=fixture([{gid:'task-1',name:'Peel Plastic',completed:false,assignee_email:'worker@example.test',assignee_name:'Worker',custom_fields_json:[],raw_json:{},synced_at:'2026-10-30T21:00:00Z',...asana}]);
+    Object.assign(f.tables['hb.rev1_task_instances'][0],row);
+    await normalizeHawleyTables(f.client);
+    const update=f.calls.find(c=>c.sql.startsWith('update hb.rev1_task_instances'));
+    return update?JSON.parse(update.params[0])[0]:null;
+  };
+  let row=await run({assigned_on:'2026-10-29'},{custom_fields_json:assignedOn('2026-10-30')});
+  assert.deepEqual([row.assigned_on,row.asana_assigned_on],['2026-10-30','2026-10-30'],'Asana date is dispatched and remembered');
+  row=await run({assigned_on:'2026-10-30',asana_assigned_on:'2026-10-30'},{custom_fields_json:assignedOn(null)});
+  assert.deepEqual([row.assigned_on,row.asana_assigned_on],[null,null],'cleared in Asana: off the worker page');
+  row=await run({assigned_on:'2026-10-30'},{custom_fields_json:[]});
+  assert.equal(row.assigned_on,'2026-10-30','never dispatched in Asana: planned date kept');
+  row=await run({assigned_on:'2026-10-30',asana_assigned_on:'2026-10-30'},{completed:true,completed_at:'2026-10-30T20:00:00Z',custom_fields_json:assignedOn(null)});
+  assert.equal(row.assigned_on,'2026-10-30','completed history keeps its date');
+});
