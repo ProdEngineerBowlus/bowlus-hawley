@@ -2106,7 +2106,8 @@ function taskFromRow(row) {
       ? null
       : Number(row.resolved_required_skill_level),
     hasBending: Boolean(row.has_bending),
-    actualTimeMinutes: Number(row.actual_time_minutes || 0),
+    // A helper's own minutes come from their timer ledger; the task's Asana total belongs to the crew.
+    actualTimeMinutes: row.assignment_role === "helper" ? 0 : Number(row.actual_time_minutes || 0),
     actualTimeOnDateMinutes: 0,
     sourceUrl: publicLink(row.asana_permalink_url),
     trackerUrl: "",
