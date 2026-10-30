@@ -7,7 +7,7 @@ import crypto from "node:crypto";
 import { promisify } from "node:util";
 import pg from "pg";
 import { taskAttachmentsFromStorage, createAttachmentUrlProvider } from "./attachment-storage.js";
-import { buildCyclePreview, cyclePlannerOverview, pendingAsanaPushes, publishCyclePlan, recordAsanaPushResults } from "./cycle-planner.js";
+import { buildCyclePreview, cyclePlannerOverview, pendingAsanaPushes, productionScheduleRows, publishCyclePlan, recordAsanaPushResults } from "./cycle-planner.js";
 import { getDatabaseConfig } from "../postgres-sync/src/config.js";
 
 const { Pool } = pg;
@@ -11312,6 +11312,13 @@ async function handleAdminCyclePlannerPublish(req) {
   return { ...result, asanaPushes: undefined, asanaOptionsToAdd: undefined, asanaPush };
 }
 
+async function handleAdminProductionSchedule(req, url) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const year = Number(url.searchParams.get("year")) || Number(todayIso().slice(0, 4));
+  return { year, rows: await productionScheduleRows(pool, year, year + 1) };
+}
+
 async function handleAdminCyclePlannerRetryPush(req) {
   const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
   requireAdminActor(actor);
@@ -13553,6 +13560,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/cycle-planner/preview" && req.method === "POST") {
       sendJson(res, 200, await handleAdminCyclePlannerPreview(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/production-schedule" && req.method === "GET") {
+      sendJson(res, 200, await handleAdminProductionSchedule(req, url));
       return;
     }
 

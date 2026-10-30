@@ -7,7 +7,7 @@ import { PGlite } from "@electric-sql/pglite";
 
 import { planCycles } from "../../postgres-sync/src/cycle-calendar.js";
 import { generateProductionPlan, stateFromCycleRows } from "../../postgres-sync/src/production-plan.js";
-import { buildCyclePreview, publishCyclePlan } from "../cycle-planner.js";
+import { buildCyclePreview, productionScheduleRows, publishCyclePlan } from "../cycle-planner.js";
 
 const TODAY = "2026-10-29";
 const FRONTIER = "recl2xVPOf1X0CkjG";
@@ -140,4 +140,13 @@ test("keeping 25 cycles changes nothing in production and plans 2027 from C25", 
   assert.equal(preview.production.relinkCount, 0);
   assert.equal(preview.years[1].cycles[0].production.rows.find(r => r.phase === "A1").vin, "341");
   assert.ok(preview.years[1].cycles[0].production.rows.every(r => r.action === "create"));
+});
+
+test("the production table lists each schedule row with its cycle, phase, VIN and task counts", async () => {
+  const { client } = await liveLikeDatabase();
+  const rows = await productionScheduleRows(client, 2026, 2027);
+  assert.equal(rows.length, 6 * 12);
+  const h332 = rows.find(row => row.phase_name === "H" && row.vin === "332");
+  assert.deepEqual([h332.year, h332.cycle, h332.start_date, h332.tasks, h332.tasksDone], [2026, 25, "2026-12-21", 2, 0]);
+  assert.equal(rows[0].cycle, 20);
 });

@@ -697,3 +697,33 @@ export async function pendingAsanaPushes(pool, versionId) {
   if (!result.rows[0]) throw plannerError("Cycle plan version not found.", 404, { code: "VERSION_NOT_FOUND" });
   return result.rows[0].asana_push_json || [];
 }
+
+// Read-only production schedule for the admin Production tab: every schedule row in the given years with
+// its cycle dates, phase, VIN, model and linked task count.
+export async function productionScheduleRows(db, fromYear, toYear) {
+  const rows = await db.query(
+    `select ps.production_record_id, extract(year from c.start_date)::int as year, c.cycle_number as cycle,
+            c.cycle_label, c.start_date::text as start_date, c.end_date::text as end_date,
+            ps.phase_name, ps.section_column, ph.process_order, ps.vin, m.model_name, ps.source_system
+       from hb.production_schedule ps
+       join hb.cycles c on c.cycle_record_id = ps.cycle_record_id
+       left join hb.phases ph on ph.phase_record_id = ps.phase_record_id
+       left join hb.models m on m.model_record_id = ps.model_type
+      where extract(year from c.start_date)::int between $1::int and $2::int
+      order by c.start_date, c.cycle_number, ph.process_order nulls last, ps.phase_name, ps.vin`,
+    [fromYear, toYear]
+  );
+  const counts = await db.query(
+    `select line_schedule_record_id, count(*)::int as tasks, count(*) filter (where task_completed)::int as done
+       from hb.rev1_task_instances
+      where line_schedule_record_id = any($1::text[])
+      group by line_schedule_record_id`,
+    [rows.rows.map(row => row.production_record_id)]
+  );
+  const countById = new Map(counts.rows.map(row => [row.line_schedule_record_id, row]));
+  return rows.rows.map(row => ({
+    ...row,
+    tasks: countById.get(row.production_record_id)?.tasks || 0,
+    tasksDone: countById.get(row.production_record_id)?.done || 0
+  }));
+}
