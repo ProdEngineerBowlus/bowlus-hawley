@@ -1901,12 +1901,15 @@ export async function normalizeHawleyTables(client) {
     const merged = applyAsanaOverlay({...row},asanaByGid.get(row.asana_task_gid),lookups);
     return Object.fromEntries(["rev1_task_instance_id",...PROJECT_CREATOR_ASANA_OVERLAY_COLUMNS].map(key=>[key,merged[key]]));
   });
-  // UPDATE only: preserve identity, origin, unmatched history and native metadata.
+  // UPDATE only: preserve identity, origin, unmatched history and native metadata. Unchanged rows are skipped:
+  // rewriting all ~24k rows on every rebuild kept the database busy enough to time out the worker page.
   const assignments = PROJECT_CREATOR_ASANA_OVERLAY_COLUMNS.map(key=>`${quoteIdent(key)}=source.${quoteIdent(key)}`).join(",");
   for (const batch of chunk(updates,250)) {
     await client.query(`update hb.rev1_task_instances target set ${assignments}, normalized_at=now()
       from jsonb_populate_recordset(null::hb.rev1_task_instances,$1::jsonb) source
-      where target.rev1_task_instance_id=source.rev1_task_instance_id`,[JSON.stringify(batch)]);
+      where target.rev1_task_instance_id=source.rev1_task_instance_id
+        and (${PROJECT_CREATOR_ASANA_OVERLAY_COLUMNS.map(key=>`target.${quoteIdent(key)}`).join(",")})
+            is distinct from (${PROJECT_CREATOR_ASANA_OVERLAY_COLUMNS.map(key=>`source.${quoteIdent(key)}`).join(",")})`,[JSON.stringify(batch)]);
   }
   const newRows = asanaRows.filter(row=>row.gid && !knownGids.has(row.gid)).map(row=>asanaTaskRow(row,lookups));
   await upsertRows(client,"hb.rev1_task_instances","airtable_record_id",newRows,150);
