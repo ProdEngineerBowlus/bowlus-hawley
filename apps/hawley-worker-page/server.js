@@ -7,7 +7,8 @@ import crypto from "node:crypto";
 import { promisify } from "node:util";
 import pg from "pg";
 import { taskAttachmentsFromStorage, createAttachmentUrlProvider } from "./attachment-storage.js";
-import { buildTaskTimeTable, taskTimeCoverage, taskTimeObservations } from "../postgres-sync/src/task-occurrences.js";
+import { buildTaskTimeTable, saveTaskMappingRules, taskMappingGroups, taskTimeCoverage, taskTimeObservations } from "../postgres-sync/src/task-occurrences.js";
+import { HB_BUILD_LOCK_KEY, HB_BUILD_LOCK_NAMESPACE } from "../postgres-sync/src/hb-build-transaction.js";
 import { buildCyclePreview, cyclePlannerOverview, pendingAsanaPushes, productionScheduleRows, publishCyclePlan, recordAsanaPushResults } from "./cycle-planner.js";
 import { getDatabaseConfig } from "../postgres-sync/src/config.js";
 
@@ -11313,6 +11314,35 @@ async function handleAdminCyclePlannerPublish(req) {
   return { ...result, asanaPushes: undefined, asanaOptionsToAdd: undefined, asanaPush };
 }
 
+async function handleAdminTaskMapping(req, url) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  return taskMappingGroups(pool, { search: url.searchParams.get("q") || "", limit: url.searchParams.get("limit") || 200 });
+}
+
+async function handleAdminTaskMappingSave(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const rules = Array.isArray(body.rules) ? body.rules.slice(0, 2000) : [];
+  if (!rules.length) throw actionError("No mapping decisions were sent.", 400, { code: "RULES_REQUIRED" });
+  const client = await writePool.connect();
+  try {
+    await client.query("begin");
+    // Same gate as HB rebuilds, which also link occurrences.
+    await client.query("select pg_advisory_xact_lock($1::integer, $2::integer)", [HB_BUILD_LOCK_NAMESPACE, HB_BUILD_LOCK_KEY]);
+    const result = await saveTaskMappingRules(client, rules, actor?.email || actor?.username || "");
+    await client.query("commit");
+    console.log("[hawley-task-mapping]", JSON.stringify({ action: "save", rules: rules.length, ...result }));
+    return { ok: true, rules: rules.length, ...result };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function handleAdminTaskTimes(req, url) {
   const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
   requireAdminActor(actor);
@@ -13572,6 +13602,16 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/cycle-planner/preview" && req.method === "POST") {
       sendJson(res, 200, await handleAdminCyclePlannerPreview(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/task-mapping" && req.method === "GET") {
+      sendJson(res, 200, await handleAdminTaskMapping(req, url));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/task-mapping/rules" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminTaskMappingSave(req));
       return;
     }
 

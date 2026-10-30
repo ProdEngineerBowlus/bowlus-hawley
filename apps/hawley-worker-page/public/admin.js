@@ -51,6 +51,10 @@
     taskTimes: null,
     taskTimesLoading: false,
     taskTimesMessage: "",
+    taskMapping: null,
+    taskMappingLoading: false,
+    taskMappingMessage: "",
+    taskMappingSearch: "",
     taskTimesFilters: { phase: "", q: "", mode: "vin", columns: "12" },
     productionFilters: { year: String(new Date().getFullYear()), cycle: "", phase: "", vin: "", vinsOnly: false, withTasks: false }
   };
@@ -641,6 +645,7 @@
           <button class="nav-tab ${state.activeView === "cycles" ? "active" : ""}" type="button" data-view="cycles">Cycles</button>
           <button class="nav-tab ${state.activeView === "production" ? "active" : ""}" type="button" data-view="production">Production</button>
           <button class="nav-tab ${state.activeView === "task-times" ? "active" : ""}" type="button" data-view="task-times">Task Times</button>
+          <button class="nav-tab ${state.activeView === "task-mapping" ? "active" : ""}" type="button" data-view="task-mapping">Task Review</button>
         </nav>
         <div class="top-actions">
           <a class="btn ghost" href="/">Live app</a>
@@ -1936,6 +1941,92 @@
     `;
   }
 
+  async function loadTaskMapping() {
+    state.taskMappingLoading = true;
+    render();
+    try {
+      state.taskMapping = await fetchJson(`/api/admin/task-mapping?q=${encodeURIComponent(state.taskMappingSearch)}&limit=200`);
+    } catch (error) {
+      state.taskMappingMessage = error.message || "Could not load unmapped tasks.";
+    } finally {
+      state.taskMappingLoading = false;
+      render();
+    }
+  }
+
+  async function saveTaskMapping(rules, label) {
+    state.taskMappingLoading = true;
+    render();
+    try {
+      const result = await postJson("/api/admin/task-mapping/rules", { rules });
+      state.taskMappingMessage = `${label}: ${formatNumber(result.linked)} tasks linked to templates.`;
+      state.taskTimes = null;
+      await loadTaskMapping();
+    } catch (error) {
+      state.taskMappingMessage = error.message || "Could not save.";
+      state.taskMappingLoading = false;
+      render();
+    }
+  }
+
+  // The suggestion an admin can accept: a single template with the same name in the same phase.
+  function exactSuggestion(group) {
+    const same = (group.suggestions || []).filter(s => s.samePhase);
+    return same.length === 1 ? same[0] : null;
+  }
+
+  function renderTaskMapping() {
+    const data = state.taskMapping;
+    const groups = data?.groups || [];
+    const definitions = data?.definitions || [];
+    const exactCount = groups.filter(exactSuggestion).length;
+    const optionsFor = group => {
+      const preferred = (group.suggestions || []).map(s => s.taskDefinitionId);
+      const samePhase = definitions.filter(d => d.phaseName === group.phase && !preferred.includes(d.taskDefinitionId));
+      const pick = [...(group.suggestions || []), ...samePhase].slice(0, 120);
+      return pick.map(d => `<option value="${escapeAttr(d.taskDefinitionId)}">${escapeHtml(`${d.taskName} · ${d.phaseName || "no phase"}`)}</option>`).join("");
+    };
+    return `
+      <section class="panel">
+        <div class="panel-header">
+          <h3 class="panel-title">Task Review</h3>
+          <span class="pill">${escapeHtml(data ? `${formatNumber(data.unlinked)} tasks not linked · ${formatNumber(data.unlinked_timed)} with time` : "Loading")}</span>
+        </div>
+        <div class="panel-body">
+          <p class="muted">Older and one-off tasks without a template key, grouped by name and phase (most timed history first). Map a group to a template to bring its history into Task Times, or ignore one-off work. Every decision becomes a rule the nightly rebuild also applies to future tasks.</p>
+          <div class="inline-actions">
+            <input class="table-input" style="max-width: 280px;" type="text" data-task-mapping-search value="${escapeAttr(state.taskMappingSearch)}" placeholder="Search name or phase" />
+            <button class="btn" type="button" data-action="task-mapping-search" ${state.taskMappingLoading ? "disabled" : ""}>Search</button>
+            <button class="btn primary" type="button" data-action="task-mapping-accept-exact" ${exactCount && !state.taskMappingLoading ? "" : "disabled"}>Accept ${formatNumber(exactCount)} exact name + phase matches</button>
+          </div>
+          ${state.taskMappingMessage ? `<div class="notice" style="margin-top: 12px;">${escapeHtml(state.taskMappingMessage)}</div>` : ""}
+        </div>
+        <div class="panel-body table-wrap">
+          <table class="table">
+            <thead><tr><th>Task name</th><th>Phase</th><th>Tasks</th><th>With time</th><th>Where</th><th>Map to template</th><th></th></tr></thead>
+            <tbody>
+              ${groups.map((g, i) => `
+                <tr data-mapping-row="${i}">
+                  <td><strong>${escapeHtml(g.task_name)}</strong></td>
+                  <td>${escapeHtml(g.phase || "-")}</td>
+                  <td>${escapeHtml(formatNumber(g.tasks))}</td>
+                  <td>${escapeHtml(formatNumber(g.timed_tasks))}</td>
+                  <td><small>${escapeHtml((g.portfolios || []).filter(Boolean).join(", "))}<br>${escapeHtml((g.projects || []).filter(Boolean).join(", "))}</small></td>
+                  <td><select class="table-input" data-mapping-choice="${i}"><option value="">${g.suggestions?.length ? "Choose…" : "No name match: choose…"}</option>${optionsFor(g)}</select>
+                    ${exactSuggestion(g) ? `<br><small>Suggested: same name and phase</small>` : ""}</td>
+                  <td class="true-pace-actions">
+                    <button class="btn primary compact" type="button" data-action="task-mapping-map" data-index="${i}">Map</button>
+                    <button class="btn ghost compact" type="button" data-action="task-mapping-ignore" data-index="${i}">Ignore</button>
+                  </td>
+                </tr>
+              `).join("") || `<tr><td colspan="7">${state.taskMappingLoading ? "Loading…" : "Nothing left to review."}</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    `;
+  }
+
   function renderApp() {
     if (state.loading) {
       return `
@@ -1957,7 +2048,7 @@
       <div class="admin-shell">
         ${renderTopbar()}
         <main class="admin-main">
-          ${state.activeView === "project" ? renderProjectCreator() : state.activeView === "cycles" ? renderCyclePlanner() : state.activeView === "production" ? renderProductionTable() : state.activeView === "task-times" ? renderTaskTimes() : renderDashboard()}
+          ${state.activeView === "project" ? renderProjectCreator() : state.activeView === "cycles" ? renderCyclePlanner() : state.activeView === "production" ? renderProductionTable() : state.activeView === "task-times" ? renderTaskTimes() : state.activeView === "task-mapping" ? renderTaskMapping() : renderDashboard()}
         </main>
       </div>
     `;
@@ -1979,7 +2070,7 @@
   root.addEventListener("click", async event => {
     const viewButton = event.target.closest("[data-view]");
     if (viewButton) {
-      state.activeView = ["project", "cycles", "production", "task-times"].includes(viewButton.dataset.view) ? viewButton.dataset.view : "dashboard";
+      state.activeView = ["project", "cycles", "production", "task-times", "task-mapping"].includes(viewButton.dataset.view) ? viewButton.dataset.view : "dashboard";
       render();
       if (state.activeView === "cycles") {
         if (!state.cyclePlanner) await loadCyclePlanner();
@@ -1987,6 +2078,8 @@
         if (!state.production) await loadProductionTable();
       } else if (state.activeView === "task-times") {
         if (!state.taskTimes) await loadTaskTimes();
+      } else if (state.activeView === "task-mapping") {
+        if (!state.taskMapping) await loadTaskMapping();
       } else if (state.activeView === "project" && !state.project && !state.projectLoading) {
         try {
           await loadProjectCreator();
@@ -2050,6 +2143,25 @@
       await loadAll();
     } else if (action === "logout") {
       await logout();
+    } else if (action === "task-mapping-search") {
+      state.taskMappingSearch = root.querySelector("[data-task-mapping-search]")?.value || "";
+      await loadTaskMapping();
+    } else if (action === "task-mapping-accept-exact") {
+      const rules = (state.taskMapping?.groups || []).map(g => ({ g, s: exactSuggestion(g) })).filter(x => x.s)
+        .map(({ g, s }) => ({ name: g.norm_name, phase: g.phase, action: "map", taskDefinitionId: s.taskDefinitionId }));
+      if (!rules.length || !window.confirm(`Map ${rules.length} task groups to the template with the same name and phase?`)) return;
+      await saveTaskMapping(rules, `Accepted ${rules.length} exact matches`);
+    } else if (action === "task-mapping-map" || action === "task-mapping-ignore") {
+      const index = Number(event.target.closest("[data-index]")?.dataset.index);
+      const group = state.taskMapping?.groups?.[index];
+      if (!group) return;
+      if (action === "task-mapping-ignore") {
+        await saveTaskMapping([{ name: group.norm_name, phase: group.phase, action: "ignore" }], `Ignored "${group.task_name}"`);
+      } else {
+        const choice = root.querySelector(`[data-mapping-choice="${index}"]`)?.value || exactSuggestion(group)?.taskDefinitionId || "";
+        if (!choice) { state.taskMappingMessage = "Choose a template first."; render(); return; }
+        await saveTaskMapping([{ name: group.norm_name, phase: group.phase, action: "map", taskDefinitionId: choice }], `Mapped "${group.task_name}"`);
+      }
     } else if (action === "task-times-load") {
       for (const input of root.querySelectorAll("[data-task-times-filter]")) state.taskTimesFilters[input.dataset.taskTimesFilter] = input.value;
       await loadTaskTimes();

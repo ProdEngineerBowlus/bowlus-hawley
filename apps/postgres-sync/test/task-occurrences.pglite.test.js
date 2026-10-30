@@ -57,6 +57,7 @@ test("HB rebuild linking adds new tasks as the next occurrence and keeps status 
   const { linkTaskOccurrences } = await import("../src/task-occurrences.js");
   const db = await database();
   await db.exec(await migration("039_task_definitions_occurrences.sql"));
+  await db.exec(await migration("040_task_mapping_rules.sql"));
   await db.query("insert into hb.rev1_task_instances (tasks_key, vin, cycle_record_id, task_completed, task_name) values ('recShower', 335, 'c1-27', false, 'new')");
   await db.query("update hb.rev1_task_instances set task_completed = true, cycle_record_id = 'c24' where vin = 334");
   const result = await linkTaskOccurrences(db);
@@ -89,4 +90,36 @@ test("task-time table: averages use the 5-hour rule, last 5 are most recent, col
   assert.equal(row.recentAverageSeconds, Math.round((5400 + 4800 + 4200 + 3600 + 3000) / 5));
   assert.deepEqual(row.cells, { 337: 108000, 336: 5400, 335: 4800 });
   assert.deepEqual(buildTaskTimeTable(obs, { mode: "cycle", columns: 2 }).columns, ["C24.26", "C23.26"]);
+});
+
+test("review rules map unkeyed tasks (VIN from project name, cycle buckets) and ignore one-offs", async () => {
+  const { saveTaskMappingRules, taskMappingGroups, linkTaskOccurrences } = await import("../src/task-occurrences.js");
+  const db = await database();
+  await db.exec(await migration("039_task_definitions_occurrences.sql"));
+  await db.exec(await migration("040_task_mapping_rules.sql"));
+  await linkTaskOccurrences(db);
+  const add = (name, phase, vin, project, portfolio, cycle, seconds) => db.query(
+    "insert into hb.rev1_task_instances (task_name, phase_label, vin, asana_project_name, asana_portfolio_name, cycle_record_id, task_completed, actual_time_seconds) values ($1, $2, $3, $4, $5, $6, true, $7)",
+    [name, phase, vin, project, portfolio, cycle, seconds]);
+  await add("Install  Shower L-Track ", "F", null, "319 - Frontier", "VINs - 2025", "c10", 2400);
+  await add("install shower l-track", "F", 320, "320 - Frontier", "VINs - 2025", "c11", 2000);
+  await add("01-B25_B_Endless", "CNC-B", null, "Fabrication C3", "Fabrication - 2026", "c3", 900);
+  await add("Fix weld per ECN 12", "B", null, "ECN 12", "Engineering Changes", null, 600);
+
+  const before = await taskMappingGroups(db);
+  const shower = before.groups.find(g => g.norm_name === "install shower l-track");
+  assert.equal(shower.tasks, 2);
+  assert.deepEqual(shower.suggestions.map(x => [x.taskDefinitionId, x.samePhase]), [["recShower", true]]);
+
+  const result = await saveTaskMappingRules(db, [
+    { name: "Install Shower L-Track", phase: "F", action: "map", taskDefinitionId: "recShower" },
+    { name: "01-B25_B_Endless", phase: "CNC-B", action: "map", taskDefinitionId: "recCnc" },
+    { name: "Fix weld per ECN 12", phase: "B", action: "ignore" }
+  ], "admin@example.test");
+  assert.equal(result.linked, 3);
+  const occ = await db.query("select occurrence_id from hb.work_occurrences where source = 'hb rebuild: new task' order by 1");
+  assert.deepEqual(occ.rows.map(o => o.occurrence_id), ["occ:recCnc:batch:cycle:c3:CNC-B:1", "occ:recShower:vin:319:1", "occ:recShower:vin:320:1"]);
+  const after = await taskMappingGroups(db);
+  assert.ok(!after.groups.some(g => g.norm_name.includes("ecn")), "ignored groups leave the review");
+  await assert.rejects(saveTaskMappingRules(db, [{ name: "x", phase: "B", action: "map" }]), /Pick a template/);
 });
