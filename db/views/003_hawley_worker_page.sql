@@ -2,7 +2,9 @@
 -- Asana Helpers field (team tasks). Helper rows carry no estimate so capacity is not double counted, and
 -- appear only for trial workers until team tasks are enabled for everyone.
 create or replace view reporting.hawley_worker_page_assignments as
-with base as (
+-- not materialized: base is used twice, and a materialized CTE would build every assignment before the
+-- worker/date filters apply (statement timeouts on the worker page).
+with base as not materialized (
   select
     dwa.task_instance_id,
     dwa.airtable_record_id,
