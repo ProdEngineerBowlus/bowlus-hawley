@@ -10,6 +10,7 @@ import { taskAttachmentsFromStorage, createAttachmentUrlProvider } from "./attac
 import { buildTaskTimeTable, saveTaskMappingRules, taskMappingGroups, taskTimeCoverage, taskTimeObservations } from "../postgres-sync/src/task-occurrences.js";
 import { HB_BUILD_LOCK_KEY, HB_BUILD_LOCK_NAMESPACE } from "../postgres-sync/src/hb-build-transaction.js";
 import { listTemplates, saveTemplateVersion, templateDetail, templateEditorOptions } from "../postgres-sync/src/template-editor.js";
+import { ASANA_CYCLE_FIELD_GID, addCycleOptions, pushCycleField } from "./asana-cycle-push.js";
 import { buildCyclePreview, cyclePlannerOverview, pendingAsanaPushes, productionScheduleRows, publishCyclePlan, recordAsanaPushResults } from "./cycle-planner.js";
 import { getDatabaseConfig } from "../postgres-sync/src/config.js";
 
@@ -11197,7 +11198,6 @@ async function handleAdminCyclePlannerOverview(req, url) {
   return cyclePlannerOverview(pool, year, today);
 }
 
-const ASANA_CYCLE_FIELD_GID = "1203060130064229";
 
 // Enabled options of the Asana "Cycle" field, keyed by lower-case name ("c1.27" -> option gid).
 async function asanaCycleFieldOptions() {
@@ -11212,70 +11212,19 @@ async function asanaCycleFieldOptions() {
   }
 }
 
-// Adds missing Cycle options in plan order, each after its predecessor (e.g. C1.27 after C25.26), so the
-// dropdown stays chronological. Returns the refreshed option map.
-async function addAsanaCycleOptions(labels, options) {
+function asanaRequestWithPat() {
   const token = process.env.ASANA_PAT;
-  const added = [];
-  const failed = [];
-  if (!labels.length || !token || !options) return { options, added, failed: labels.length && (!token || !options) ? labels : failed };
-  const ordered = [...options.keys()];
-  for (const label of labels) {
-    const key = label.toLowerCase();
-    if (options.has(key)) continue;
-    const match = /^c(\d+)\.(\d{2})$/.exec(key);
-    const previous = match ? ordered.filter(name => {
-      const other = /^c(\d+)\.(\d{2})$/.exec(name);
-      return other && (Number(other[2]) < Number(match[2]) || (other[2] === match[2] && Number(other[1]) < Number(match[1])));
-    }).sort((a, b) => {
-      const [, an, ay] = /^c(\d+)\.(\d{2})$/.exec(a);
-      const [, bn, by] = /^c(\d+)\.(\d{2})$/.exec(b);
-      return Number(ay) - Number(by) || Number(an) - Number(bn);
-    }).at(-1) : null;
-    try {
-      const data = { name: label, enabled: true };
-      if (previous && options.get(previous)) data.insert_after = options.get(previous);
-      const option = await adminAsanaRequest(token, `/custom_fields/${ASANA_CYCLE_FIELD_GID}/enum_options`, "POST", { data }, 0, 15000);
-      options.set(key, option.gid);
-      ordered.push(key);
-      added.push(label);
-    } catch (error) {
-      failed.push(label);
-      console.warn("[hawley-cycle-planner]", JSON.stringify({ action: "asana_cycle_option_failed", label, error: error.message }));
-    }
-  }
-  return { options, added, failed };
+  return token ? (path, method, body) => adminAsanaRequest(token, path, method, body, 0, 30000) : null;
+}
+
+async function addAsanaCycleOptions(labels, options) {
+  return addCycleOptions(asanaRequestWithPat(), labels, options, entry => console.warn("[hawley-cycle-planner]", JSON.stringify(entry)));
 }
 
 // One-time push of a published plan: set the Cycle field on moved Asana tasks. Afterwards the Asana sync
 // owns day-to-day cycle changes again.
 async function pushCyclePlanToAsana(versionId, pushes, options) {
-  const token = process.env.ASANA_PAT;
-  const results = pushes.map(push => ({ ...push }));
-  const pending = results.filter(push => push.status === "pending" || push.status === "failed");
-  if (!pending.length) return results;
-  if (!token || !options) {
-    pending.forEach(push => { push.status = "failed"; push.error = "Asana is not reachable."; });
-  } else {
-    for (let index = 0; index < pending.length; index += 10) {
-      const batch = pending.slice(index, index + 10);
-      const actions = batch.map(push => ({
-        method: "put",
-        relative_path: `/tasks/${push.asanaTaskGid}`,
-        data: { custom_fields: { [ASANA_CYCLE_FIELD_GID]: options.get(push.label.toLowerCase()) } }
-      }));
-      try {
-        const responses = await adminAsanaRequest(token, "/batch", "POST", { actions }, 0, 30000);
-        batch.forEach((push, i) => {
-          const code = Number(responses?.[i]?.status_code || 500);
-          push.status = code < 400 ? "pushed" : "failed";
-          if (code >= 400) push.error = `Asana returned ${code}`;
-        });
-      } catch (error) {
-        batch.forEach(push => { push.status = "failed"; push.error = error.message; });
-      }
-    }
-  }
+  const results = await pushCycleField(asanaRequestWithPat(), pushes, options);
   await recordAsanaPushResults(writePool, versionId, results);
   return results;
 }
@@ -11405,8 +11354,10 @@ async function handleAdminCyclePlannerRetryPush(req) {
   const body = await readJsonBody(req);
   const versionId = String(body.cyclePlanVersionId || "");
   const pushes = await pendingAsanaPushes(writePool, versionId);
-  const results = await pushCyclePlanToAsana(versionId, pushes, await asanaCycleFieldOptions());
-  return { ok: true, cyclePlanVersionId: versionId, asanaPush: summarizePushes(results) };
+  const labels = [...new Set(pushes.filter(push => push.status !== "pushed").map(push => push.label))];
+  const optionResult = await addAsanaCycleOptions(labels, await asanaCycleFieldOptions());
+  const results = await pushCyclePlanToAsana(versionId, pushes, optionResult.options);
+  return { ok: true, cyclePlanVersionId: versionId, asanaPush: { ...summarizePushes(results), optionsAdded: optionResult.added.length, optionsFailed: optionResult.failed } };
 }
 
 async function handleAdminPhaseCyclePaceOverride(req) {
