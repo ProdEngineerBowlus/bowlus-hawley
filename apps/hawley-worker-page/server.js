@@ -11410,7 +11410,8 @@ async function handleAdminTeamTasksSetup(req) {
   }
   const projects = (await pool.query(
     `select distinct asana_project_gid from hb.rev1_task_instances
-      where asana_project_gid is not null and asana_portfolio_name ilike 'VINs%' and not coalesce(task_completed, false)`
+      where asana_project_gid is not null and (asana_portfolio_name ilike 'VINs%' or asana_portfolio_name ilike 'Fabrication%')
+        and not coalesce(task_completed, false)`
   )).rows.map(row => row.asana_project_gid);
   let attached = 0;
   const failed = [];
