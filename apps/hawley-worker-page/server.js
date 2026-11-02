@@ -12,6 +12,7 @@ import { HB_BUILD_LOCK_KEY, HB_BUILD_LOCK_NAMESPACE } from "../postgres-sync/src
 import { listTemplates, saveTemplateVersion, templateDetail, templateEditorOptions } from "../postgres-sync/src/template-editor.js";
 import { parseTrialEmails } from "../postgres-sync/src/team-tasks.js";
 import { fabricationReleasePlan, framesGateStatus, releasePlan } from "./phase-release.js";
+import { HANDOFF_ISSUES, checkDeliver, checkPack, checkReceive, handoffLabel, summarizeLines } from "./handoffs.js";
 import { ASANA_CYCLE_FIELD_GID, addCycleOptions, pushCycleField } from "./asana-cycle-push.js";
 import { buildCyclePreview, cyclePlannerOverview, pendingAsanaPushes, productionScheduleRows, publishCyclePlan, recordAsanaPushResults } from "./cycle-planner.js";
 import { getDatabaseConfig } from "../postgres-sync/src/config.js";
@@ -12043,6 +12044,243 @@ function startAutomaticReleaseWatcher() {
   setTimeout(() => void runAutomaticReleases(), 60000).unref?.();
 }
 
+// Department handoffs (issue 49, step 2): CNC carts, Phase carts, Cycle boxes, Frames. Packed at the source,
+// delivered, and received at the destination (the gate). Rules live in handoffs.js; every step is an event.
+async function handoffTypes(client = pool) {
+  return (await client.query("select * from hb.handoff_types order by name")).rows;
+}
+
+function parseHandoffLines(value) {
+  // Lines as an array of { name, qty, key } or text, one per line: "Rib 12, 4" (quantity defaults to 1).
+  const rows = Array.isArray(value) ? value : String(value || "").split(/\n+/).map(text => {
+    const match = /^(.*?)(?:[,\t]\s*(\d+(?:\.\d+)?))?\s*$/.exec(text.trim());
+    return { name: match?.[1] || "", qty: match?.[2] };
+  });
+  return rows
+    .map(row => ({ name: String(row.name || row.item_name || "").trim(), qty: Number(row.qty ?? row.expected_qty ?? 1), key: String(row.key || row.item_key || "").trim() }))
+    .filter(row => row.name && Number.isFinite(row.qty) && row.qty >= 0);
+}
+
+async function handoffDetail(client, id) {
+  const handoff = (await client.query("select * from hb.handoffs where handoff_id = $1", [id])).rows[0];
+  if (!handoff) throw actionError(`Handoff ${id} was not found.`, 404);
+  const [lines, events, type] = await Promise.all([
+    client.query("select * from hb.handoff_lines where handoff_id = $1 order by sort_order, line_id", [id]),
+    client.query("select * from hb.handoff_events where handoff_id = $1 order by at desc, event_id desc limit 200", [id]),
+    client.query("select * from hb.handoff_types where type_key = $1", [handoff.type_key])
+  ]);
+  return { handoff, lines: lines.rows, events: events.rows, type: type.rows[0] || null, summary: summarizeLines(lines.rows) };
+}
+
+async function handoffEvent(client, id, event, actor, details = {}) {
+  await client.query("insert into hb.handoff_events (handoff_id, event, actor, details) values ($1, $2, $3, $4)", [id, event, actor || "", JSON.stringify(details)]);
+}
+
+// Runs fn inside a transaction with the handoff row locked, so two tablets cannot advance it at once.
+async function withLockedHandoff(id, fn) {
+  const client = await writePool.connect();
+  try {
+    await client.query("begin");
+    const handoff = (await client.query("select * from hb.handoffs where handoff_id = $1 for update", [id])).rows[0];
+    if (!handoff) throw actionError(`Handoff ${id} was not found.`, 404);
+    const lines = (await client.query("select * from hb.handoff_lines where handoff_id = $1 order by sort_order, line_id", [id])).rows;
+    const result = await fn(client, handoff, lines);
+    await client.query("commit");
+    return result;
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+// Merge submitted line values ({ lineId, packedQty | receivedQty, issue, issueNote }) onto the stored lines.
+function mergeLineInputs(lines, inputs, field) {
+  const byId = new Map((inputs || []).map(input => [String(input.lineId), input]));
+  return lines.map(line => {
+    const input = byId.get(String(line.line_id));
+    if (!input) return line;
+    const value = input[field] === "" || input[field] === null || input[field] === undefined ? null : Number(input[field]);
+    const issue = HANDOFF_ISSUES.includes(input.issue) ? input.issue : "";
+    return { ...line, [field === "packedQty" ? "packed_qty" : "received_qty"]: Number.isFinite(value) ? value : null, issue, issue_note: String(input.issueNote || "").trim(), _changed: true };
+  });
+}
+
+async function handleAdminHandoffs(req, url) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const cycle = String(url.searchParams.get("cycle") || "").trim();
+  const type = String(url.searchParams.get("type") || "").trim();
+  const handoffs = (await pool.query(
+    `select h.*, count(l.*)::int as line_count, coalesce(sum(l.expected_qty), 0)::float as expected_qty,
+            coalesce(sum(l.packed_qty), 0)::float as packed_qty, coalesce(sum(l.received_qty), 0)::float as received_qty,
+            count(l.*) filter (where l.issue <> '' or (l.received_qty is not null and l.received_qty < l.expected_qty))::int as short_lines
+       from hb.handoffs h left join hb.handoff_lines l on l.handoff_id = h.handoff_id
+      where ($1 = '' or h.cycle_label = $1) and ($2 = '' or h.type_key = $2)
+      group by h.handoff_id
+      order by h.created_at desc
+      limit 300`,
+    [cycle, type]
+  )).rows;
+  const cycles = (await pool.query(
+    "select cycle_label, min(start_date)::text as start_date from hb.production_schedule where cycle_label is not null and start_date >= current_date - 60 group by 1 order by 2 limit 40"
+  )).rows;
+  return { types: await handoffTypes(), handoffs, cycles };
+}
+
+async function handleAdminHandoffDetail(req, url) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  return handoffDetail(pool, Number(url.searchParams.get("id")));
+}
+
+async function handleAdminHandoffCreate(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const type = (await pool.query("select * from hb.handoff_types where type_key = $1", [String(body.typeKey || "")])).rows[0];
+  if (!type) throw actionError("Choose a handoff type.", 400);
+  if (!type.active) throw actionError(`${type.name} handoffs are off. Turn the type on first.`, 409);
+  const cycleLabel = String(body.cycleLabel || "").trim();
+  const phase = type.scope === "cycle_phase" ? String(body.phase || "").trim() : "";
+  const vin = type.scope === "vin" ? String(projectCreatorVinNumber(body.vin) ?? "").trim() : "";
+  if (type.scope !== "vin" && !cycleLabel) throw actionError("Choose a cycle.", 400);
+  if (type.scope === "cycle_phase" && !phase) throw actionError("Choose a phase.", 400);
+  if (type.scope === "vin" && !vin) throw actionError("Choose a VIN.", 400);
+  const lines = parseHandoffLines(body.lines);
+  const client = await writePool.connect();
+  try {
+    await client.query("begin");
+    const count = (await client.query("select count(*)::int as n from hb.handoffs where type_key = $1 and cycle_label = $2 and phase = $3 and vin = $4", [type.type_key, cycleLabel, phase, vin])).rows[0].n;
+    const label = String(body.label || "").trim() || handoffLabel(type, { cycleLabel, phase, vin, number: count + 1 });
+    const created = (await client.query(
+      `insert into hb.handoffs (type_key, cycle_label, phase, vin, label, created_by) values ($1, $2, $3, $4, $5, $6) returning handoff_id`,
+      [type.type_key, cycleLabel, phase, vin, label, actor?.email || ""]
+    )).rows[0];
+    for (const [index, line] of lines.entries()) {
+      await client.query(
+        "insert into hb.handoff_lines (handoff_id, sort_order, item_key, item_name, expected_qty) values ($1, $2, $3, $4, $5)",
+        [created.handoff_id, index, line.key, line.name, line.qty]
+      );
+    }
+    await handoffEvent(client, created.handoff_id, "created", actor?.email, { label, lines: lines.length });
+    await client.query("commit");
+    console.log("[hawley-handoff]", JSON.stringify({ action: "created", id: created.handoff_id, type: type.type_key, label, lines: lines.length, actor: actor?.email || "" }));
+    return handoffDetail(pool, created.handoff_id);
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    if (error.code === "23505") throw actionError("A handoff with that name already exists for this scope.", 409);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function handleAdminHandoffLines(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const id = Number(body.id);
+  await withLockedHandoff(id, async (client, handoff, lines) => {
+    if (!["open", "packing"].includes(handoff.status)) throw actionError(`This handoff is ${handoff.status}; its contents are fixed.`, 409);
+    const remove = (body.remove || []).map(Number).filter(Number.isFinite);
+    if (remove.length) await client.query("delete from hb.handoff_lines where handoff_id = $1 and line_id = any($2::bigint[])", [id, remove]);
+    const add = parseHandoffLines(body.add);
+    for (const [index, line] of add.entries()) {
+      await client.query("insert into hb.handoff_lines (handoff_id, sort_order, item_key, item_name, expected_qty) values ($1, $2, $3, $4, $5)", [id, lines.length + index, line.key, line.name, line.qty]);
+    }
+    await handoffEvent(client, id, "contents", actor?.email, { added: add.length, removed: remove.length });
+  });
+  return handoffDetail(pool, id);
+}
+
+async function handleAdminHandoffPack(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const id = Number(body.id);
+  await withLockedHandoff(id, async (client, handoff, lines) => {
+    const merged = mergeLineInputs(lines, body.lines, "packedQty");
+    const check = checkPack(handoff.status, merged);
+    if (!check.ok) throw actionError(check.error, 409);
+    const changed = merged.filter(line => line._changed);
+    for (const line of changed) {
+      await client.query(
+        `update hb.handoff_lines set packed_qty = $2, issue = $3, issue_note = $4, packed_by = $5, packed_at = now() where line_id = $1`,
+        [line.line_id, line.packed_qty, line.issue, line.issue_note, actor?.email || ""]
+      );
+    }
+    await client.query("update hb.handoffs set status = 'packing' where handoff_id = $1", [id]);
+    await handoffEvent(client, id, "packed", actor?.email, { lines: changed.length, short: changed.filter(line => line.issue).map(line => ({ item: line.item_name, issue: line.issue, note: line.issue_note })) });
+  });
+  return handoffDetail(pool, id);
+}
+
+async function handleAdminHandoffDeliver(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const id = Number(body.id);
+  await withLockedHandoff(id, async (client, handoff, lines) => {
+    const check = checkDeliver(handoff.status, lines);
+    if (!check.ok) throw actionError(check.error, 409);
+    await client.query("update hb.handoffs set status = 'delivered', delivered_by = $2, delivered_at = now() where handoff_id = $1", [id, actor?.email || ""]);
+    await handoffEvent(client, id, "delivered", actor?.email, summarizeLines(lines));
+  });
+  console.log("[hawley-handoff]", JSON.stringify({ action: "delivered", id, actor: actor?.email || "" }));
+  return handoffDetail(pool, id);
+}
+
+async function handleAdminHandoffReceive(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const id = Number(body.id);
+  let status = "";
+  await withLockedHandoff(id, async (client, handoff, lines) => {
+    const type = (await client.query("select * from hb.handoff_types where type_key = $1", [handoff.type_key])).rows[0];
+    const merged = mergeLineInputs(lines, body.lines, "receivedQty");
+    const checked = cleanList(body.checked, /\n+/);
+    const check = checkReceive(handoff.status, merged, { checklist: type?.checklist || [], checked });
+    if (!check.ok) throw actionError(check.error, 409);
+    for (const line of merged.filter(row => row._changed)) {
+      await client.query(
+        `update hb.handoff_lines set received_qty = $2, issue = $3, issue_note = $4, received_by = $5, received_at = now() where line_id = $1`,
+        [line.line_id, line.received_qty, line.issue, line.issue_note, actor?.email || ""]
+      );
+    }
+    status = check.status;
+    await client.query(
+      "update hb.handoffs set status = $2, received_by = $3, received_at = now(), checklist_done = $4 where handoff_id = $1",
+      [id, status, actor?.email || "", type?.checklist || []]
+    );
+    const summary = summarizeLines(merged);
+    await handoffEvent(client, id, status, actor?.email, {
+      ...summary,
+      checklist: type?.checklist || [],
+      short: merged.filter(line => line.issue || Number(line.received_qty) < Number(line.expected_qty)).map(line => ({ item: line.item_name, expected: Number(line.expected_qty), received: Number(line.received_qty), issue: line.issue, note: line.issue_note }))
+    });
+  });
+  console.log("[hawley-handoff]", JSON.stringify({ action: status, id, actor: actor?.email || "" }));
+  return handoffDetail(pool, id);
+}
+
+async function handleAdminHandoffType(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const key = String(body.typeKey || "").trim();
+  const current = (await pool.query("select * from hb.handoff_types where type_key = $1", [key])).rows[0];
+  if (!current) throw actionError(`Unknown handoff type ${key}.`, 404);
+  await writePool.query(
+    "update hb.handoff_types set checklist = $2, active = $3, updated_by = $4, updated_at = now() where type_key = $1",
+    [key, cleanList(body.checklist ?? current.checklist, /\n+/), body.active === undefined ? current.active : body.active === true, actor?.email || ""]
+  );
+  console.log("[hawley-handoff]", JSON.stringify({ action: "type", key, actor: actor?.email || "" }));
+  return { ok: true, types: await handoffTypes(writePool) };
+}
+
 async function handleAdminTemplates(req, url) {
   const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
   requireAdminActor(actor);
@@ -14402,6 +14640,46 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/releases/pilot" && req.method === "POST") {
       sendJson(res, 200, await handleAdminReleasePilot(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/handoffs" && req.method === "GET") {
+      sendJson(res, 200, await handleAdminHandoffs(req, url));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/handoffs/detail" && req.method === "GET") {
+      sendJson(res, 200, await handleAdminHandoffDetail(req, url));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/handoffs/create" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminHandoffCreate(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/handoffs/lines" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminHandoffLines(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/handoffs/pack" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminHandoffPack(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/handoffs/deliver" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminHandoffDeliver(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/handoffs/receive" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminHandoffReceive(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/handoffs/type" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminHandoffType(req));
       return;
     }
 
