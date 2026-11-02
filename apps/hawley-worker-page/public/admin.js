@@ -59,6 +59,9 @@
     templateDetail: null,
     teamTasks: null,
     teamTasksMessage: "",
+    releases: null,
+    releasesLoading: false,
+    releasesMessage: "",
     taskMapping: null,
     taskMappingLoading: false,
     taskMappingMessage: "",
@@ -655,6 +658,7 @@
           <button class="nav-tab ${state.activeView === "task-times" ? "active" : ""}" type="button" data-view="task-times">Task Times</button>
           <button class="nav-tab ${state.activeView === "task-mapping" ? "active" : ""}" type="button" data-view="task-mapping">Task Review</button>
           <button class="nav-tab ${state.activeView === "templates" ? "active" : ""}" type="button" data-view="templates">Templates</button>
+          <button class="nav-tab ${state.activeView === "releases" ? "active" : ""}" type="button" data-view="releases">Releases</button>
         </nav>
         <div class="top-actions">
           <a class="btn ghost" href="/">Live app</a>
@@ -2071,6 +2075,99 @@
     `;
   }
 
+  async function loadReleases() {
+    state.releasesLoading = true;
+    render();
+    try {
+      state.releases = await fetchJson("/api/admin/releases");
+    } catch (error) {
+      state.releasesMessage = error.message || "Could not load releases.";
+    } finally {
+      state.releasesLoading = false;
+      render();
+    }
+  }
+
+  const RELEASE_STATUS_TEXT = {
+    released: "Released",
+    releasing: "Releasing…",
+    failed: "Failed",
+    due: "Due now",
+    upcoming: "Upcoming",
+    waiting: "Waits for previous phase"
+  };
+
+  // Phase release pilot: a pilot VIN's Asana project starts with Phase A1 and each next phase is released into it
+  // a few working days before its cycle. Manual for the pilot; Fabrication projects are not part of this.
+  function renderReleases() {
+    const data = state.releases;
+    const message = state.releasesMessage ? `<div class="notice" style="margin-top: 12px;">${escapeHtml(state.releasesMessage)}</div>` : "";
+    if (!data) {
+      return `<section class="panel"><div class="panel-body">${state.releasesLoading ? "Loading…" : "No release data."}${message}</div></section>`;
+    }
+    const intro = `
+      <section class="panel">
+        <div class="panel-header">
+          <h3 class="panel-title">Phase release pilot</h3>
+          <span class="pill">${escapeHtml(`${data.pilots.length} pilot VIN${data.pilots.length === 1 ? "" : "s"}`)}</span>
+        </div>
+        <div class="panel-body">
+          <p class="muted">A pilot VIN's Asana project starts with only its first phase. Each next phase is released into the same project a few working days before that phase's cycle, using the current templates. Releases are manual during the pilot: nothing goes to Asana until you click Release. Existing VIN projects and Fabrication projects are not affected, and Project Creator will refuse full copies for pilot VINs.</p>
+          ${data.createEnabled ? "" : `<div class="notice risk">Project creation is in preview mode on this server (HAWLEY_ADMIN_PROJECT_CREATE_ENABLED), so releases are disabled.</div>`}
+          <div class="cycle-plan-form" style="margin-top: 12px;">
+            <label class="field"><span>VIN (no project yet)</span>
+              <select data-release-candidate>
+                ${data.candidates.map(c => `<option value="${escapeAttr(c.vin)}">${escapeHtml(`VIN ${c.vin}: ${c.firstPhase} in ${c.firstCycle}${c.firstCycleStart ? ` (starts ${formatDate(c.firstCycleStart)})` : ""}`)}</option>`).join("") || `<option value="">No eligible VINs</option>`}
+              </select>
+            </label>
+            <label class="field"><span>Release lead time (working days)</span><input type="number" min="0" max="20" value="2" data-release-lead-new /></label>
+          </div>
+          <div class="inline-actions"><button class="btn primary" type="button" data-action="release-enroll" ${data.candidates.length ? "" : "disabled"}>Add to pilot</button></div>
+          ${message}
+        </div>
+      </section>`;
+    const pilots = data.pilots.map(pilot => {
+      const hasProject = Boolean(pilot.asanaProjectGid);
+      const anyReleased = pilot.plan.some(p => p.runId);
+      return `
+      <section class="panel">
+        <div class="panel-header">
+          <h3 class="panel-title">VIN ${escapeHtml(pilot.vin)}</h3>
+          ${hasProject ? `<a class="pill" href="https://app.asana.com/0/${escapeAttr(pilot.asanaProjectGid)}" target="_blank" rel="noopener">Open in Asana</a>` : `<span class="pill">No Asana project yet</span>`}
+        </div>
+        <div class="panel-body">
+          <div class="cycle-plan-form">
+            <label class="field"><span>Lead time (working days)</span><input type="number" min="0" max="20" value="${escapeAttr(pilot.leadWorkingDays)}" data-release-lead="${escapeAttr(pilot.vin)}" /></label>
+            ${hasProject ? "" : `<label class="field"><span>Asana project name (first release creates it)</span><input type="text" value="${escapeAttr(pilot.suggestedProjectName)}" data-release-project-name="${escapeAttr(pilot.vin)}" /></label>`}
+          </div>
+          <div class="inline-actions">
+            <button class="btn" type="button" data-action="release-lead" data-vin="${escapeAttr(pilot.vin)}">Save lead time</button>
+            ${anyReleased ? "" : `<button class="btn" type="button" data-action="release-remove" data-vin="${escapeAttr(pilot.vin)}">Remove from pilot</button>`}
+          </div>
+          ${pilot.lastError ? `<div class="notice risk" style="margin-top: 12px;">Last failure: ${escapeHtml(pilot.lastError)}</div>` : ""}
+        </div>
+        <div class="panel-body table-wrap">
+          <table class="table">
+            <thead><tr><th>Phase</th><th>Cycle</th><th>Cycle starts</th><th>Release due</th><th>Status</th><th>Tasks</th><th></th></tr></thead>
+            <tbody>
+              ${pilot.plan.map(p => `
+                <tr>
+                  <td><strong>${escapeHtml(p.phase)}</strong></td>
+                  <td>${escapeHtml(p.cycleLabel)}</td>
+                  <td>${escapeHtml(formatDate(p.cycleStart))}</td>
+                  <td>${escapeHtml(formatDate(p.releaseDue))}</td>
+                  <td>${escapeHtml(RELEASE_STATUS_TEXT[p.status] || p.status)}${p.releasedAt ? `<div class="muted">${escapeHtml(new Date(p.releasedAt).toLocaleString())}</div>` : ""}</td>
+                  <td>${p.taskCount == null ? "" : escapeHtml(formatNumber(p.taskCount))}</td>
+                  <td>${p.canRelease && data.createEnabled ? `<button class="btn ${p.status === "due" ? "primary" : ""}" type="button" data-action="release-now" data-vin="${escapeAttr(pilot.vin)}" data-phase="${escapeAttr(p.phase)}">${p.status === "failed" ? "Retry" : "Release now"}</button>` : ""}</td>
+                </tr>`).join("") || `<tr><td colspan="7">No production rows for this VIN.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>`;
+    }).join("");
+    return intro + pilots;
+  }
+
   async function loadTemplates() {
     const f = state.templatesFilters;
     state.templatesLoading = true;
@@ -2240,7 +2337,7 @@
       <div class="admin-shell">
         ${renderTopbar()}
         <main class="admin-main">
-          ${state.activeView === "project" ? renderProjectCreator() : state.activeView === "cycles" ? renderCyclePlanner() : state.activeView === "production" ? renderProductionTable() : state.activeView === "task-times" ? renderTaskTimes() : state.activeView === "task-mapping" ? renderTaskMapping() : state.activeView === "templates" ? renderTemplates() : renderDashboard()}
+          ${state.activeView === "project" ? renderProjectCreator() : state.activeView === "cycles" ? renderCyclePlanner() : state.activeView === "production" ? renderProductionTable() : state.activeView === "task-times" ? renderTaskTimes() : state.activeView === "task-mapping" ? renderTaskMapping() : state.activeView === "templates" ? renderTemplates() : state.activeView === "releases" ? renderReleases() : renderDashboard()}
         </main>
       </div>
     `;
@@ -2262,7 +2359,7 @@
   root.addEventListener("click", async event => {
     const viewButton = event.target.closest("[data-view]");
     if (viewButton) {
-      state.activeView = ["project", "cycles", "production", "task-times", "task-mapping", "templates"].includes(viewButton.dataset.view) ? viewButton.dataset.view : "dashboard";
+      state.activeView = ["project", "cycles", "production", "task-times", "task-mapping", "templates", "releases"].includes(viewButton.dataset.view) ? viewButton.dataset.view : "dashboard";
       render();
       if (state.activeView === "cycles") {
         if (!state.cyclePlanner) await loadCyclePlanner();
@@ -2274,6 +2371,8 @@
         if (!state.taskMapping) await loadTaskMapping();
       } else if (state.activeView === "templates") {
         if (!state.templates) await loadTemplates();
+      } else if (state.activeView === "releases") {
+        if (!state.releases) await loadReleases();
       } else if (state.activeView === "project" && !state.project && !state.projectLoading) {
         try {
           await loadProjectCreator();
@@ -2391,6 +2490,49 @@
         state.templatesLoading = false;
         render();
       }
+    } else if (action === "release-enroll") {
+      const vin = root.querySelector("[data-release-candidate]")?.value || "";
+      const leadWorkingDays = Number(root.querySelector("[data-release-lead-new]")?.value || 2);
+      if (!vin || !window.confirm(`Add VIN ${vin} to the phase release pilot? Nothing is sent to Asana until you release a phase.`)) return;
+      try {
+        await postJson("/api/admin/releases/pilot", { vin, leadWorkingDays });
+        state.releasesMessage = `VIN ${vin} added to the pilot.`;
+      } catch (error) {
+        state.releasesMessage = error.message || "Could not add the VIN.";
+      }
+      await loadReleases();
+    } else if (action === "release-lead") {
+      const vin = event.target.closest("[data-action]").dataset.vin;
+      try {
+        await postJson("/api/admin/releases/pilot", { vin, leadWorkingDays: Number(root.querySelector(`[data-release-lead="${vin}"]`)?.value || 2) });
+        state.releasesMessage = `Lead time saved for VIN ${vin}.`;
+      } catch (error) {
+        state.releasesMessage = error.message || "Could not save the lead time.";
+      }
+      await loadReleases();
+    } else if (action === "release-remove") {
+      const vin = event.target.closest("[data-action]").dataset.vin;
+      if (!window.confirm(`Remove VIN ${vin} from the pilot? It can then be created the old way in Project Creator.`)) return;
+      try {
+        await postJson("/api/admin/releases/pilot", { vin, remove: true });
+        state.releasesMessage = `VIN ${vin} removed from the pilot.`;
+      } catch (error) {
+        state.releasesMessage = error.message || "Could not remove the VIN.";
+      }
+      await loadReleases();
+    } else if (action === "release-now") {
+      const { vin, phase } = event.target.closest("[data-action]").dataset;
+      const projectName = root.querySelector(`[data-release-project-name="${vin}"]`)?.value || "";
+      if (!window.confirm(`Release VIN ${vin} Phase ${phase} to Asana now?${projectName ? ` This creates the Asana project "${projectName}".` : ""} Its tasks become visible to leads and workers.`)) return;
+      state.releasesMessage = "Releasing…";
+      render();
+      try {
+        const result = await postJson("/api/admin/releases/release", { vin, phase, projectName });
+        state.releasesMessage = result.message;
+      } catch (error) {
+        state.releasesMessage = error.message || "Could not release the phase.";
+      }
+      await loadReleases();
     } else if (action === "team-tasks-setup") {
       if (!window.confirm("Create (if needed) the Asana Helpers field and add it to every VIN project with open work?")) return;
       state.teamTasksMessage = "Working…";

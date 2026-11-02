@@ -11,6 +11,7 @@ import { buildTaskTimeTable, saveTaskMappingRules, taskMappingGroups, taskTimeCo
 import { HB_BUILD_LOCK_KEY, HB_BUILD_LOCK_NAMESPACE } from "../postgres-sync/src/hb-build-transaction.js";
 import { listTemplates, saveTemplateVersion, templateDetail, templateEditorOptions } from "../postgres-sync/src/template-editor.js";
 import { parseTrialEmails } from "../postgres-sync/src/team-tasks.js";
+import { releasePlan } from "./phase-release.js";
 import { ASANA_CYCLE_FIELD_GID, addCycleOptions, pushCycleField } from "./asana-cycle-push.js";
 import { buildCyclePreview, cyclePlannerOverview, pendingAsanaPushes, productionScheduleRows, publishCyclePlan, recordAsanaPushResults } from "./cycle-planner.js";
 import { getDatabaseConfig } from "../postgres-sync/src/config.js";
@@ -8954,7 +8955,8 @@ async function adminProjectCreatorPreview(options) {
       projectCreatorScheduleMatchesCycle(row, selectedCycle) &&
       projectCreatorScheduleIsFabrication(row)
     )
-    : allScheduleRows.filter(row => projectCreatorVinNumber(row.vin) === selectedVin);
+    : allScheduleRows.filter(row => projectCreatorVinNumber(row.vin) === selectedVin)
+      .filter(row => !options?.phaseNames || options.phaseNames.includes(projectCreatorPhaseName(row)));
   if (!targetScheduleRows.length) return null;
 
   const existingLineScheduleIds = Array.from(new Set(targetScheduleRows.map(row => row.production_record_id).filter(Boolean)));
@@ -11428,6 +11430,181 @@ async function handleAdminTeamTasksSetup(req) {
   return { ok: true, helpersFieldGid: fieldGid, projects: projects.length, attached, failed };
 }
 
+// Phase-by-phase release pilot (ramp step 4). A pilot VIN's Asana project starts with Phase A1; each next phase is
+// released into the same project before its cycle, by running Project Creator for that one phase. Manual during
+// the pilot: the Releases tab shows what is due and has "Release now". Fabrication projects are not part of this.
+function phaseReleaseScheduleRows(allScheduleRows, vin) {
+  const byPhase = new Map();
+  for (const row of allScheduleRows) {
+    if (projectCreatorVinNumber(row.vin) !== vin) continue;
+    const phase = projectCreatorPhaseName(row);
+    const current = byPhase.get(phase);
+    if (phase && (!current || String(row.start_date || "") < String(current.start_date || ""))) {
+      byPhase.set(phase, { phase_name: phase, production_record_id: row.production_record_id, cycle_label: projectCreatorScheduleCycleLabel(row), start_date: row.start_date });
+    }
+  }
+  return [...byPhase.values()];
+}
+
+async function phaseReleaseRows(client, vin) {
+  return (await client.query(
+    `select r.*, run.status as run_status, run.asana_project_gid as run_project_gid, run.error_message
+       from hb.phase_releases r
+       left join hb.project_creation_runs run on run.project_creation_run_id::text = r.project_creation_run_id
+      where r.vin = $1`,
+    [String(vin)]
+  )).rows;
+}
+
+async function handleAdminReleases(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const today = todayIso();
+  const [scheduleData, pilotsResult, taskCounts] = await Promise.all([
+    adminProjectCreatorScheduleData("VIN", {}),
+    pool.query("select * from hb.release_pilots order by vin::int"),
+    pool.query("select vin::text as vin, count(*)::int as tasks from hb.rev1_task_instances where vin is not null group by 1")
+  ]);
+  const tasksByVin = new Map(taskCounts.rows.map(row => [row.vin, row.tasks]));
+  const modelByVin = new Map((await pool.query("select vin::text as vin, model_type_names from hb.vins where vin is not null")).rows
+    .map(row => [row.vin, String(projectCreatorArray(row.model_type_names)[0] || "").trim()]));
+  const pilots = [];
+  for (const pilot of pilotsResult.rows) {
+    const vin = Number(pilot.vin);
+    const releases = await phaseReleaseRows(pool, vin);
+    pilots.push({
+      vin,
+      leadWorkingDays: pilot.lead_working_days,
+      asanaProjectGid: pilot.asana_project_gid || releases.find(row => row.run_project_gid)?.run_project_gid || "",
+      enrolledBy: pilot.enrolled_by,
+      enrolledAt: pilot.enrolled_at,
+      suggestedProjectName: modelByVin.get(String(vin)) ? `${vin} - ${modelByVin.get(String(vin))}` : `${vin} - `,
+      plan: releasePlan(phaseReleaseScheduleRows(scheduleData.allScheduleRows, vin), releases, { today, leadWorkingDays: pilot.lead_working_days }),
+      lastError: releases.find(row => row.run_status === "failed")?.error_message || ""
+    });
+  }
+  const enrolled = new Set(pilotsResult.rows.map(row => String(row.vin)));
+  const candidates = scheduleData.vinChoices
+    .filter(choice => !enrolled.has(String(choice.vin)) && !tasksByVin.get(String(choice.vin)) && String(choice.lastEndDate || "") >= today)
+    .slice(0, 8)
+    .map(choice => {
+      const first = phaseReleaseScheduleRows(scheduleData.allScheduleRows, choice.vin)
+        .sort((a, b) => String(a.start_date).localeCompare(String(b.start_date)))[0];
+      return { vin: choice.vin, firstPhase: first?.phase_name || "", firstCycle: first?.cycle_label || "", firstCycleStart: first?.start_date || "" };
+    });
+  return { today, createEnabled: ADMIN_PROJECT_CREATE_ENABLED, pilots, candidates };
+}
+
+async function handleAdminReleasePilot(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const vin = projectCreatorVinNumber(body.vin);
+  if (vin === null) throw actionError("Choose a VIN.", 400);
+  if (body.remove === true) {
+    if ((await pool.query("select 1 from hb.phase_releases where vin = $1", [String(vin)])).rowCount) {
+      throw actionError(`VIN ${vin} already has released phases; it stays in the pilot.`, 409);
+    }
+    await writePool.query("delete from hb.release_pilots where vin = $1", [String(vin)]);
+    console.log("[hawley-phase-release]", JSON.stringify({ action: "remove", vin, actor: actor?.email || "" }));
+    return { ok: true, removed: vin };
+  }
+  const lead = Math.round(Number(body.leadWorkingDays ?? 2));
+  if (!Number.isFinite(lead) || lead < 0 || lead > 20) throw actionError("Lead time must be 0 to 20 working days.", 400);
+  const existing = (await pool.query("select 1 from hb.release_pilots where vin = $1", [String(vin)])).rowCount;
+  if (!existing) {
+    const tasks = (await pool.query("select count(*)::int as n from hb.rev1_task_instances where vin::text = $1", [String(vin)])).rows[0].n;
+    if (tasks) throw actionError(`VIN ${vin} already has ${tasks} tasks; the pilot needs a VIN with no project yet.`, 409);
+    const scheduleData = await adminProjectCreatorScheduleData("VIN", {});
+    if (!phaseReleaseScheduleRows(scheduleData.allScheduleRows, vin).length) throw actionError(`VIN ${vin} has no production schedule rows.`, 409);
+  }
+  await writePool.query(
+    `insert into hb.release_pilots (vin, lead_working_days, enrolled_by) values ($1, $2, $3)
+     on conflict (vin) do update set lead_working_days = excluded.lead_working_days`,
+    [String(vin), lead, actor?.email || ""]
+  );
+  console.log("[hawley-phase-release]", JSON.stringify({ action: existing ? "lead_time" : "enroll", vin, lead, actor: actor?.email || "" }));
+  return { ok: true, vin, leadWorkingDays: lead };
+}
+
+async function handleAdminPhaseRelease(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  if (!ADMIN_PROJECT_CREATE_ENABLED) throw actionError("Project creation is in preview mode (HAWLEY_ADMIN_PROJECT_CREATE_ENABLED).", 409);
+  const token = process.env.ASANA_PAT;
+  if (!token) throw actionError("ASANA_PAT is not configured.", 503);
+  const vin = projectCreatorVinNumber(body.vin);
+  const phase = String(body.phase || "").trim();
+  const pilot = (await pool.query("select * from hb.release_pilots where vin = $1", [String(vin)])).rows[0];
+  if (!pilot) throw actionError(`VIN ${vin} is not in the release pilot.`, 404);
+
+  const scheduleData = await adminProjectCreatorScheduleData("VIN", {});
+  const releases = await phaseReleaseRows(writePool, vin);
+  const item = releasePlan(phaseReleaseScheduleRows(scheduleData.allScheduleRows, vin), releases, { today: todayIso(), leadWorkingDays: pilot.lead_working_days })
+    .find(row => row.phase === phase);
+  if (!item) throw actionError(`VIN ${vin} has no Phase ${phase} in the production schedule.`, 404);
+  if (!item.canRelease) throw actionError(`Phase ${phase} is ${item.status}${item.status === "waiting" ? " for the earlier phase" : ""}.`, 409);
+
+  const preview = await adminProjectCreatorPreview({
+    projectType: "VIN",
+    selectedVin: vin,
+    selectedCycle: scheduleData.selectedCycle,
+    allScheduleRows: scheduleData.allScheduleRows,
+    selectedCycleRows: scheduleData.selectedCycleRows,
+    phaseNames: [phase]
+  });
+  if (!preview?.tasks?.length) throw actionError(`No template tasks match VIN ${vin} Phase ${phase}.`, 409, { skipped: preview?.skipped || {} });
+  // Same naming as existing VIN projects ("334 - Endless Highways 1.2"); only used when the first release creates it.
+  const modelName = String(preview.tasks[0]?.vinModelTypes?.[0] || "").trim();
+  const projectName = String(body.projectName || "").trim()
+    || (modelName ? `${vin} - ${modelName}` : adminProjectNameForPreview("VIN", { vin }));
+  const previous = releases.find(row => row.phase_name === phase);
+  const runId = previous?.project_creation_run_id || crypto.randomUUID();
+  if (previous) {
+    await writePool.query(
+      "update hb.project_creation_runs set status = 'started', error_message = null, completed_at = null where project_creation_run_id::text = $1",
+      [runId]
+    );
+  } else {
+    if (preview.existingSyncedTasks || preview.existingLegacyTasks) throw actionError(`VIN ${vin} Phase ${phase} already has tasks.`, 409);
+    await insertAdminProjectCreationRows(preview, runId, projectName, actor, { ...body, phaseRelease: true });
+    await writePool.query(
+      `insert into hb.phase_releases (vin, phase_name, production_record_id, cycle_label, project_creation_run_id, task_count, released_by)
+       values ($1, $2, $3, $4, $5, $6, $7)`,
+      [String(vin), phase, item.productionRecordId, item.cycleLabel, runId, preview.tasks.length, actor?.email || ""]
+    );
+  }
+  // A retried first release may already have created the project; reuse it rather than making a second one.
+  const existingProjectGid = pilot.asana_project_gid
+    || releases.find(row => row.run_project_gid)?.run_project_gid
+    || "";
+  console.log("[hawley-phase-release]", JSON.stringify({ action: previous ? "retry" : "release", vin, phase, runId, tasks: preview.tasks.length, existingProjectGid, actor: actor?.email || "" }));
+  setImmediate(async () => {
+    try {
+      await runAdminProjectCreation({ token, preview, projectName, projectType: "VIN", runId, existingProjectGid });
+    } catch {
+      // runAdminProjectCreation records the failure on the run; the Releases tab shows it with Retry.
+    } finally {
+      await writePool.query(
+        `update hb.release_pilots p set asana_project_gid = run.asana_project_gid
+           from hb.project_creation_runs run
+          where p.vin = $1 and p.asana_project_gid is null and run.project_creation_run_id::text = $2
+            and nullif(run.asana_project_gid, '') is not null`,
+        [String(vin), runId]
+      ).catch(() => {});
+    }
+  });
+  return {
+    ok: true,
+    queued: true,
+    vin,
+    phase,
+    tasks: preview.tasks.length,
+    message: `Releasing VIN ${vin} Phase ${phase} (${preview.tasks.length} tasks) to ${existingProjectGid ? "its Asana project" : `a new Asana project "${projectName}"`}. Reload in a minute to see it.`
+  };
+}
+
 async function handleAdminTemplates(req, url) {
   const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
   requireAdminActor(actor);
@@ -13034,6 +13211,11 @@ async function handleAdminProjectCreate(req) {
       code: "VIN_REQUIRED"
     });
   }
+  if (projectType === "VIN" && (await pool.query("select 1 from hb.release_pilots where vin = $1", [String(selectedVin)])).rowCount) {
+    throw actionError(`VIN ${selectedVin} is in the phase release pilot; release its phases from the Releases tab.`, 409, {
+      code: "VIN_IN_RELEASE_PILOT"
+    });
+  }
   const scheduleData = await adminProjectCreatorScheduleData(projectType, requestedCycleIdentity);
   const selectedCycle = scheduleData.selectedCycle;
   const cycleNumber = Number(selectedCycle?.cycle_number || 0) || null;
@@ -13772,6 +13954,21 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/team-tasks/settings" && req.method === "POST") {
       sendJson(res, 200, await handleAdminTeamTasksSettings(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/releases" && req.method === "GET") {
+      sendJson(res, 200, await handleAdminReleases(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/releases/pilot" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminReleasePilot(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/releases/release" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminPhaseRelease(req));
       return;
     }
 
