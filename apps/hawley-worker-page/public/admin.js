@@ -62,6 +62,7 @@
     releases: null,
     releasesLoading: false,
     releasesMessage: "",
+    releasesFold: {},
     handoffs: null,
     handoffsLoading: false,
     handoffsMessage: "",
@@ -2295,6 +2296,26 @@
       </div>`;
   }
 
+  // Collapsible Releases panels: a section's header becomes a summary line. Sections with something to act on open by
+  // default; what you open or close is kept while the page refreshes.
+  function foldPanel(key, html, summary, defaultOpen) {
+    const open = state.releasesFold[key] ?? defaultOpen;
+    let out = html.replace('<section class="panel">', `<details class="panel" data-fold="${escapeAttr(key)}" ${open ? "open" : ""}>`);
+    const header = out.indexOf('<div class="panel-header">');
+    const headerEnd = out.indexOf("</div>", header);
+    out = `${out.slice(0, header)}<summary class="panel-header" style="cursor: pointer;">${out.slice(header + '<div class="panel-header">'.length, headerEnd)}${summary ? `<span class="muted" style="margin-left: auto; padding: 0 12px;">${escapeHtml(summary)}</span>` : ""}</summary>${out.slice(headerEnd + "</div>".length)}`;
+    const last = out.lastIndexOf("</section>");
+    return `${out.slice(0, last)}</details>${out.slice(last + "</section>".length)}`;
+  }
+
+  const ACT_ON = new Set(["due", "failed", "releasing"]);
+  function nextReleaseText(plan, nameOf) {
+    const next = (plan || []).find(p => ["due", "upcoming", "failed", "releasing", "gate", "waiting"].includes(p.status));
+    if (!next) return (plan || []).length ? "All released" : "";
+    if (next.status === "gate" || next.status === "waiting") return `next: ${nameOf(next)} after the Frames gate`;
+    return `next: ${nameOf(next)} ${next.status === "upcoming" ? `due ${formatDate(next.releaseDue)}` : (RELEASE_STATUS_TEXT[next.status] || next.status).toLowerCase()}`;
+  }
+
   // Phase release pilot: a pilot VIN's Asana project starts with Phase A1 and each next phase is released into it
   // a few working days before its cycle. Manual for the pilot; Fabrication projects are not part of this.
   function renderReleases() {
@@ -2327,7 +2348,11 @@
     const pilots = data.pilots.map(pilot => {
       const hasProject = Boolean(pilot.asanaProjectGid);
       const anyReleased = pilot.plan.some(p => p.runId);
-      return `
+      const gate = pilot.framesGate;
+      const gateText = gate ? (gate.status === "passed" ? "Frames gate passed" : `Frames gate ${gate.complete} of ${gate.total} done`) : "";
+      const summary = [nextReleaseText(pilot.plan, p => p.phase), gateText].filter(Boolean).join(" · ");
+      const actOn = pilot.plan.some(p => ACT_ON.has(p.status)) || ["ready", "failed", "passing"].includes(gate?.status);
+      return foldPanel(`vin-${pilot.vin}`, `
       <section class="panel">
         <div class="panel-header">
           <h3 class="panel-title">VIN ${escapeHtml(pilot.vin)}</h3>
@@ -2363,7 +2388,7 @@
             </tbody>
           </table>
         </div>
-      </section>`;
+      </section>`, summary, actOn);
     }).join("");
     const settings = data.settings || {};
     const auto = data.autoRelease || {};
@@ -2436,7 +2461,16 @@
           </table>
         </div>
       </section>`;
-    return intro + renderWorkflow(data.workflow) + automatic + pilots + framesWork + fabrication;
+    const autoSummary = settings.autoVinPhases || settings.autoFabrication
+      ? [settings.autoVinPhases ? "VIN phases on" : "", settings.autoFabrication ? "Fabrication and Frame work on" : ""].filter(Boolean).join(" · ")
+      : "Off";
+    const fwPlan = (data.framesWork || {}).plan || [];
+    const fabPlan = (data.fabrication || {}).plan || [];
+    return intro + renderWorkflow(data.workflow)
+      + foldPanel("automatic", automatic, autoSummary, false)
+      + pilots
+      + foldPanel("frames-work", framesWork, nextReleaseText(fwPlan, p => p.projectName), fwPlan.some(p => ACT_ON.has(p.status)))
+      + foldPanel("fabrication", fabrication, nextReleaseText(fabPlan, p => p.projectName), fabPlan.some(p => ACT_ON.has(p.status)));
   }
 
   // Stages and gates (hb.workflow_stages / hb.workflow_gates). Only the parts already wired into releases are editable;
@@ -2683,6 +2717,11 @@
     }
     root.innerHTML = renderApp();
   }
+
+  root.addEventListener("toggle", event => {
+    const key = event.target?.dataset?.fold;
+    if (key) state.releasesFold[key] = event.target.open;
+  }, true);
 
   root.addEventListener("click", async event => {
     const viewButton = event.target.closest("[data-view]");
