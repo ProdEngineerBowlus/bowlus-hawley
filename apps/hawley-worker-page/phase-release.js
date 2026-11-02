@@ -48,23 +48,50 @@ export function fabricationReleasePlan(cycles, releases, { today, leadWorkingDay
     });
 }
 
+// Frames stage: Phase A1/A2 go to the cycle's Frames project and must pass the Frames gate before Phase B.
+export const FRAMES_PHASES = Object.freeze(["A1", "A2"]);
+
+// "C22.26" -> "FR22.26", alongside Fabrication's F22.26.
+export function framesProjectName(cycleLabel) {
+  const match = /^C?(\d+)\.(\d{2})$/i.exec(String(cycleLabel || "").trim());
+  return match ? `FR${match[1]}.${match[2]}` : `FR ${cycleLabel}`;
+}
+
+// The Frames gate is ready when every A1/A2 phase is released and all of their tasks are complete.
+export function framesGateStatus(plan, { total = 0, complete = 0, gate = null } = {}) {
+  const framesPhases = (plan || []).filter(row => row.target === "frames");
+  const released = framesPhases.length > 0 && framesPhases.every(row => row.status === "released");
+  const status = gate?.status === "passed" ? "passed"
+    : gate?.status === "passing" ? "passing"
+      : gate?.status === "failed" ? "failed"
+        : released && total > 0 && complete >= total ? "ready" : "open";
+  return { status, total, complete, released, canPass: status === "ready" || status === "failed", result: gate?.result || null };
+}
+
 // scheduleRows: { phase_name, production_record_id, cycle_label, start_date } for one VIN.
 // releases: hb.phase_releases rows joined with their run status ({ phase_name, run_status, task_count, ... }).
-export function releasePlan(scheduleRows, releases, { today, leadWorkingDays = 2 } = {}) {
+// framesStage: A1/A2 release into Frames and the first later phase waits for the Frames gate (framesGatePassed).
+export function releasePlan(scheduleRows, releases, { today, leadWorkingDays = 2, framesStage = false, framesGatePassed = false } = {}) {
   const releaseByPhase = new Map((releases || []).map(row => [row.phase_name, row]));
   const phases = [...(scheduleRows || [])]
     .filter(row => row.phase_name)
     .sort((a, b) => String(a.start_date || "").localeCompare(String(b.start_date || "")) || String(a.phase_name).localeCompare(String(b.phase_name)));
   let previousReleased = true;
+  let gateChecked = false;
   return phases.map(row => {
     const release = releaseByPhase.get(row.phase_name) || null;
     const cycleStart = row.start_date ? String(row.start_date).slice(0, 10) : null;
     const due = releaseDueDate(cycleStart, leadWorkingDays);
+    const target = framesStage && FRAMES_PHASES.includes(row.phase_name) ? "frames" : "vin";
+    const waitsForGate = framesStage && target === "vin" && !gateChecked;
+    if (target === "vin") gateChecked = true;
     let status;
     if (release) {
-      status = release.run_status === "success" ? "released" : release.run_status === "failed" ? "failed" : "releasing";
+      status = runStatus(release);
     } else if (!previousReleased) {
       status = "waiting";
+    } else if (waitsForGate && !framesGatePassed) {
+      status = "gate";
     } else {
       status = due && today >= due ? "due" : "upcoming";
     }
@@ -75,6 +102,8 @@ export function releasePlan(scheduleRows, releases, { today, leadWorkingDays = 2
       cycleLabel: row.cycle_label || "",
       cycleStart,
       releaseDue: due,
+      target,
+      projectName: target === "frames" ? framesProjectName(row.cycle_label) : null,
       status,
       canRelease: status === "due" || status === "upcoming" || status === "failed",
       runId: release?.project_creation_run_id || null,

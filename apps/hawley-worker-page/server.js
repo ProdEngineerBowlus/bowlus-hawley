@@ -11,7 +11,7 @@ import { buildTaskTimeTable, saveTaskMappingRules, taskMappingGroups, taskTimeCo
 import { HB_BUILD_LOCK_KEY, HB_BUILD_LOCK_NAMESPACE } from "../postgres-sync/src/hb-build-transaction.js";
 import { listTemplates, saveTemplateVersion, templateDetail, templateEditorOptions } from "../postgres-sync/src/template-editor.js";
 import { parseTrialEmails } from "../postgres-sync/src/team-tasks.js";
-import { fabricationReleasePlan, releasePlan } from "./phase-release.js";
+import { fabricationReleasePlan, framesGateStatus, releasePlan } from "./phase-release.js";
 import { ASANA_CYCLE_FIELD_GID, addCycleOptions, pushCycleField } from "./asana-cycle-push.js";
 import { buildCyclePreview, cyclePlannerOverview, pendingAsanaPushes, productionScheduleRows, publishCyclePlan, recordAsanaPushResults } from "./cycle-planner.js";
 import { getDatabaseConfig } from "../postgres-sync/src/config.js";
@@ -94,7 +94,9 @@ const ADMIN_PROJECT_LOCAL_CUSTOM_FIELDS = Object.freeze([
 const ADMIN_PROJECT_PORTFOLIOS = Object.freeze({
   Fabrication: process.env.HAWLEY_ASANA_FABRICATION_PORTFOLIO_GID || "1212620750946278",
   Cycle: process.env.HAWLEY_ASANA_FABRICATION_PORTFOLIO_GID || "1212620750946278",
-  VIN: process.env.HAWLEY_ASANA_VIN_PORTFOLIO_GID || "1212620750946276"
+  VIN: process.env.HAWLEY_ASANA_VIN_PORTFOLIO_GID || "1212620750946276",
+  Frames: process.env.HAWLEY_ASANA_FRAMES_PORTFOLIO_GID || "1220139579883873",
+  CNC: process.env.HAWLEY_ASANA_CNC_PORTFOLIO_GID || "1220139579883877"
 });
 const ADMIN_PROJECT_PORTFOLIO_NAMES = Object.freeze({
   Fabrication: process.env.HAWLEY_ASANA_FABRICATION_PORTFOLIO_NAME || "Fabrication - 2026",
@@ -11456,6 +11458,43 @@ async function phaseReleaseRows(client, vin) {
   )).rows;
 }
 
+async function framesGateRow(client, vin) {
+  return (await client.query("select * from hb.vin_gates where vin = $1 and gate = 'frames'", [String(vin)])).rows[0] || null;
+}
+
+// A1/A2 tasks of a VIN's Frames releases (by their Project Creator run).
+async function framesStageTasks(client, releases) {
+  const runIds = releases.filter(row => row.target === "frames").map(row => row.project_creation_run_id);
+  if (!runIds.length) return [];
+  return (await client.query(
+    `select rev1_task_instance_id, asana_task_gid, parent_asana_task_gid, coalesce(task_completed, false) as completed,
+            fields_json ->> 'projectCreationRunId' as run_id
+       from hb.rev1_task_instances
+      where fields_json ->> 'projectCreationRunId' = any($1::text[])`,
+    [runIds]
+  )).rows;
+}
+
+async function pilotPlan(client, pilot, allScheduleRows) {
+  const vin = Number(pilot.vin);
+  const [releases, gate] = await Promise.all([phaseReleaseRows(client, vin), framesGateRow(client, vin)]);
+  const framesStage = pilot.frames_stage !== false;
+  const plan = releasePlan(phaseReleaseScheduleRows(allScheduleRows, vin), releases, {
+    today: todayIso(),
+    leadWorkingDays: pilot.lead_working_days,
+    framesStage,
+    framesGatePassed: gate?.status === "passed" || gate?.status === "passing"
+  });
+  const tasks = framesStage ? await framesStageTasks(client, releases) : [];
+  const framesGate = framesStage
+    ? framesGateStatus(plan, { total: tasks.length, complete: tasks.filter(row => row.completed).length, gate })
+    : null;
+  const vinProjectGid = pilot.asana_project_gid
+    || releases.find(row => row.target !== "frames" && row.run_project_gid)?.run_project_gid
+    || "";
+  return { vin, releases, gate, plan, framesStage, framesGate, tasks, vinProjectGid };
+}
+
 async function handleAdminReleases(req) {
   const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
   requireAdminActor(actor);
@@ -11469,17 +11508,19 @@ async function handleAdminReleases(req) {
   const modelByVin = new Map((await pool.query("select vin::text as vin, model_type_names from hb.vins where vin is not null")).rows
     .map(row => [row.vin, String(projectCreatorArray(row.model_type_names)[0] || "").trim()]));
   const pilots = [];
+  const framesProjects = new Map((await pool.query("select * from hb.frames_projects")).rows.map(row => [row.cycle_label, row]));
   for (const pilot of pilotsResult.rows) {
-    const vin = Number(pilot.vin);
-    const releases = await phaseReleaseRows(pool, vin);
+    const { vin, releases, plan, framesStage, framesGate, vinProjectGid } = await pilotPlan(pool, pilot, scheduleData.allScheduleRows);
     pilots.push({
       vin,
       leadWorkingDays: pilot.lead_working_days,
-      asanaProjectGid: pilot.asana_project_gid || releases.find(row => row.run_project_gid)?.run_project_gid || "",
+      asanaProjectGid: vinProjectGid,
+      framesStage,
+      framesGate,
       enrolledBy: pilot.enrolled_by,
       enrolledAt: pilot.enrolled_at,
       suggestedProjectName: modelByVin.get(String(vin)) ? `${vin} - ${modelByVin.get(String(vin))}` : `${vin} - `,
-      plan: releasePlan(phaseReleaseScheduleRows(scheduleData.allScheduleRows, vin), releases, { today, leadWorkingDays: pilot.lead_working_days }),
+      plan: plan.map(row => ({ ...row, projectGid: row.target === "frames" ? framesProjects.get(row.cycleLabel)?.asana_project_gid || "" : vinProjectGid })),
       lastError: releases.find(row => row.run_status === "failed")?.error_message || ""
     });
   }
@@ -11557,11 +11598,14 @@ async function releaseVinPhase({ vin, phase, projectName: requestedName = "", ac
   if (!pilot) throw actionError(`VIN ${vin} is not in the release pilot.`, 404);
 
   const scheduleData = await adminProjectCreatorScheduleData("VIN", {});
-  const releases = await phaseReleaseRows(writePool, vin);
-  const item = releasePlan(phaseReleaseScheduleRows(scheduleData.allScheduleRows, vin), releases, { today: todayIso(), leadWorkingDays: pilot.lead_working_days })
-    .find(row => row.phase === phase);
+  const { releases, plan, vinProjectGid } = await pilotPlan(writePool, pilot, scheduleData.allScheduleRows);
+  const item = plan.find(row => row.phase === phase);
   if (!item) throw actionError(`VIN ${vin} has no Phase ${phase} in the production schedule.`, 404);
-  if (!item.canRelease) throw actionError(`Phase ${phase} is ${item.status}${item.status === "waiting" ? " for the earlier phase" : ""}.`, 409);
+  if (!item.canRelease) {
+    const why = item.status === "waiting" ? " for the earlier phase" : item.status === "gate" ? " for the Frames gate" : "";
+    throw actionError(`Phase ${phase} is ${item.status === "gate" ? "waiting" : item.status}${why}.`, 409);
+  }
+  const toFrames = item.target === "frames";
 
   const preview = await adminProjectCreatorPreview({
     projectType: "VIN",
@@ -11574,8 +11618,13 @@ async function releaseVinPhase({ vin, phase, projectName: requestedName = "", ac
   if (!preview?.tasks?.length) throw actionError(`No template tasks match VIN ${vin} Phase ${phase}.`, 409, { skipped: preview?.skipped || {} });
   // Same naming as existing VIN projects ("334 - Endless Highways 1.2"); only used when the first release creates it.
   const modelName = String(preview.tasks[0]?.vinModelTypes?.[0] || "").trim();
-  const projectName = String(requestedName || "").trim()
+  const projectName = toFrames ? item.projectName : String(requestedName || "").trim()
     || (modelName ? `${vin} - ${modelName}` : adminProjectNameForPreview("VIN", { vin }));
+  if (toFrames) {
+    // Frames project for the cycle, shared by VINs: put this VIN's tasks in their own sections.
+    preview.portfolioType = "Frames";
+    preview.tasks = preview.tasks.map(task => ({ ...task, asanaSection: `VIN ${vin} - ${task.asanaSection || task.phaseLabel || phase}` }));
+  }
   const previous = releases.find(row => row.phase_name === phase);
   const runId = previous?.project_creation_run_id || crypto.randomUUID();
   if (previous) {
@@ -11587,27 +11636,37 @@ async function releaseVinPhase({ vin, phase, projectName: requestedName = "", ac
     if (preview.existingSyncedTasks || preview.existingLegacyTasks) throw actionError(`VIN ${vin} Phase ${phase} already has tasks.`, 409);
     await insertAdminProjectCreationRows(preview, runId, projectName, { email: actorEmail }, { vin, phase, phaseRelease: true });
     await writePool.query(
-      `insert into hb.phase_releases (vin, phase_name, production_record_id, cycle_label, project_creation_run_id, task_count, released_by)
-       values ($1, $2, $3, $4, $5, $6, $7)`,
-      [String(vin), phase, item.productionRecordId, item.cycleLabel, runId, preview.tasks.length, actorEmail]
+      `insert into hb.phase_releases (vin, phase_name, production_record_id, cycle_label, project_creation_run_id, task_count, released_by, target)
+       values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [String(vin), phase, item.productionRecordId, item.cycleLabel, runId, preview.tasks.length, actorEmail, item.target]
     );
   }
   // A retried first release may already have created the project; reuse it rather than making a second one.
-  const existingProjectGid = pilot.asana_project_gid
-    || releases.find(row => row.run_project_gid)?.run_project_gid
-    || "";
+  const runProjectGid = previous
+    ? (await writePool.query("select asana_project_gid from hb.project_creation_runs where project_creation_run_id::text = $1", [runId])).rows[0]?.asana_project_gid || ""
+    : "";
+  const existingProjectGid = toFrames
+    ? (await writePool.query("select asana_project_gid from hb.frames_projects where cycle_label = $1", [item.cycleLabel])).rows[0]?.asana_project_gid || runProjectGid
+    : vinProjectGid || runProjectGid;
   console.log("[hawley-phase-release]", JSON.stringify({ action: previous ? "retry" : "release", vin, phase, runId, tasks: preview.tasks.length, existingProjectGid, actor: actorEmail }));
-  const done = runAdminProjectCreation({ token, preview, projectName, projectType: "VIN", runId, existingProjectGid })
+  const done = runAdminProjectCreation({ token, preview, projectName, projectType: toFrames ? "Frames" : "VIN", runId, existingProjectGid })
     .catch(() => {
       // runAdminProjectCreation records the failure on the run; the Releases tab shows it with Retry.
     })
-    .finally(() => writePool.query(
-      `update hb.release_pilots p set asana_project_gid = run.asana_project_gid
-         from hb.project_creation_runs run
-        where p.vin = $1 and p.asana_project_gid is null and run.project_creation_run_id::text = $2
-          and nullif(run.asana_project_gid, '') is not null`,
-      [String(vin), runId]
-    ).catch(() => {}));
+    .finally(() => (toFrames
+      ? writePool.query(
+        `insert into hb.frames_projects (cycle_label, project_name, asana_project_gid)
+         select $1, $2, nullif(run.asana_project_gid, '') from hb.project_creation_runs run where run.project_creation_run_id::text = $3
+         on conflict (cycle_label) do update set asana_project_gid = coalesce(hb.frames_projects.asana_project_gid, excluded.asana_project_gid)`,
+        [item.cycleLabel, projectName, runId]
+      )
+      : writePool.query(
+        `update hb.release_pilots p set asana_project_gid = run.asana_project_gid
+           from hb.project_creation_runs run
+          where p.vin = $1 and p.asana_project_gid is null and run.project_creation_run_id::text = $2
+            and nullif(run.asana_project_gid, '') is not null`,
+        [String(vin), runId]
+      )).catch(() => {}));
   return {
     done,
     result: {
@@ -11616,9 +11675,93 @@ async function releaseVinPhase({ vin, phase, projectName: requestedName = "", ac
       vin,
       phase,
       tasks: preview.tasks.length,
-      message: `Releasing VIN ${vin} Phase ${phase} (${preview.tasks.length} tasks) to ${existingProjectGid ? "its Asana project" : `a new Asana project "${projectName}"`}. Reload in a minute to see it.`
+      message: `Releasing VIN ${vin} Phase ${phase} (${preview.tasks.length} tasks) to ${existingProjectGid ? `${toFrames ? projectName : "its Asana project"}` : `a new Asana project "${projectName}"`}. Reload in a minute to see it.`
     }
   };
+}
+
+// Frames gate: when every A1/A2 task of a pilot VIN is complete, an admin passes the gate. Hawley releases the next
+// phase (B) into the VIN project, then moves the A1/A2 tasks from the Frames project into it. Frame-A/B work stays
+// in Frames. Every step is safe to repeat, so a failed gate can simply be passed again.
+async function passFramesGate({ vin, actorEmail }) {
+  const result = { nextPhase: null, moved: 0, failed: [] };
+  try {
+    const token = requireReleaseWrites();
+    const scheduleData = await adminProjectCreatorScheduleData("VIN", {});
+    const pilot = (await writePool.query("select * from hb.release_pilots where vin = $1", [String(vin)])).rows[0];
+    let state = await pilotPlan(writePool, pilot, scheduleData.allScheduleRows);
+    const next = state.plan.find(row => row.target === "vin");
+    if (next && next.status !== "released") {
+      result.nextPhase = next.phase;
+      const { done } = await releaseVinPhase({ vin, phase: next.phase, actorEmail });
+      await done;
+      state = await pilotPlan(writePool, { ...pilot, ...(await writePool.query("select * from hb.release_pilots where vin = $1", [String(vin)])).rows[0] }, scheduleData.allScheduleRows);
+      if (state.plan.find(row => row.phase === next.phase)?.status !== "released") {
+        throw new Error(`Phase ${next.phase} did not finish releasing into the VIN project.`);
+      }
+    }
+    const vinProjectGid = state.vinProjectGid;
+    if (!vinProjectGid) throw new Error("The VIN project does not exist yet.");
+
+    const framesGidByCycle = new Map((await writePool.query("select cycle_label, asana_project_gid from hb.frames_projects")).rows
+      .map(row => [row.cycle_label, row.asana_project_gid]));
+    const releaseByRun = new Map(state.releases.map(row => [row.project_creation_run_id, row]));
+    const sectionByName = new Map((await adminProjectSections(token, vinProjectGid) || [])
+      .map(section => [projectCreatorNormalizeKey(section.name), section.gid]));
+    // Subtasks move with their parent, so only root tasks are moved.
+    for (const task of state.tasks.filter(row => row.asana_task_gid && !row.parent_asana_task_gid)) {
+      const release = releaseByRun.get(task.run_id);
+      const sectionName = release?.phase_name || "A1";
+      try {
+        let sectionGid = sectionByName.get(projectCreatorNormalizeKey(sectionName));
+        if (!sectionGid) {
+          sectionGid = (await adminCreateAsanaSection(token, vinProjectGid, sectionName)).gid;
+          sectionByName.set(projectCreatorNormalizeKey(sectionName), sectionGid);
+        }
+        await adminAsanaRequest(token, `/tasks/${task.asana_task_gid}/addProject`, "POST", { project: vinProjectGid, section: sectionGid });
+        const framesGid = framesGidByCycle.get(release?.cycle_label);
+        if (framesGid) await adminAsanaRequest(token, `/tasks/${task.asana_task_gid}/removeProject`, "POST", { project: framesGid });
+        result.moved += 1;
+      } catch (error) {
+        result.failed.push({ asanaTaskGid: task.asana_task_gid, error: error.message || String(error) });
+      }
+    }
+    if (result.failed.length) throw new Error(`${result.failed.length} of ${result.failed.length + result.moved} A1/A2 tasks could not be moved; pass the gate again to retry.`);
+    await runAdminProjectAsanaMirrorSync("VIN", vinProjectGid).catch(() => {});
+    await writePool.query("update hb.vin_gates set status = 'passed', result = $2 where vin = $1 and gate = 'frames'", [String(vin), JSON.stringify(result)]);
+    console.log("[hawley-frames-gate]", JSON.stringify({ action: "passed", vin, ...result, actor: actorEmail }));
+  } catch (error) {
+    const failure = { ...result, error: error.message || String(error) };
+    await writePool.query("update hb.vin_gates set status = 'failed', result = $2 where vin = $1 and gate = 'frames'", [String(vin), JSON.stringify(failure)]).catch(() => {});
+    console.error("[hawley-frames-gate]", JSON.stringify({ action: "failed", vin, ...failure, actor: actorEmail }));
+  }
+}
+
+async function handleAdminFramesGate(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  requireReleaseWrites();
+  const vin = projectCreatorVinNumber(body.vin);
+  const pilot = (await pool.query("select * from hb.release_pilots where vin = $1", [String(vin)])).rows[0];
+  if (!pilot) throw actionError(`VIN ${vin} is not in the release pilot.`, 404);
+  const scheduleData = await adminProjectCreatorScheduleData("VIN", {});
+  const { framesGate } = await pilotPlan(writePool, pilot, scheduleData.allScheduleRows);
+  if (!framesGate) throw actionError(`VIN ${vin} does not use the Frames stage.`, 409);
+  if (!framesGate.canPass) {
+    throw actionError(framesGate.status === "passed" ? `VIN ${vin} already passed the Frames gate.`
+      : framesGate.status === "passing" ? `VIN ${vin} is passing the Frames gate now.`
+        : !framesGate.released ? "Release Phase A1 and A2 before passing the Frames gate."
+          : `${framesGate.complete} of ${framesGate.total} A1/A2 tasks are complete.`, 409);
+  }
+  await writePool.query(
+    `insert into hb.vin_gates (vin, gate, status, passed_by, passed_at) values ($1, 'frames', 'passing', $2, now())
+     on conflict (vin, gate) do update set status = 'passing', passed_by = excluded.passed_by, passed_at = now()`,
+    [String(vin), actor?.email || ""]
+  );
+  console.log("[hawley-frames-gate]", JSON.stringify({ action: "pass", vin, tasks: framesGate.total, actor: actor?.email || "" }));
+  setImmediate(() => void passFramesGate({ vin, actorEmail: actor?.email || "" }));
+  return { ok: true, queued: true, vin, message: `Passing the Frames gate for VIN ${vin}: releasing the next phase into the VIN project and moving ${framesGate.total} A1/A2 tasks there. Reload in a minute.` };
 }
 
 async function handleAdminPhaseRelease(req) {
@@ -11795,9 +11938,8 @@ async function runAutomaticReleases() {
     if (settings.autoVinPhases) {
       const scheduleData = await adminProjectCreatorScheduleData("VIN", {});
       for (const pilot of (await client.query("select * from hb.release_pilots order by vin::int")).rows) {
-        const vin = Number(pilot.vin);
-        const next = releasePlan(phaseReleaseScheduleRows(scheduleData.allScheduleRows, vin), await phaseReleaseRows(client, vin), { today: todayIso(), leadWorkingDays: pilot.lead_working_days })
-          .find(row => row.status === "due");
+        const { vin, plan } = await pilotPlan(client, pilot, scheduleData.allScheduleRows);
+        const next = plan.find(row => row.status === "due");
         if (!next) continue;
         const { done } = await releaseVinPhase({ vin, phase: next.phase, actorEmail: "automatic release" });
         await done;
@@ -13244,7 +13386,7 @@ async function createAdminAsanaProjectFromPreview(token, preview, projectName, r
       asanaProjectGid: projectGid
     });
   }
-  await adminAddProjectToPortfolio(token, projectGid, preview.projectType);
+  await adminAddProjectToPortfolio(token, projectGid, preview.portfolioType || preview.projectType);
   await adminAttachProjectCustomFields(token, projectGid);
   const registry = await adminCustomFieldRegistry(token, projectGid);
   if (preview.projectType === "VIN") {
@@ -13646,7 +13788,7 @@ async function updateAdminProjectTaskAsanaLink(createdTask, projectGid, projectN
 }
 
 function runAdminProjectAsanaMirrorSync(projectType, projectGid) {
-  const portfolio = projectType === "Fabrication" ? "fabrication" : "vin";
+  const portfolio = projectType === "Fabrication" ? "fabrication" : projectType === "Frames" ? "frames" : projectType === "CNC" ? "cnc" : "vin";
   return runAsanaScopeMirrorSync(portfolio, projectGid);
 }
 
@@ -14194,6 +14336,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/releases/pilot" && req.method === "POST") {
       sendJson(res, 200, await handleAdminReleasePilot(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/releases/frames-gate" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminFramesGate(req));
       return;
     }
 
