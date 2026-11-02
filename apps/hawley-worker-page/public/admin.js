@@ -2095,8 +2095,32 @@
     due: "Due now",
     upcoming: "Upcoming",
     waiting: "Waits for previous phase",
+    gate: "Waits for Frames gate",
     exists: "Already in Asana"
   };
+
+  const FRAMES_GATE_TEXT = {
+    open: "Open: A1/A2 work in progress",
+    ready: "Ready to pass",
+    passing: "Passing…",
+    passed: "Passed",
+    failed: "Failed; pass again to retry"
+  };
+
+  // Frames gate: A1/A2 tasks complete in the Frames project -> Pass releases Phase B into the VIN project and
+  // moves the A1/A2 tasks there.
+  function renderFramesGate(pilot, createEnabled) {
+    const g = pilot.framesGate;
+    const result = g.result || {};
+    return `
+      <div class="notice" style="margin-top: 12px;">
+        <strong>Frames gate:</strong> ${escapeHtml(FRAMES_GATE_TEXT[g.status] || g.status)}
+        · ${escapeHtml(`${formatNumber(g.complete)} of ${formatNumber(g.total)} A1/A2 tasks complete`)}
+        ${g.status === "passed" && result.moved != null ? escapeHtml(` · moved ${result.moved} tasks into the VIN project`) : ""}
+        ${result.error ? `<div class="muted">${escapeHtml(result.error)}</div>` : ""}
+        ${g.canPass && createEnabled ? `<div class="inline-actions" style="margin-top: 8px;"><button class="btn primary" type="button" data-action="release-frames-gate" data-vin="${escapeAttr(pilot.vin)}">${g.status === "failed" ? "Pass again" : "Pass Frames gate"}</button></div>` : ""}
+      </div>`;
+  }
 
   // Phase release pilot: a pilot VIN's Asana project starts with Phase A1 and each next phase is released into it
   // a few working days before its cycle. Manual for the pilot; Fabrication projects are not part of this.
@@ -2113,7 +2137,7 @@
           <span class="pill">${escapeHtml(`${data.pilots.length} pilot VIN${data.pilots.length === 1 ? "" : "s"}`)}</span>
         </div>
         <div class="panel-body">
-          <p class="muted">A pilot VIN's Asana project starts with only its first phase. Each next phase is released into the same project a few working days before that phase's cycle, using the current templates. Releases are manual during the pilot: nothing goes to Asana until you click Release. Existing VIN projects and Fabrication projects are not affected, and Project Creator will refuse full copies for pilot VINs.</p>
+          <p class="muted">Pilot VINs use the Frames stage: Phase A1 and A2 are released into that cycle's Frames project (FR22.26, a section per VIN). When all of them are complete, passing the Frames gate releases Phase B into the VIN project and moves the A1/A2 tasks there; later phases follow into the VIN project a few working days before each cycle, using the current templates. Releases are manual during the pilot: nothing goes to Asana until you click Release. Existing VIN projects and Fabrication projects are not affected, and Project Creator will refuse full copies for pilot VINs.</p>
           ${data.createEnabled ? "" : `<div class="notice risk">Project creation is in preview mode on this server (HAWLEY_ADMIN_PROJECT_CREATE_ENABLED), so releases are disabled.</div>`}
           <div class="cycle-plan-form" style="margin-top: 12px;">
             <label class="field"><span>VIN (no project yet)</span>
@@ -2146,21 +2170,23 @@
             ${anyReleased ? "" : `<button class="btn" type="button" data-action="release-remove" data-vin="${escapeAttr(pilot.vin)}">Remove from pilot</button>`}
           </div>
           ${pilot.lastError ? `<div class="notice risk" style="margin-top: 12px;">Last failure: ${escapeHtml(pilot.lastError)}</div>` : ""}
+          ${pilot.framesGate ? renderFramesGate(pilot, data.createEnabled) : ""}
         </div>
         <div class="panel-body table-wrap">
           <table class="table">
-            <thead><tr><th>Phase</th><th>Cycle</th><th>Cycle starts</th><th>Release due</th><th>Status</th><th>Tasks</th><th></th></tr></thead>
+            <thead><tr><th>Phase</th><th>Goes to</th><th>Cycle</th><th>Cycle starts</th><th>Release due</th><th>Status</th><th>Tasks</th><th></th></tr></thead>
             <tbody>
               ${pilot.plan.map(p => `
                 <tr>
                   <td><strong>${escapeHtml(p.phase)}</strong></td>
+                  <td>${p.projectGid ? `<a href="https://app.asana.com/0/${escapeAttr(p.projectGid)}" target="_blank" rel="noopener">${escapeHtml(p.target === "frames" ? p.projectName : "VIN project")}</a>` : escapeHtml(p.target === "frames" ? `Frames: ${p.projectName}` : "VIN project")}</td>
                   <td>${escapeHtml(p.cycleLabel)}</td>
                   <td>${escapeHtml(formatDate(p.cycleStart))}</td>
                   <td>${escapeHtml(formatDate(p.releaseDue))}</td>
                   <td>${escapeHtml(RELEASE_STATUS_TEXT[p.status] || p.status)}${p.releasedAt ? `<div class="muted">${escapeHtml(new Date(p.releasedAt).toLocaleString())}</div>` : ""}</td>
                   <td>${p.taskCount == null ? "" : escapeHtml(formatNumber(p.taskCount))}</td>
                   <td>${p.canRelease && data.createEnabled ? `<button class="btn ${p.status === "due" ? "primary" : ""}" type="button" data-action="release-now" data-vin="${escapeAttr(pilot.vin)}" data-phase="${escapeAttr(p.phase)}">${p.status === "failed" ? "Retry" : "Release now"}</button>` : ""}</td>
-                </tr>`).join("") || `<tr><td colspan="7">No production rows for this VIN.</td></tr>`}
+                </tr>`).join("") || `<tr><td colspan="8">No production rows for this VIN.</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -2560,6 +2586,16 @@
         state.releasesMessage = result.message;
       } catch (error) {
         state.releasesMessage = error.message || "Could not create the Fabrication project.";
+      }
+      await loadReleases();
+    } else if (action === "release-frames-gate") {
+      const vin = event.target.closest("[data-action]").dataset.vin;
+      if (!window.confirm(`Pass the Frames gate for VIN ${vin}? Hawley releases the next phase into the VIN project and moves the A1/A2 tasks there.`)) return;
+      try {
+        const result = await postJson("/api/admin/releases/frames-gate", { vin });
+        state.releasesMessage = result.message;
+      } catch (error) {
+        state.releasesMessage = error.message || "Could not pass the Frames gate.";
       }
       await loadReleases();
     } else if (action === "release-enroll") {

@@ -55,3 +55,29 @@ test("fabrication projects are due before each upcoming cycle and never re-creat
     ["F23.26", "upcoming", true]
   ]);
 });
+
+test("Frames stage: A1/A2 go to the cycle's Frames project and Phase B waits for the Frames gate", async () => {
+  const { framesGateStatus, framesProjectName } = await import("../phase-release.js");
+  const rows = [
+    { phase_name: "A1", cycle_label: "C22.26", start_date: "2026-11-24" },
+    { phase_name: "A2", cycle_label: "C23.26", start_date: "2026-12-09" },
+    { phase_name: "B", cycle_label: "C24.26", start_date: "2026-12-21" },
+    { phase_name: "C", cycle_label: "C1.27", start_date: "2027-01-04" }
+  ];
+  const released = [{ phase_name: "A1", run_status: "success" }, { phase_name: "A2", run_status: "success" }];
+  let plan = releasePlan(rows, released, { today: "2026-12-18", framesStage: true });
+  assert.deepEqual(plan.map(p => [p.phase, p.target, p.projectName, p.status, p.canRelease]), [
+    ["A1", "frames", "FR22.26", "released", false],
+    ["A2", "frames", "FR23.26", "released", false],
+    ["B", "vin", null, "gate", false],
+    ["C", "vin", null, "waiting", false]
+  ]);
+  assert.deepEqual(framesGateStatus(plan, { total: 30, complete: 29 }).status, "open", "one task still open");
+  assert.deepEqual(framesGateStatus(plan, { total: 30, complete: 30 }), { status: "ready", total: 30, complete: 30, released: true, canPass: true, result: null });
+
+  plan = releasePlan(rows, released, { today: "2026-12-18", framesStage: true, framesGatePassed: true });
+  assert.equal(plan[2].status, "due", "after the gate, Phase B releases as usual");
+  plan = releasePlan(rows, [], { today: "2026-11-02" });
+  assert.deepEqual(plan.map(p => p.target), ["vin", "vin", "vin", "vin"], "without the Frames stage everything stays in the VIN project");
+  assert.equal(framesProjectName("C1.27"), "FR1.27");
+});
