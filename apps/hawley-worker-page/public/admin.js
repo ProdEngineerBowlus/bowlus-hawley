@@ -2498,7 +2498,7 @@
                   <td>${escapeHtml(stage.portfolio)}</td>
                   <td><input type="text" class="table-input" value="${escapeAttr(stage.project_name_pattern)}" data-stage-pattern="${escapeAttr(stage.stage_key)}" /></td>
                   <td><input type="text" class="table-input" value="${escapeAttr(list(stage.phases))}" data-stage-phases="${escapeAttr(stage.stage_key)}" /></td>
-                  <td>${escapeHtml(list(stage.work_areas))}</td>
+                  <td>${escapeHtml(list(stage.work_areas))}<label class="field" style="margin-top: 6px;"><span>From cycle</span><input type="text" class="table-input" style="width: 7em;" placeholder="C21.26" value="${escapeAttr(stage.starts_from_cycle || "")}" data-stage-start="${escapeAttr(stage.stage_key)}" /></label></td>
                   <td>${stage.moves_to_vin ? "Its phases, at the gate" : ""}</td>
                   <td><label class="production-checks"><input type="checkbox" data-stage-active="${escapeAttr(stage.stage_key)}" ${stage.active ? "checked" : ""} /> On (pilot)</label></td>
                   <td><button class="btn" type="button" data-action="workflow-stage-save" data-stage="${escapeAttr(stage.stage_key)}">Save</button></td>
@@ -2515,7 +2515,7 @@
                 </tr>`).join("")}
             </tbody>
           </table>
-          <p class="muted">In project names, {cycle} becomes the cycle number (FR{cycle} → FR22.26), {vin} the VIN and {model} its model. Turning Frames off sends pilot VINs' A1/A2 back to the VIN project.</p>
+          <p class="muted">In project names, {cycle} becomes the cycle number (FR{cycle} → FR22.26), {vin} the VIN and {model} its model. "From cycle" is the first cycle whose Frame work goes into the Frames project instead of the Fabrication project; set it before that cycle's projects are created. Turning Frames off sends pilot VINs' A1/A2 back to the VIN project.</p>
         </div>
         <div class="panel-body">
           ${workflow.gates.map(gate => `
@@ -2954,6 +2954,7 @@
           stageKey: key,
           phases: root.querySelector(`[data-stage-phases="${key}"]`)?.value || "",
           projectNamePattern: root.querySelector(`[data-stage-pattern="${key}"]`)?.value || "",
+          startsFromCycle: root.querySelector(`[data-stage-start="${key}"]`)?.value || "",
           active: Boolean(root.querySelector(`[data-stage-active="${key}"]`)?.checked)
         });
         state.releasesMessage = "Stage saved.";
