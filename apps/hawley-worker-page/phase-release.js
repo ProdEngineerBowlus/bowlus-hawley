@@ -12,6 +12,42 @@ export function releaseDueDate(cycleStart, leadWorkingDays) {
   return before[before.length - lead] || before[0] || cycleStart;
 }
 
+function runStatus(release) {
+  return release.run_status === "success" ? "released" : release.run_status === "failed" ? "failed" : "releasing";
+}
+
+// Fabrication: one full project per cycle (F21.26), released a few working days before the cycle starts.
+// cycles: { cycle_key, cycle_label, start_date }; releases: hb.fabrication_releases rows with run_status;
+// existingProjectNames: projects already in Asana/Hawley (made by hand or earlier), which are never re-created.
+export function fabricationReleasePlan(cycles, releases, { today, leadWorkingDays = 2, existingProjectNames = new Set(), projectNameFor, limit = 4 } = {}) {
+  const releaseByCycle = new Map((releases || []).map(row => [row.cycle_key, row]));
+  return [...(cycles || [])]
+    .filter(cycle => cycle.start_date && String(cycle.start_date).slice(0, 10) >= today)
+    .sort((a, b) => String(a.start_date).localeCompare(String(b.start_date)))
+    .slice(0, limit)
+    .map(cycle => {
+      const cycleStart = String(cycle.start_date).slice(0, 10);
+      const due = releaseDueDate(cycleStart, leadWorkingDays);
+      const projectName = projectNameFor(cycle);
+      const release = releaseByCycle.get(cycle.cycle_key) || null;
+      const status = release ? runStatus(release)
+        : existingProjectNames.has(projectName) ? "exists"
+          : due && today >= due ? "due" : "upcoming";
+      return {
+        cycleKey: cycle.cycle_key,
+        cycleLabel: cycle.cycle_label || cycle.cycle_key,
+        projectName,
+        cycleStart,
+        releaseDue: due,
+        status,
+        canRelease: status === "due" || status === "upcoming" || status === "failed",
+        taskCount: release ? Number(release.task_count || 0) : null,
+        releasedAt: release?.released_at || null,
+        releasedBy: release?.released_by || ""
+      };
+    });
+}
+
 // scheduleRows: { phase_name, production_record_id, cycle_label, start_date } for one VIN.
 // releases: hb.phase_releases rows joined with their run status ({ phase_name, run_status, task_count, ... }).
 export function releasePlan(scheduleRows, releases, { today, leadWorkingDays = 2 } = {}) {
