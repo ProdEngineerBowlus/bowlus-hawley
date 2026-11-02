@@ -2007,7 +2007,7 @@
         <div class="panel-body">
           <p class="muted">Instead of duplicating a task for a second person, the lead keeps one assignee and adds teammates to the task's <strong>Helpers</strong> field in Asana. Helpers see the task on their worker page and log their own time; only the assignee completes it. Helper tasks appear only for the trial workers below until enabled for everyone.</p>
           <div class="inline-actions">
-            <button class="btn" type="button" data-action="team-tasks-setup">${t.helpersFieldGid ? "Add Helpers field to open VIN projects" : "Create Helpers field in Asana"}</button>
+            <button class="btn" type="button" data-action="team-tasks-setup">${t.helpersFieldGid ? "Add Helpers field to open VIN and Fabrication projects" : "Create Helpers field in Asana"}</button>
           </div>
           <label class="field" style="margin-top: 12px;"><span>Trial workers (emails, comma separated)</span><input type="text" class="table-input" data-team-trial value="${escapeAttr((t.trialWorkerEmails || []).join(", "))}" /></label>
           <label class="field production-checks"><span>Rollout</span><span><input type="checkbox" data-team-all ${t.enabledForAll ? "checked" : ""} /> Enabled for everyone</span></label>
@@ -2397,7 +2397,7 @@
       render();
       try {
         const result = await postJson("/api/admin/team-tasks/setup", {});
-        state.teamTasksMessage = `Helpers field ready; added to ${result.attached} of ${result.projects} open VIN projects${result.failed.length ? ` (${result.failed.length} failed)` : ""}.`;
+        state.teamTasksMessage = `Helpers field ready; added to ${result.attached} of ${result.projects} open VIN and Fabrication projects${result.failed.length ? ` (${result.failed.length} failed)` : ""}.`;
         state.teamTasks = await fetchJson("/api/admin/team-tasks");
       } catch (error) {
         state.teamTasksMessage = error.message || "Could not set up the Helpers field.";
