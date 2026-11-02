@@ -84,3 +84,11 @@ test("Frames stage: A1/A2 go to the cycle's Frames project and Phase B waits for
   assert.deepEqual(plan.map(p => p.target), ["vin", "vin", "vin", "vin"], "without the Frames stage everything stays in the VIN project");
   assert.equal(framesProjectName("C1.27"), "FR1.27");
 });
+
+test("cycle order compares labels and cycle options across years", async () => {
+  const { cycleOrder } = await import("../phase-release.js");
+  assert.equal(cycleOrder("C22.26"), 202622);
+  assert.ok(cycleOrder({ cycle_number: 21, cycle_year: 2026 }) < cycleOrder("C22.26"), "C21 keeps Frame work in Fabrication");
+  assert.ok(cycleOrder({ cycle_number: 1, cycle_year: 2027 }) > cycleOrder("C22.26"), "C1.27 is after C22.26");
+  assert.equal(cycleOrder("next"), null);
+});

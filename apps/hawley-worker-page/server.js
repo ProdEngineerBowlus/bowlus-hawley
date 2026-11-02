@@ -11,7 +11,7 @@ import { buildTaskTimeTable, saveTaskMappingRules, taskMappingGroups, taskTimeCo
 import { HB_BUILD_LOCK_KEY, HB_BUILD_LOCK_NAMESPACE } from "../postgres-sync/src/hb-build-transaction.js";
 import { listTemplates, saveTemplateVersion, templateDetail, templateEditorOptions } from "../postgres-sync/src/template-editor.js";
 import { parseTrialEmails } from "../postgres-sync/src/team-tasks.js";
-import { fabricationReleasePlan, framesGateStatus, releasePlan } from "./phase-release.js";
+import { cycleOrder, fabricationReleasePlan, framesGateStatus, releasePlan, stageProjectName } from "./phase-release.js";
 import { HANDOFF_ISSUES, checkDeliver, checkPack, checkReceive, handoffLabel, summarizeLines } from "./handoffs.js";
 import { ASANA_CYCLE_FIELD_GID, addCycleOptions, pushCycleField } from "./asana-cycle-push.js";
 import { buildCyclePreview, cyclePlannerOverview, pendingAsanaPushes, productionScheduleRows, publishCyclePlan, recordAsanaPushResults } from "./cycle-planner.js";
@@ -8953,10 +8953,14 @@ async function adminProjectCreatorPreview(options) {
 
   // Never trust the caller's selected rows alone: an old browser payload can
   // otherwise seed a new Fabrication project with work from an adjacent cycle.
+  const framesWorkAreas = projectType === "Fabrication" ? await framesWorkAreasForCycle(selectedCycle) : [];
   const targetScheduleRows = projectType === "Fabrication"
     ? selectedCycleRows.filter(row =>
       projectCreatorScheduleMatchesCycle(row, selectedCycle) &&
-      projectCreatorScheduleIsFabrication(row)
+      projectCreatorScheduleIsFabrication(row) &&
+      (options?.phaseNames
+        ? options.phaseNames.includes(projectCreatorPhaseName(row))
+        : !framesWorkAreas.includes(projectCreatorPhaseName(row)))
     )
     : allScheduleRows.filter(row => projectCreatorVinNumber(row.vin) === selectedVin)
       .filter(row => !options?.phaseNames || options.phaseNames.includes(projectCreatorPhaseName(row)));
@@ -11515,6 +11519,114 @@ async function handleAdminWorkflowGate(req) {
   return { ok: true, workflow: await workflowDefinition(writePool) };
 }
 
+// Frame-A/B (the Frames stage's work areas) go to the Frames project from the stage's start cycle on (C22.26);
+// earlier cycles keep them in the Fabrication project.
+async function framesWorkAreasForCycle(cycle, client = pool) {
+  const frames = (await workflowDefinition(client)).stage("frames");
+  if (!frames?.active || !frames.starts_from_cycle || !(frames.work_areas || []).length) return [];
+  const start = cycleOrder(frames.starts_from_cycle);
+  const order = cycleOrder(cycle);
+  return start && order && order >= start ? frames.work_areas : [];
+}
+
+async function framesWorkReleaseRows(client = pool) {
+  return (await client.query(
+    `select r.*, run.status as run_status, run.error_message
+       from hb.frames_work_releases r
+       left join hb.project_creation_runs run on run.project_creation_run_id::text = r.project_creation_run_id`
+  )).rows;
+}
+
+// Frames projects: each cycle's Frame-A/B work, from the Frames start cycle on, released like a Fabrication project.
+async function framesWorkPlan({ client = pool } = {}) {
+  const [scheduleData, releases, settings, workflow] = await Promise.all([
+    adminProjectCreatorScheduleData("Fabrication", {}),
+    framesWorkReleaseRows(client),
+    releaseSettings(client),
+    workflowDefinition(client)
+  ]);
+  const frames = workflow.stage("frames");
+  const cycles = [];
+  for (const cycle of scheduleData.cycles) {
+    const areas = await framesWorkAreasForCycle(cycle, client);
+    if (areas.length && scheduleData.allScheduleRows.some(row => projectCreatorScheduleMatchesCycle(row, cycle) && areas.includes(projectCreatorPhaseName(row)))) cycles.push(cycle);
+  }
+  return {
+    cycles,
+    workAreas: frames?.work_areas || [],
+    plan: fabricationReleasePlan(cycles, releases, {
+      today: todayIso(),
+      leadWorkingDays: settings.fabricationLeadWorkingDays,
+      projectNameFor: cycle => stageProjectName(frames?.project_name_pattern || "FR{cycle}", { cycleLabel: cycle.cycle_key })
+    }),
+    lastError: releases.find(row => row.run_status === "failed")?.error_message || ""
+  };
+}
+
+async function releaseFramesWorkCycle({ cycleKey, actorEmail = "" }) {
+  const token = requireReleaseWrites();
+  const { cycles, plan, workAreas } = await framesWorkPlan({ client: writePool });
+  const item = plan.find(row => row.cycleKey === cycleKey);
+  const cycle = cycles.find(row => row.cycle_key === cycleKey);
+  if (!item || !cycle) throw actionError(`Cycle ${cycleKey} has no upcoming Frames work.`, 404);
+  if (!item.canRelease) throw actionError(`Frames work for ${item.projectName} is ${item.status}.`, 409);
+  const scheduleData = await adminProjectCreatorScheduleData("Fabrication", cycleIdentity({
+    cycleRecordId: cycle.cycle_record_id,
+    cycleNumber: cycle.cycle_number,
+    cycleYear: cycle.cycle_year,
+    cycleLabel: cycle.cycle_key
+  }));
+  if (scheduleData.selectedCycle?.cycle_key !== cycleKey) throw actionError(`Could not select cycle ${cycleKey}.`, 409);
+  const preview = await adminProjectCreatorPreview({
+    projectType: "Fabrication",
+    cycleNumber: Number(scheduleData.selectedCycle?.cycle_number || 0) || null,
+    selectedCycle: scheduleData.selectedCycle,
+    selectedVin: null,
+    projectName: item.projectName,
+    allScheduleRows: scheduleData.allScheduleRows,
+    selectedCycleRows: scheduleData.selectedCycleRows,
+    phaseNames: workAreas
+  });
+  if (!preview?.tasks?.length) throw actionError(`No Frame-A/B tasks for ${cycleKey}.`, 409, { skipped: preview?.skipped || {} });
+  preview.portfolioType = "Frames";
+  const previous = (await framesWorkReleaseRows(writePool)).find(row => row.cycle_key === cycleKey);
+  const runId = previous?.project_creation_run_id || crypto.randomUUID();
+  if (previous) {
+    await writePool.query("update hb.project_creation_runs set status = 'started', error_message = null, completed_at = null where project_creation_run_id::text = $1", [runId]);
+  } else {
+    if (preview.existingSyncedTasks || preview.existingLegacyTasks || preview.existingNativePendingTasks) throw actionError(`Frames work for ${cycleKey} already has tasks.`, 409);
+    await insertAdminProjectCreationRows(preview, runId, item.projectName, { email: actorEmail }, { cycleKey, framesWorkRelease: true });
+    await writePool.query(
+      `insert into hb.frames_work_releases (cycle_key, project_name, project_creation_run_id, task_count, released_by) values ($1, $2, $3, $4, $5)`,
+      [cycleKey, item.projectName, runId, preview.tasks.length, actorEmail]
+    );
+  }
+  // Same project as the pilot VINs' A1/A2 for this cycle (hb.frames_projects), created here if it does not exist yet.
+  const existingProjectGid = (await writePool.query("select asana_project_gid from hb.frames_projects where cycle_label = $1", [cycleKey])).rows[0]?.asana_project_gid
+    || (await writePool.query("select asana_project_gid from hb.project_creation_runs where project_creation_run_id::text = $1", [runId])).rows[0]?.asana_project_gid
+    || "";
+  console.log("[hawley-frames-work]", JSON.stringify({ action: previous ? "retry" : "release", cycleKey, projectName: item.projectName, runId, tasks: preview.tasks.length, existingProjectGid, actor: actorEmail }));
+  const done = runAdminProjectCreation({ token, preview, projectName: item.projectName, projectType: "Frames", runId, existingProjectGid })
+    .catch(() => {})
+    .finally(() => writePool.query(
+      `insert into hb.frames_projects (cycle_label, project_name, asana_project_gid)
+       select $1, $2, nullif(run.asana_project_gid, '') from hb.project_creation_runs run where run.project_creation_run_id::text = $3
+       on conflict (cycle_label) do update set asana_project_gid = coalesce(hb.frames_projects.asana_project_gid, excluded.asana_project_gid)`,
+      [cycleKey, item.projectName, runId]
+    ).catch(() => {}));
+  return {
+    done,
+    result: { ok: true, queued: true, cycleKey, tasks: preview.tasks.length, message: `Adding ${preview.tasks.length} Frame-A/B tasks to ${item.projectName}. Reload in a minute to see them.` }
+  };
+}
+
+async function handleAdminFramesWorkRelease(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  return (await releaseFramesWorkCycle({ cycleKey: String(body.cycleKey || "").trim(), actorEmail: actor?.email || "" })).result;
+}
+
 async function framesGateRow(client, vin) {
   return (await client.query("select * from hb.vin_gates where vin = $1 and gate = 'frames'", [String(vin)])).rows[0] || null;
 }
@@ -11602,6 +11714,14 @@ async function handleAdminReleases(req) {
   } catch (error) {
     fabrication = { plan: [], lastError: error.message || String(error) };
   }
+  let framesWork;
+  try {
+    const { plan, lastError, workAreas } = await framesWorkPlan();
+    const projects = new Map((await pool.query("select * from hb.frames_projects")).rows.map(row => [row.cycle_label, row.asana_project_gid]));
+    framesWork = { plan: plan.map(row => ({ ...row, projectGid: projects.get(row.cycleKey) || "" })), lastError, workAreas };
+  } catch (error) {
+    framesWork = { plan: [], lastError: error.message || String(error), workAreas: [] };
+  }
   const workflow = await workflowDefinition();
   return {
     today,
@@ -11611,7 +11731,8 @@ async function handleAdminReleases(req) {
     autoRelease: { ...autoReleaseState, intervalMinutes: Math.round(AUTO_RELEASE_INTERVAL_MS / 60000) },
     pilots,
     candidates,
-    fabrication
+    fabrication,
+    framesWork
   };
 }
 
@@ -12039,6 +12160,11 @@ async function runAutomaticReleases() {
       released.push(`VIN ${vin} Frames gate`);
     }
     if (settings.autoFabrication) {
+      for (const item of (await framesWorkPlan({ client })).plan.filter(row => row.status === "due")) {
+        const { done } = await releaseFramesWorkCycle({ cycleKey: item.cycleKey, actorEmail: "automatic release" });
+        await done;
+        released.push(`${item.projectName} Frame work`);
+      }
       for (const item of (await fabricationPlan({ client })).plan.filter(row => row.status === "due")) {
         const { done } = await releaseFabricationCycle({ cycleKey: item.cycleKey, actorEmail: "automatic release" });
         await done;
@@ -14720,6 +14846,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/releases/frames-gate" && req.method === "POST") {
       sendJson(res, 200, await handleAdminFramesGate(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/releases/frames-work" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminFramesWorkRelease(req));
       return;
     }
 

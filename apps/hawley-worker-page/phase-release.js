@@ -59,6 +59,17 @@ export function stageProjectName(pattern, { cycleLabel = "", vin = "", model = "
   return String(pattern || "").replaceAll("{cycle}", cycle).replaceAll("{vin}", String(vin)).replaceAll("{model}", String(model)).trim();
 }
 
+// Cycle order for labels like "C22.26" or cycle options with cycle_number / cycle_year (2026 C22 -> 202622).
+export function cycleOrder(cycle) {
+  if (typeof cycle === "string") {
+    const match = /^C?(\d+)\.(\d{2})$/i.exec(cycle.trim());
+    return match ? (2000 + Number(match[2])) * 100 + Number(match[1]) : null;
+  }
+  const number = Number(cycle?.cycle_number);
+  const year = Number(cycle?.cycle_year);
+  return number && year ? year * 100 + number : null;
+}
+
 export function framesProjectName(cycleLabel, pattern = "FR{cycle}") {
   return stageProjectName(pattern, { cycleLabel });
 }
