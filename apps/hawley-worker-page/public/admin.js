@@ -2118,6 +2118,8 @@
         · ${escapeHtml(`${formatNumber(g.complete)} of ${formatNumber(g.total)} A1/A2 tasks complete`)}
         ${g.status === "passed" && result.moved != null ? escapeHtml(` · moved ${result.moved} tasks into the VIN project`) : ""}
         ${result.error ? `<div class="muted">${escapeHtml(result.error)}</div>` : ""}
+        ${g.canPass && g.checklist.length ? `<div style="margin-top: 8px;">${g.checklist.map((item, index) => `<label class="production-checks" style="display: block;"><input type="checkbox" data-gate-check="${escapeAttr(pilot.vin)}" data-gate-item="${index}" /> ${escapeHtml(item)}</label>`).join("")}</div>` : ""}
+        ${g.status === "passed" && result.checklist?.length ? `<div class="muted">Checked: ${escapeHtml(result.checklist.join("; "))}</div>` : ""}
         ${g.canPass && createEnabled ? `<div class="inline-actions" style="margin-top: 8px;"><button class="btn primary" type="button" data-action="release-frames-gate" data-vin="${escapeAttr(pilot.vin)}">${g.status === "failed" ? "Pass again" : "Pass Frames gate"}</button></div>` : ""}
       </div>`;
   }
@@ -2236,7 +2238,60 @@
           </table>
         </div>
       </section>`;
-    return intro + automatic + pilots + fabrication;
+    return intro + renderWorkflow(data.workflow) + automatic + pilots + fabrication;
+  }
+
+  // Stages and gates (hb.workflow_stages / hb.workflow_gates). Only the parts already wired into releases are editable;
+  // the rest are shown as planned until the handoff engine uses them (issue 49).
+  const WIRED_STAGES = new Set(["frames"]);
+  function renderWorkflow(workflow) {
+    if (!workflow) return "";
+    const list = value => (value || []).join(", ");
+    return `
+      <section class="panel">
+        <div class="panel-header">
+          <h3 class="panel-title">Workflow</h3>
+          <span class="pill">Stages and gates</span>
+        </div>
+        <div class="panel-body table-wrap">
+          <table class="table">
+            <thead><tr><th>Stage</th><th>Portfolio</th><th>Project name</th><th>Phases</th><th>Work areas</th><th>Into VIN build</th><th>State</th><th></th></tr></thead>
+            <tbody>
+              ${workflow.stages.map(stage => WIRED_STAGES.has(stage.stage_key) ? `
+                <tr>
+                  <td><strong>${escapeHtml(stage.name)}</strong><div class="muted">${escapeHtml(stage.notes)}</div></td>
+                  <td>${escapeHtml(stage.portfolio)}</td>
+                  <td><input type="text" class="table-input" value="${escapeAttr(stage.project_name_pattern)}" data-stage-pattern="${escapeAttr(stage.stage_key)}" /></td>
+                  <td><input type="text" class="table-input" value="${escapeAttr(list(stage.phases))}" data-stage-phases="${escapeAttr(stage.stage_key)}" /></td>
+                  <td>${escapeHtml(list(stage.work_areas))}</td>
+                  <td>${stage.moves_to_vin ? "Phases move at gate" : ""}</td>
+                  <td><label class="production-checks"><input type="checkbox" data-stage-active="${escapeAttr(stage.stage_key)}" ${stage.active ? "checked" : ""} /> On</label></td>
+                  <td><button class="btn" type="button" data-action="workflow-stage-save" data-stage="${escapeAttr(stage.stage_key)}">Save</button></td>
+                </tr>` : `
+                <tr>
+                  <td><strong>${escapeHtml(stage.name)}</strong><div class="muted">${escapeHtml(stage.notes)}</div></td>
+                  <td>${escapeHtml(stage.portfolio)}</td>
+                  <td>${escapeHtml(stage.project_name_pattern)}</td>
+                  <td>${escapeHtml(list(stage.phases))}</td>
+                  <td>${escapeHtml(list(stage.work_areas))}</td>
+                  <td>${stage.moves_to_vin ? "Yes" : ""}</td>
+                  <td>${escapeHtml(stage.stage_key === "fabrication" || stage.stage_key === "installation" ? "In use" : "Planned")}</td>
+                  <td></td>
+                </tr>`).join("")}
+            </tbody>
+          </table>
+          <p class="muted">Project names use {cycle} (22.26), {vin} and {model}. Turning Frames off sends pilot VINs' A1/A2 to the VIN project again.</p>
+        </div>
+        <div class="panel-body">
+          ${workflow.gates.map(gate => `
+            <div class="cycle-plan-form" style="margin-bottom: 12px;">
+              <div class="field"><span>Gate</span><strong>${escapeHtml(gate.name)}</strong><div class="muted">${escapeHtml(`${gate.from_stage} → ${gate.to_stage} · per ${gate.scope.toUpperCase() === "VIN" ? "VIN" : gate.scope} · all tasks complete · passed by ${gate.pass_role}`)}</div></div>
+              <label class="field"><span>Checklist (one check per line; all must be ticked to pass)</span><textarea class="table-input" rows="3" data-gate-checklist="${escapeAttr(gate.gate_key)}">${escapeHtml((gate.checklist || []).join("\n"))}</textarea></label>
+              <label class="field production-checks"><span>State</span><span><input type="checkbox" data-gate-active="${escapeAttr(gate.gate_key)}" ${gate.active ? "checked" : ""} /> On</span></label>
+              <div class="inline-actions"><button class="btn" type="button" data-action="workflow-gate-save" data-gate="${escapeAttr(gate.gate_key)}">Save gate</button></div>
+            </div>`).join("")}
+        </div>
+      </section>`;
   }
 
   async function loadTemplates() {
@@ -2588,11 +2643,46 @@
         state.releasesMessage = error.message || "Could not create the Fabrication project.";
       }
       await loadReleases();
+    } else if (action === "workflow-stage-save") {
+      const key = event.target.closest("[data-action]").dataset.stage;
+      try {
+        await postJson("/api/admin/workflow/stage", {
+          stageKey: key,
+          phases: root.querySelector(`[data-stage-phases="${key}"]`)?.value || "",
+          projectNamePattern: root.querySelector(`[data-stage-pattern="${key}"]`)?.value || "",
+          active: Boolean(root.querySelector(`[data-stage-active="${key}"]`)?.checked)
+        });
+        state.releasesMessage = "Stage saved.";
+      } catch (error) {
+        state.releasesMessage = error.message || "Could not save the stage.";
+      }
+      await loadReleases();
+    } else if (action === "workflow-gate-save") {
+      const key = event.target.closest("[data-action]").dataset.gate;
+      try {
+        await postJson("/api/admin/workflow/gate", {
+          gateKey: key,
+          checklist: root.querySelector(`[data-gate-checklist="${key}"]`)?.value || "",
+          active: Boolean(root.querySelector(`[data-gate-active="${key}"]`)?.checked)
+        });
+        state.releasesMessage = "Gate saved.";
+      } catch (error) {
+        state.releasesMessage = error.message || "Could not save the gate.";
+      }
+      await loadReleases();
     } else if (action === "release-frames-gate") {
       const vin = event.target.closest("[data-action]").dataset.vin;
+      const pilot = (state.releases?.pilots || []).find(p => String(p.vin) === String(vin));
+      const checklist = pilot?.framesGate?.checklist || [];
+      const ticked = [...root.querySelectorAll(`[data-gate-check="${vin}"]`)].filter(input => input.checked).map(input => checklist[Number(input.dataset.gateItem)]);
+      if (ticked.length < checklist.length) {
+        state.releasesMessage = "Tick every gate check before passing the Frames gate.";
+        render();
+        return;
+      }
       if (!window.confirm(`Pass the Frames gate for VIN ${vin}? Hawley releases the next phase into the VIN project and moves the A1/A2 tasks there.`)) return;
       try {
-        const result = await postJson("/api/admin/releases/frames-gate", { vin });
+        const result = await postJson("/api/admin/releases/frames-gate", { vin, checked: ticked });
         state.releasesMessage = result.message;
       } catch (error) {
         state.releasesMessage = error.message || "Could not pass the Frames gate.";
