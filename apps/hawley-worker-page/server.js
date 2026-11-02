@@ -11492,14 +11492,18 @@ async function handleAdminWorkflowStage(req) {
   const current = (await pool.query("select * from hb.workflow_stages where stage_key = $1", [key])).rows[0];
   if (!current) throw actionError(`Unknown stage ${key}.`, 404);
   const pattern = String(body.projectNamePattern ?? current.project_name_pattern).trim();
+  // From which cycle the stage's work areas (Frame-A/B) leave the Fabrication project for this stage's project.
+  const startsFromCycle = String(body.startsFromCycle ?? current.starts_from_cycle ?? "").trim().toUpperCase();
+  if (startsFromCycle && !/^C\d+\.\d{2}$/.test(startsFromCycle)) throw actionError("Start cycle must look like C21.26.", 400);
   if (current.project_scope === "cycle" && pattern && !pattern.includes("{cycle}")) throw actionError("A per-cycle project name must include {cycle}.", 400);
   await writePool.query(
-    `update hb.workflow_stages set phases = $2, work_areas = $3, project_name_pattern = $4, active = $5, notes = $6, updated_by = $7, updated_at = now()
+    `update hb.workflow_stages set phases = $2, work_areas = $3, project_name_pattern = $4, active = $5, notes = $6, updated_by = $7,
+            starts_from_cycle = $8, updated_at = now()
       where stage_key = $1`,
     [key, cleanList(body.phases ?? current.phases), cleanList(body.workAreas ?? current.work_areas), pattern,
-      body.active === undefined ? current.active : body.active === true, String(body.notes ?? current.notes), actor?.email || ""]
+      body.active === undefined ? current.active : body.active === true, String(body.notes ?? current.notes), actor?.email || "", startsFromCycle]
   );
-  console.log("[hawley-workflow]", JSON.stringify({ action: "stage", key, actor: actor?.email || "" }));
+  console.log("[hawley-workflow]", JSON.stringify({ action: "stage", key, startsFromCycle, actor: actor?.email || "" }));
   return { ok: true, workflow: await workflowDefinition(writePool) };
 }
 
