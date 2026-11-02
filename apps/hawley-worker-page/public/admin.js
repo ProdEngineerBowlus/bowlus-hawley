@@ -62,6 +62,11 @@
     releases: null,
     releasesLoading: false,
     releasesMessage: "",
+    handoffs: null,
+    handoffsLoading: false,
+    handoffsMessage: "",
+    handoffsFilters: { cycle: "", type: "" },
+    handoffDetail: null,
     taskMapping: null,
     taskMappingLoading: false,
     taskMappingMessage: "",
@@ -652,13 +657,14 @@
         </div>
         <nav class="nav-tabs" aria-label="Admin views">
           <button class="nav-tab ${state.activeView === "dashboard" ? "active" : ""}" type="button" data-view="dashboard">Dashboard</button>
-          <button class="nav-tab ${state.activeView === "project" ? "active" : ""}" type="button" data-view="project">Project Creator</button>
           <button class="nav-tab ${state.activeView === "cycles" ? "active" : ""}" type="button" data-view="cycles">Cycles</button>
           <button class="nav-tab ${state.activeView === "production" ? "active" : ""}" type="button" data-view="production">Production</button>
           <button class="nav-tab ${state.activeView === "task-times" ? "active" : ""}" type="button" data-view="task-times">Task Times</button>
           <button class="nav-tab ${state.activeView === "task-mapping" ? "active" : ""}" type="button" data-view="task-mapping">Task Review</button>
           <button class="nav-tab ${state.activeView === "templates" ? "active" : ""}" type="button" data-view="templates">Templates</button>
           <button class="nav-tab ${state.activeView === "releases" ? "active" : ""}" type="button" data-view="releases">Releases</button>
+          <button class="nav-tab ${state.activeView === "handoffs" ? "active" : ""}" type="button" data-view="handoffs">Handoffs</button>
+          <button class="nav-tab ${state.activeView === "project" ? "active" : ""}" type="button" data-view="project" title="Full-copy project creation. Still needed for VINs outside the release pilot until the new system is approved.">Project Creator (old)</button>
         </nav>
         <div class="top-actions">
           <a class="btn ghost" href="/">Live app</a>
@@ -2075,6 +2081,163 @@
     `;
   }
 
+  async function loadHandoffs() {
+    state.handoffsLoading = true;
+    render();
+    try {
+      const f = state.handoffsFilters;
+      state.handoffs = await fetchJson(`/api/admin/handoffs?${new URLSearchParams({ cycle: f.cycle, type: f.type })}`);
+      if (state.handoffDetail) state.handoffDetail = await fetchJson(`/api/admin/handoffs/detail?id=${state.handoffDetail.handoff.handoff_id}`);
+    } catch (error) {
+      state.handoffsMessage = error.message || "Could not load handoffs.";
+    } finally {
+      state.handoffsLoading = false;
+      render();
+    }
+  }
+
+  const HANDOFF_STATUS_TEXT = { open: "Open", packing: "Packing", delivered: "Delivered", received: "Received", short: "Short" };
+  const HANDOFF_ISSUE_TEXT = { "": "", missing: "Missing", damaged: "Damaged", wrong: "Wrong part", remake: "Remake", taken: "Taken off cart" };
+  const qtyText = value => (value === null || value === undefined ? "" : formatNumber(Number(value)));
+
+  // Handoffs between departments (issue 49): pack at the source, deliver, receive at the destination (the gate).
+  function renderHandoffs() {
+    const data = state.handoffs;
+    const message = state.handoffsMessage ? `<div class="notice" style="margin-top: 12px;">${escapeHtml(state.handoffsMessage)}</div>` : "";
+    if (!data) return `<section class="panel"><div class="panel-body">${state.handoffsLoading ? "Loading…" : "No handoff data."}${message}</div></section>`;
+    const f = state.handoffsFilters;
+    const activeTypes = data.types.filter(type => type.active);
+    const typeName = key => data.types.find(type => type.type_key === key)?.name || key;
+    const types = `
+      <section class="panel">
+        <div class="panel-header"><h3 class="panel-title">Handoff types</h3><span class="pill">${escapeHtml(`${activeTypes.length} of ${data.types.length} on`)}</span></div>
+        <div class="panel-body">
+          <p class="muted">A handoff is a cart, box or frame moving between departments with a list of what should be on it. The source packs it, it is delivered, and the receiving department counts it and ticks the checks: that is the gate. Anything missing, damaged, wrong, taken off the cart or needing a remake is recorded with who and when. Contents are typed in for now; CNC carts will fill from the parts list next.</p>
+          ${data.types.map(type => `
+            <div class="cycle-plan-form" style="margin-bottom: 12px;">
+              <div class="field"><span>${escapeHtml(type.name)}</span><div class="muted">${escapeHtml(`${type.from_stage} → ${type.to_stage} · per ${type.scope === "cycle_phase" ? "cycle and phase" : type.scope === "vin" ? "VIN" : "cycle"} · ${type.notes}`)}</div></div>
+              <label class="field"><span>Receiving checks (one per line)</span><textarea class="table-input" rows="2" data-handoff-type-checklist="${escapeAttr(type.type_key)}">${escapeHtml((type.checklist || []).join("\n"))}</textarea></label>
+              <label class="field production-checks"><span>State</span><span><input type="checkbox" data-handoff-type-active="${escapeAttr(type.type_key)}" ${type.active ? "checked" : ""} /> On</span></label>
+              <div class="inline-actions"><button class="btn" type="button" data-action="handoff-type-save" data-type="${escapeAttr(type.type_key)}">Save</button></div>
+            </div>`).join("")}
+        </div>
+      </section>`;
+    const create = `
+      <section class="panel">
+        <div class="panel-header"><h3 class="panel-title">New handoff</h3></div>
+        <div class="panel-body">
+          ${activeTypes.length ? `
+          <div class="cycle-plan-form">
+            <label class="field"><span>Type</span><select data-handoff-new="type">${activeTypes.map(type => `<option value="${escapeAttr(type.type_key)}">${escapeHtml(type.name)}</option>`).join("")}</select></label>
+            <label class="field"><span>Cycle</span><select data-handoff-new="cycle"><option value="">—</option>${data.cycles.map(c => `<option value="${escapeAttr(c.cycle_label)}">${escapeHtml(`${c.cycle_label} (${formatDate(c.start_date)})`)}</option>`).join("")}</select></label>
+            <label class="field"><span>Phase (phase carts)</span><input type="text" data-handoff-new="phase" placeholder="B" /></label>
+            <label class="field"><span>VIN (frames)</span><input type="text" data-handoff-new="vin" placeholder="337" /></label>
+          </div>
+          <label class="field"><span>Contents: one item per line, "name, quantity"</span><textarea class="table-input" rows="5" data-handoff-new="lines" placeholder="Rib 12 - Frontier, 4&#10;Skin panel L, 2"></textarea></label>
+          <div class="inline-actions"><button class="btn primary" type="button" data-action="handoff-create">Create handoff</button></div>` : `<p class="muted">Turn on a handoff type above to start.</p>`}
+          ${message}
+        </div>
+      </section>`;
+    const list = `
+      <section class="panel">
+        <div class="panel-header"><h3 class="panel-title">Handoffs</h3><span class="pill">${escapeHtml(`${data.handoffs.length} shown`)}</span></div>
+        <div class="panel-body cycle-plan-form">
+          <label class="field"><span>Type</span><select data-handoff-filter="type"><option value="">All types</option>${data.types.map(type => `<option value="${escapeAttr(type.type_key)}" ${f.type === type.type_key ? "selected" : ""}>${escapeHtml(type.name)}</option>`).join("")}</select></label>
+          <label class="field"><span>Cycle</span><select data-handoff-filter="cycle"><option value="">All cycles</option>${data.cycles.map(c => `<option value="${escapeAttr(c.cycle_label)}" ${f.cycle === c.cycle_label ? "selected" : ""}>${escapeHtml(c.cycle_label)}</option>`).join("")}</select></label>
+          <div class="inline-actions"><button class="btn" type="button" data-action="handoff-filter">Show</button></div>
+        </div>
+        <div class="panel-body table-wrap">
+          <table class="table">
+            <thead><tr><th>Handoff</th><th>Type</th><th>Status</th><th>Lines</th><th>Expected</th><th>Packed</th><th>Received</th><th>Short</th><th>Created</th></tr></thead>
+            <tbody>
+              ${data.handoffs.map(h => `
+                <tr>
+                  <td><button class="btn" type="button" data-action="handoff-open" data-id="${escapeAttr(h.handoff_id)}">${escapeHtml(h.label)}</button></td>
+                  <td>${escapeHtml(typeName(h.type_key))}</td>
+                  <td>${escapeHtml(HANDOFF_STATUS_TEXT[h.status] || h.status)}</td>
+                  <td>${escapeHtml(formatNumber(h.line_count))}</td>
+                  <td>${escapeHtml(qtyText(h.expected_qty))}</td>
+                  <td>${escapeHtml(qtyText(h.packed_qty))}</td>
+                  <td>${escapeHtml(qtyText(h.received_qty))}</td>
+                  <td>${h.short_lines ? `<strong>${escapeHtml(formatNumber(h.short_lines))}</strong>` : ""}</td>
+                  <td>${escapeHtml(new Date(h.created_at).toLocaleDateString())}</td>
+                </tr>`).join("") || `<tr><td colspan="9">${state.handoffsLoading ? "Loading…" : "No handoffs yet."}</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>`;
+    return types + create + (state.handoffDetail ? renderHandoffDetail(state.handoffDetail) : "") + list;
+  }
+
+  function renderHandoffDetail(detail) {
+    const h = detail.handoff;
+    const packing = ["open", "packing"].includes(h.status);
+    const receiving = h.status === "delivered";
+    const issueSelect = (line, field) => `<select data-handoff-issue="${escapeAttr(line.line_id)}" ${packing || receiving ? "" : "disabled"}>${Object.entries(HANDOFF_ISSUE_TEXT).map(([key, text]) => `<option value="${key}" ${line.issue === key ? "selected" : ""}>${escapeHtml(text || "No issue")}</option>`).join("")}</select>`;
+    const checklist = detail.type?.checklist || [];
+    return `
+      <section class="panel">
+        <div class="panel-header">
+          <h3 class="panel-title">${escapeHtml(h.label)}</h3>
+          <span class="pill">${escapeHtml(HANDOFF_STATUS_TEXT[h.status] || h.status)}</span>
+        </div>
+        <div class="panel-body">
+          <p class="muted">${escapeHtml(`${formatNumber(detail.summary.expected)} expected · ${formatNumber(detail.summary.packed)} packed · ${formatNumber(detail.summary.received)} received · ${detail.summary.shortLines} short line(s)`)}${h.delivered_at ? escapeHtml(` · delivered ${new Date(h.delivered_at).toLocaleString()} by ${h.delivered_by}`) : ""}${h.received_at ? escapeHtml(` · received ${new Date(h.received_at).toLocaleString()} by ${h.received_by}`) : ""}</p>
+        </div>
+        <div class="panel-body table-wrap">
+          <table class="table">
+            <thead><tr><th>Item</th><th>Expected</th><th>Packed</th><th>Received</th><th>Issue</th><th>Note</th>${packing ? "<th></th>" : ""}</tr></thead>
+            <tbody>
+              ${detail.lines.map(line => `
+                <tr>
+                  <td>${escapeHtml(line.item_name)}</td>
+                  <td>${escapeHtml(qtyText(line.expected_qty))}</td>
+                  <td>${packing ? `<input type="number" min="0" step="any" class="table-input" style="width: 6em;" data-handoff-packed="${escapeAttr(line.line_id)}" value="${escapeAttr(line.packed_qty ?? line.expected_qty)}" />` : escapeHtml(qtyText(line.packed_qty))}</td>
+                  <td>${receiving ? `<input type="number" min="0" step="any" class="table-input" style="width: 6em;" data-handoff-received="${escapeAttr(line.line_id)}" value="${escapeAttr(line.received_qty ?? line.packed_qty ?? "")}" />` : escapeHtml(qtyText(line.received_qty))}</td>
+                  <td>${issueSelect(line)}</td>
+                  <td>${packing || receiving ? `<input type="text" class="table-input" data-handoff-note="${escapeAttr(line.line_id)}" value="${escapeAttr(line.issue_note)}" />` : escapeHtml(line.issue_note)}</td>
+                  ${packing ? `<td><button class="btn" type="button" data-action="handoff-line-remove" data-line="${escapeAttr(line.line_id)}">Remove</button></td>` : ""}
+                </tr>`).join("") || `<tr><td colspan="7">No contents yet.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-body">
+          ${packing ? `
+            <label class="field"><span>Add contents ("name, quantity" per line)</span><textarea class="table-input" rows="2" data-handoff-add></textarea></label>
+            <div class="inline-actions">
+              <button class="btn" type="button" data-action="handoff-lines-add">Add</button>
+              <button class="btn" type="button" data-action="handoff-pack">Save packing</button>
+              <button class="btn primary" type="button" data-action="handoff-deliver">Mark delivered</button>
+            </div>` : ""}
+          ${receiving ? `
+            ${checklist.map((item, index) => `<label class="production-checks" style="display: block;"><input type="checkbox" data-handoff-check="${index}" /> ${escapeHtml(item)}</label>`).join("")}
+            <div class="inline-actions" style="margin-top: 8px;"><button class="btn primary" type="button" data-action="handoff-receive">Receive (gate)</button></div>` : ""}
+          <h4 style="margin-top: 16px;">History</h4>
+          <ul class="muted">${detail.events.map(event => `<li>${escapeHtml(`${new Date(event.at).toLocaleString()} · ${event.event} · ${event.actor || "system"}`)}</li>`).join("")}</ul>
+        </div>
+      </section>`;
+  }
+
+  function handoffLineInputs(field) {
+    const detail = state.handoffDetail;
+    return (detail?.lines || []).map(line => ({
+      lineId: line.line_id,
+      [field]: root.querySelector(`[data-handoff-${field === "packedQty" ? "packed" : "received"}="${line.line_id}"]`)?.value ?? "",
+      issue: root.querySelector(`[data-handoff-issue="${line.line_id}"]`)?.value || "",
+      issueNote: root.querySelector(`[data-handoff-note="${line.line_id}"]`)?.value || ""
+    }));
+  }
+
+  async function handoffAction(path, body, done) {
+    try {
+      state.handoffDetail = await postJson(path, body);
+      state.handoffsMessage = done;
+    } catch (error) {
+      state.handoffsMessage = error.message || "Could not save the handoff.";
+    }
+    await loadHandoffs();
+  }
+
   async function loadReleases() {
     state.releasesLoading = true;
     render();
@@ -2248,14 +2411,17 @@
     if (!workflow) return "";
     const list = value => (value || []).join(", ");
     return `
-      <section class="panel">
-        <div class="panel-header">
-          <h3 class="panel-title">Workflow</h3>
-          <span class="pill">Stages and gates</span>
+      <details class="panel">
+        <summary class="panel-header" style="cursor: pointer;">
+          <h3 class="panel-title">Workflow settings</h3>
+          <span class="pill">Departments and hand-off checks</span>
+        </summary>
+        <div class="panel-body">
+          <p class="muted">The map the new system follows: each department, the Asana portfolio its projects go in and how they are named, and the checks before work moves on. Only Frames is on the new system so far (pilot VINs); "Running today" departments still work the current way and "Not on yet" ones are switched off. Nothing here needs changing for the pilot.</p>
         </div>
         <div class="panel-body table-wrap">
           <table class="table">
-            <thead><tr><th>Stage</th><th>Portfolio</th><th>Project name</th><th>Phases</th><th>Work areas</th><th>Into VIN build</th><th>State</th><th></th></tr></thead>
+            <thead><tr><th>Department</th><th>Asana portfolio</th><th>Project name</th><th>Phases</th><th>Work areas</th><th>Moves into VIN project</th><th>Status</th><th></th></tr></thead>
             <tbody>
               ${workflow.stages.map(stage => WIRED_STAGES.has(stage.stage_key) ? `
                 <tr>
@@ -2264,8 +2430,8 @@
                   <td><input type="text" class="table-input" value="${escapeAttr(stage.project_name_pattern)}" data-stage-pattern="${escapeAttr(stage.stage_key)}" /></td>
                   <td><input type="text" class="table-input" value="${escapeAttr(list(stage.phases))}" data-stage-phases="${escapeAttr(stage.stage_key)}" /></td>
                   <td>${escapeHtml(list(stage.work_areas))}</td>
-                  <td>${stage.moves_to_vin ? "Phases move at gate" : ""}</td>
-                  <td><label class="production-checks"><input type="checkbox" data-stage-active="${escapeAttr(stage.stage_key)}" ${stage.active ? "checked" : ""} /> On</label></td>
+                  <td>${stage.moves_to_vin ? "Its phases, at the gate" : ""}</td>
+                  <td><label class="production-checks"><input type="checkbox" data-stage-active="${escapeAttr(stage.stage_key)}" ${stage.active ? "checked" : ""} /> On (pilot)</label></td>
                   <td><button class="btn" type="button" data-action="workflow-stage-save" data-stage="${escapeAttr(stage.stage_key)}">Save</button></td>
                 </tr>` : `
                 <tr>
@@ -2275,23 +2441,23 @@
                   <td>${escapeHtml(list(stage.phases))}</td>
                   <td>${escapeHtml(list(stage.work_areas))}</td>
                   <td>${stage.moves_to_vin ? "Yes" : ""}</td>
-                  <td>${escapeHtml(stage.stage_key === "fabrication" || stage.stage_key === "installation" ? "In use" : "Planned")}</td>
+                  <td>${escapeHtml(stage.stage_key === "fabrication" || stage.stage_key === "installation" ? "Running today" : "Not on yet")}</td>
                   <td></td>
                 </tr>`).join("")}
             </tbody>
           </table>
-          <p class="muted">Project names use {cycle} (22.26), {vin} and {model}. Turning Frames off sends pilot VINs' A1/A2 to the VIN project again.</p>
+          <p class="muted">In project names, {cycle} becomes the cycle number (FR{cycle} → FR22.26), {vin} the VIN and {model} its model. Turning Frames off sends pilot VINs' A1/A2 back to the VIN project.</p>
         </div>
         <div class="panel-body">
           ${workflow.gates.map(gate => `
             <div class="cycle-plan-form" style="margin-bottom: 12px;">
-              <div class="field"><span>Gate</span><strong>${escapeHtml(gate.name)}</strong><div class="muted">${escapeHtml(`${gate.from_stage} → ${gate.to_stage} · per ${gate.scope.toUpperCase() === "VIN" ? "VIN" : gate.scope} · all tasks complete · passed by ${gate.pass_role}`)}</div></div>
-              <label class="field"><span>Checklist (one check per line; all must be ticked to pass)</span><textarea class="table-input" rows="3" data-gate-checklist="${escapeAttr(gate.gate_key)}">${escapeHtml((gate.checklist || []).join("\n"))}</textarea></label>
+              <div class="field"><span>Hand-off check</span><strong>${escapeHtml(gate.name)}</strong><div class="muted">${escapeHtml(`Before a VIN's frame goes to Installation: all its A1/A2 tasks complete, then an admin passes it on the Releases tab.`)}</div></div>
+              <label class="field"><span>Checks to tick before passing (one per line; leave empty for none)</span><textarea class="table-input" rows="3" data-gate-checklist="${escapeAttr(gate.gate_key)}">${escapeHtml((gate.checklist || []).join("\n"))}</textarea></label>
               <label class="field production-checks"><span>State</span><span><input type="checkbox" data-gate-active="${escapeAttr(gate.gate_key)}" ${gate.active ? "checked" : ""} /> On</span></label>
               <div class="inline-actions"><button class="btn" type="button" data-action="workflow-gate-save" data-gate="${escapeAttr(gate.gate_key)}">Save gate</button></div>
             </div>`).join("")}
         </div>
-      </section>`;
+      </details>`;
   }
 
   async function loadTemplates() {
@@ -2463,7 +2629,7 @@
       <div class="admin-shell">
         ${renderTopbar()}
         <main class="admin-main">
-          ${state.activeView === "project" ? renderProjectCreator() : state.activeView === "cycles" ? renderCyclePlanner() : state.activeView === "production" ? renderProductionTable() : state.activeView === "task-times" ? renderTaskTimes() : state.activeView === "task-mapping" ? renderTaskMapping() : state.activeView === "templates" ? renderTemplates() : state.activeView === "releases" ? renderReleases() : renderDashboard()}
+          ${state.activeView === "project" ? renderProjectCreator() : state.activeView === "cycles" ? renderCyclePlanner() : state.activeView === "production" ? renderProductionTable() : state.activeView === "task-times" ? renderTaskTimes() : state.activeView === "task-mapping" ? renderTaskMapping() : state.activeView === "templates" ? renderTemplates() : state.activeView === "releases" ? renderReleases() : state.activeView === "handoffs" ? renderHandoffs() : renderDashboard()}
         </main>
       </div>
     `;
@@ -2485,7 +2651,7 @@
   root.addEventListener("click", async event => {
     const viewButton = event.target.closest("[data-view]");
     if (viewButton) {
-      state.activeView = ["project", "cycles", "production", "task-times", "task-mapping", "templates", "releases"].includes(viewButton.dataset.view) ? viewButton.dataset.view : "dashboard";
+      state.activeView = ["project", "cycles", "production", "task-times", "task-mapping", "templates", "releases", "handoffs"].includes(viewButton.dataset.view) ? viewButton.dataset.view : "dashboard";
       render();
       if (state.activeView === "cycles") {
         if (!state.cyclePlanner) await loadCyclePlanner();
@@ -2499,6 +2665,8 @@
         if (!state.templates) await loadTemplates();
       } else if (state.activeView === "releases") {
         if (!state.releases) await loadReleases();
+      } else if (state.activeView === "handoffs") {
+        if (!state.handoffs) await loadHandoffs();
       } else if (state.activeView === "project" && !state.project && !state.projectLoading) {
         try {
           await loadProjectCreator();
@@ -2643,6 +2811,55 @@
         state.releasesMessage = error.message || "Could not create the Fabrication project.";
       }
       await loadReleases();
+    } else if (action === "handoff-type-save") {
+      const key = event.target.closest("[data-action]").dataset.type;
+      try {
+        await postJson("/api/admin/handoffs/type", {
+          typeKey: key,
+          checklist: root.querySelector(`[data-handoff-type-checklist="${key}"]`)?.value || "",
+          active: Boolean(root.querySelector(`[data-handoff-type-active="${key}"]`)?.checked)
+        });
+        state.handoffsMessage = "Handoff type saved.";
+      } catch (error) {
+        state.handoffsMessage = error.message || "Could not save the handoff type.";
+      }
+      await loadHandoffs();
+    } else if (action === "handoff-create") {
+      const value = name => root.querySelector(`[data-handoff-new="${name}"]`)?.value || "";
+      await handoffAction("/api/admin/handoffs/create", { typeKey: value("type"), cycleLabel: value("cycle"), phase: value("phase"), vin: value("vin"), lines: value("lines") }, "Handoff created.");
+    } else if (action === "handoff-filter") {
+      for (const input of root.querySelectorAll("[data-handoff-filter]")) state.handoffsFilters[input.dataset.handoffFilter] = input.value;
+      await loadHandoffs();
+    } else if (action === "handoff-open") {
+      try {
+        state.handoffDetail = await fetchJson(`/api/admin/handoffs/detail?id=${event.target.closest("[data-action]").dataset.id}`);
+        state.handoffsMessage = "";
+      } catch (error) {
+        state.handoffsMessage = error.message || "Could not open the handoff.";
+      }
+      render();
+    } else if (action === "handoff-lines-add") {
+      await handoffAction("/api/admin/handoffs/lines", { id: state.handoffDetail.handoff.handoff_id, add: root.querySelector("[data-handoff-add]")?.value || "" }, "Contents added.");
+    } else if (action === "handoff-line-remove") {
+      await handoffAction("/api/admin/handoffs/lines", { id: state.handoffDetail.handoff.handoff_id, remove: [event.target.closest("[data-action]").dataset.line] }, "Line removed.");
+    } else if (action === "handoff-pack") {
+      await handoffAction("/api/admin/handoffs/pack", { id: state.handoffDetail.handoff.handoff_id, lines: handoffLineInputs("packedQty") }, "Packing saved.");
+    } else if (action === "handoff-deliver") {
+      const id = state.handoffDetail.handoff.handoff_id;
+      try {
+        await postJson("/api/admin/handoffs/pack", { id, lines: handoffLineInputs("packedQty") });
+      } catch (error) {
+        state.handoffsMessage = error.message || "Could not save packing.";
+        render();
+        return;
+      }
+      if (!window.confirm("Mark this handoff delivered? Its contents are fixed from here; the receiving department counts it next.")) return;
+      await handoffAction("/api/admin/handoffs/deliver", { id }, "Delivered. The receiving department counts it next.");
+    } else if (action === "handoff-receive") {
+      const detail = state.handoffDetail;
+      const checklist = detail.type?.checklist || [];
+      const checked = [...root.querySelectorAll("[data-handoff-check]")].filter(input => input.checked).map(input => checklist[Number(input.dataset.handoffCheck)]);
+      await handoffAction("/api/admin/handoffs/receive", { id: detail.handoff.handoff_id, lines: handoffLineInputs("receivedQty"), checked }, "Received.");
     } else if (action === "workflow-stage-save") {
       const key = event.target.closest("[data-action]").dataset.stage;
       try {
