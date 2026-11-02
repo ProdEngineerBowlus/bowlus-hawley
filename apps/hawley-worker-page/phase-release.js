@@ -72,7 +72,7 @@ export function framesGateStatus(plan, { total = 0, complete = 0, gate = null, c
     : gate?.status === "passing" ? "passing"
       : gate?.status === "failed" ? "failed"
         : released && total > 0 && complete >= total ? "ready" : "open";
-  return { status, total, complete, released, canPass: status === "ready" || status === "failed", result: gate?.result || null, checklist: [...checklist] };
+  return { status, total, complete, released, canPass: status === "ready" || status === "failed", canOverride: released && status === "open", result: gate?.result || null, checklist: [...checklist] };
 }
 
 // scheduleRows: { phase_name, production_record_id, cycle_label, start_date } for one VIN.

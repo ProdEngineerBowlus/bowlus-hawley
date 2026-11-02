@@ -11507,9 +11507,9 @@ async function handleAdminWorkflowGate(req) {
   const current = (await pool.query("select * from hb.workflow_gates where gate_key = $1", [key])).rows[0];
   if (!current) throw actionError(`Unknown gate ${key}.`, 404);
   await writePool.query(
-    `update hb.workflow_gates set checklist = $2, active = $3, notes = $4, updated_by = $5, updated_at = now() where gate_key = $1`,
+    `update hb.workflow_gates set checklist = $2, active = $3, notes = $4, auto_pass = $6, updated_by = $5, updated_at = now() where gate_key = $1`,
     [key, cleanList(body.checklist ?? current.checklist, /\n+/), body.active === undefined ? current.active : body.active === true,
-      String(body.notes ?? current.notes), actor?.email || ""]
+      String(body.notes ?? current.notes), actor?.email || "", body.autoPass === undefined ? current.auto_pass : body.autoPass === true]
   );
   console.log("[hawley-workflow]", JSON.stringify({ action: "gate", key, actor: actor?.email || "" }));
   return { ok: true, workflow: await workflowDefinition(writePool) };
@@ -11548,7 +11548,8 @@ async function pilotPlan(client, pilot, allScheduleRows) {
   });
   const tasks = framesStage ? await framesStageTasks(client, releases) : [];
   const framesGate = framesStage
-    ? framesGateStatus(plan, { total: tasks.length, complete: tasks.filter(row => row.completed).length, gate, checklist: gateDefinition?.checklist || [] })
+    ? { ...framesGateStatus(plan, { total: tasks.length, complete: tasks.filter(row => row.completed).length, gate, checklist: gateDefinition?.checklist || [] }),
+      autoPass: Boolean(gateDefinition?.auto_pass) && !(gateDefinition?.checklist || []).length }
     : null;
   const vinProjectGid = pilot.asana_project_gid
     || releases.find(row => row.target !== "frames" && row.run_project_gid)?.run_project_gid
@@ -11747,8 +11748,8 @@ async function releaseVinPhase({ vin, phase, projectName: requestedName = "", ac
 // phase (B) into the VIN project, then moves the A1/A2 tasks from the Frames project into it. Frame-A/B work stays
 // in Frames. Every step is safe to repeat, so a failed gate can simply be passed again.
 async function passFramesGate({ vin, actorEmail }) {
-  const checklist = (await writePool.query("select result -> 'checklist' as checklist from hb.vin_gates where vin = $1 and gate = 'frames'", [String(vin)])).rows[0]?.checklist || [];
-  const result = { checklist, nextPhase: null, moved: 0, failed: [] };
+  const started = (await writePool.query("select result from hb.vin_gates where vin = $1 and gate = 'frames'", [String(vin)])).rows[0]?.result || {};
+  const result = { checklist: started.checklist || [], override: Boolean(started.override), reason: started.reason || "", openTasks: started.openTasks || 0, automatic: Boolean(started.automatic), nextPhase: null, moved: 0, failed: [] };
   try {
     const token = requireReleaseWrites();
     const scheduleData = await adminProjectCreatorScheduleData("VIN", {});
@@ -11801,33 +11802,49 @@ async function passFramesGate({ vin, actorEmail }) {
   }
 }
 
-async function handleAdminFramesGate(req) {
-  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
-  requireAdminActor(actor);
-  const body = await readJsonBody(req);
+// Start a Frames gate pass: normal (all A1/A2 tasks complete, every check ticked), automatic (same, by the
+// background job when the gate passes automatically and has no checks), or an admin override with a reason
+// (passes with tasks still open). The pass itself runs in passFramesGate.
+async function startFramesGatePass({ vin, actorEmail = "", checked = [], override = false, reason = "", automatic = false }) {
   requireReleaseWrites();
-  const vin = projectCreatorVinNumber(body.vin);
-  const pilot = (await pool.query("select * from hb.release_pilots where vin = $1", [String(vin)])).rows[0];
+  const pilot = (await writePool.query("select * from hb.release_pilots where vin = $1", [String(vin)])).rows[0];
   if (!pilot) throw actionError(`VIN ${vin} is not in the release pilot.`, 404);
   const scheduleData = await adminProjectCreatorScheduleData("VIN", {});
   const { framesGate } = await pilotPlan(writePool, pilot, scheduleData.allScheduleRows);
   if (!framesGate) throw actionError(`VIN ${vin} does not use the Frames stage.`, 409);
-  const checked = cleanList(body.checked, /\n+/);
+  if (framesGate.status === "passed") throw actionError(`VIN ${vin} already passed the Frames gate.`, 409);
+  if (framesGate.status === "passing") throw actionError(`VIN ${vin} is passing the Frames gate now.`, 409);
+  if (!framesGate.released) throw actionError("Release Phase A1 and A2 before passing the Frames gate.", 409);
   const missing = framesGate.checklist.filter(item => !checked.includes(item));
-  if (framesGate.canPass && missing.length) throw actionError(`Tick every gate check first: ${missing.join("; ")}.`, 409);
-  if (!framesGate.canPass) {
-    throw actionError(framesGate.status === "passed" ? `VIN ${vin} already passed the Frames gate.`
-      : framesGate.status === "passing" ? `VIN ${vin} is passing the Frames gate now.`
-        : !framesGate.released ? "Release Phase A1 and A2 before passing the Frames gate."
-          : `${framesGate.complete} of ${framesGate.total} A1/A2 tasks are complete.`, 409);
+  if (missing.length) throw actionError(`Tick every gate check first: ${missing.join("; ")}.`, 409);
+  const openTasks = framesGate.total - framesGate.complete;
+  if (override) {
+    if (!String(reason || "").trim()) throw actionError("Give a reason for passing the Frames gate with work still open.", 400);
+  } else if (!framesGate.canPass) {
+    throw actionError(`${framesGate.complete} of ${framesGate.total} A1/A2 tasks are complete.`, 409);
   }
+  const start = { checklist: framesGate.checklist, override: Boolean(override), reason: String(reason || "").trim(), openTasks, automatic: Boolean(automatic) };
   await writePool.query(
     `insert into hb.vin_gates (vin, gate, status, passed_by, passed_at, result) values ($1, 'frames', 'passing', $2, now(), $3)
      on conflict (vin, gate) do update set status = 'passing', passed_by = excluded.passed_by, passed_at = now(), result = excluded.result`,
-    [String(vin), actor?.email || "", JSON.stringify({ checklist: framesGate.checklist })]
+    [String(vin), actorEmail, JSON.stringify(start)]
   );
-  console.log("[hawley-frames-gate]", JSON.stringify({ action: "pass", vin, tasks: framesGate.total, actor: actor?.email || "" }));
-  setImmediate(() => void passFramesGate({ vin, actorEmail: actor?.email || "" }));
+  console.log("[hawley-frames-gate]", JSON.stringify({ action: automatic ? "auto_pass" : override ? "override" : "pass", vin, tasks: framesGate.total, openTasks, reason: start.reason, actor: actorEmail }));
+  return { framesGate, done: passFramesGate({ vin, actorEmail }) };
+}
+
+async function handleAdminFramesGate(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const vin = projectCreatorVinNumber(body.vin);
+  const { framesGate } = await startFramesGatePass({
+    vin,
+    actorEmail: actor?.email || "",
+    checked: cleanList(body.checked, /\n+/),
+    override: body.override === true,
+    reason: body.reason
+  });
   return { ok: true, queued: true, vin, message: `Passing the Frames gate for VIN ${vin}: releasing the next phase into the VIN project and moving ${framesGate.total} A1/A2 tasks there. Reload in a minute.` };
 }
 
@@ -12012,6 +12029,14 @@ async function runAutomaticReleases() {
         await done;
         released.push(`VIN ${vin} ${next.phase}`);
       }
+    }
+    const vinSchedule = await adminProjectCreatorScheduleData("VIN", {});
+    for (const pilot of (await client.query("select * from hb.release_pilots order by vin::int")).rows) {
+      const { vin, framesGate } = await pilotPlan(client, pilot, vinSchedule.allScheduleRows);
+      if (!framesGate?.autoPass || framesGate.status !== "ready") continue;
+      const { done } = await startFramesGatePass({ vin, actorEmail: "automatic gate", automatic: true });
+      await done;
+      released.push(`VIN ${vin} Frames gate`);
     }
     if (settings.autoFabrication) {
       for (const item of (await fabricationPlan({ client })).plan.filter(row => row.status === "due")) {

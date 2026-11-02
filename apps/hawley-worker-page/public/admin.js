@@ -2280,10 +2280,18 @@
         <strong>Frames gate:</strong> ${escapeHtml(FRAMES_GATE_TEXT[g.status] || g.status)}
         · ${escapeHtml(`${formatNumber(g.complete)} of ${formatNumber(g.total)} A1/A2 tasks complete`)}
         ${g.status === "passed" && result.moved != null ? escapeHtml(` · moved ${result.moved} tasks into the VIN project`) : ""}
+        ${g.status === "passed" && result.automatic ? escapeHtml(" · passed automatically") : ""}
+        ${g.status === "passed" && result.override ? `<div class="muted">${escapeHtml(`Passed anyway with ${result.openTasks} task(s) open: ${result.reason}`)}</div>` : ""}
+        ${g.status === "ready" && g.autoPass ? `<div class="muted">Passes automatically within about 10 minutes, or pass it now.</div>` : ""}
+        ${g.status === "open" && g.released && g.autoPass ? `<div class="muted">Passes automatically once every A1/A2 task is complete.</div>` : ""}
         ${result.error ? `<div class="muted">${escapeHtml(result.error)}</div>` : ""}
         ${g.canPass && g.checklist.length ? `<div style="margin-top: 8px;">${g.checklist.map((item, index) => `<label class="production-checks" style="display: block;"><input type="checkbox" data-gate-check="${escapeAttr(pilot.vin)}" data-gate-item="${index}" /> ${escapeHtml(item)}</label>`).join("")}</div>` : ""}
         ${g.status === "passed" && result.checklist?.length ? `<div class="muted">Checked: ${escapeHtml(result.checklist.join("; "))}</div>` : ""}
-        ${g.canPass && createEnabled ? `<div class="inline-actions" style="margin-top: 8px;"><button class="btn primary" type="button" data-action="release-frames-gate" data-vin="${escapeAttr(pilot.vin)}">${g.status === "failed" ? "Pass again" : "Pass Frames gate"}</button></div>` : ""}
+        ${(g.canPass || g.canOverride) && g.checklist.length && !g.canPass ? `<div style="margin-top: 8px;">${g.checklist.map((item, index) => `<label class="production-checks" style="display: block;"><input type="checkbox" data-gate-check="${escapeAttr(pilot.vin)}" data-gate-item="${index}" /> ${escapeHtml(item)}</label>`).join("")}</div>` : ""}
+        ${(g.canPass || g.canOverride) && createEnabled ? `<div class="inline-actions" style="margin-top: 8px;">
+          ${g.canPass ? `<button class="btn primary" type="button" data-action="release-frames-gate" data-vin="${escapeAttr(pilot.vin)}">${g.status === "failed" ? "Pass again" : "Pass Frames gate"}</button>` : ""}
+          ${g.canOverride ? `<button class="btn" type="button" data-action="release-frames-gate" data-override="1" data-vin="${escapeAttr(pilot.vin)}">Pass anyway…</button>` : ""}
+        </div>` : ""}
       </div>`;
   }
 
@@ -2451,9 +2459,10 @@
         <div class="panel-body">
           ${workflow.gates.map(gate => `
             <div class="cycle-plan-form" style="margin-bottom: 12px;">
-              <div class="field"><span>Hand-off check</span><strong>${escapeHtml(gate.name)}</strong><div class="muted">${escapeHtml(`Before a VIN's frame goes to Installation: all its A1/A2 tasks complete, then an admin passes it on the Releases tab.`)}</div></div>
+              <div class="field"><span>Hand-off check</span><strong>${escapeHtml(gate.name)}</strong><div class="muted">${escapeHtml(`Before a VIN's frame goes to Installation: all its A1/A2 tasks complete. It then passes automatically (if switched on and there are no checks) or an admin passes it on the Releases tab; "Pass anyway" overrides with a reason.`)}</div></div>
               <label class="field"><span>Checks to tick before passing (one per line; leave empty for none)</span><textarea class="table-input" rows="3" data-gate-checklist="${escapeAttr(gate.gate_key)}">${escapeHtml((gate.checklist || []).join("\n"))}</textarea></label>
               <label class="field production-checks"><span>State</span><span><input type="checkbox" data-gate-active="${escapeAttr(gate.gate_key)}" ${gate.active ? "checked" : ""} /> On</span></label>
+              <label class="field production-checks"><span>Automatic</span><span><input type="checkbox" data-gate-auto="${escapeAttr(gate.gate_key)}" ${gate.auto_pass ? "checked" : ""} /> Pass automatically when all tasks are complete (only while there are no checks)</span></label>
               <div class="inline-actions"><button class="btn" type="button" data-action="workflow-gate-save" data-gate="${escapeAttr(gate.gate_key)}">Save gate</button></div>
             </div>`).join("")}
         </div>
@@ -2880,7 +2889,8 @@
         await postJson("/api/admin/workflow/gate", {
           gateKey: key,
           checklist: root.querySelector(`[data-gate-checklist="${key}"]`)?.value || "",
-          active: Boolean(root.querySelector(`[data-gate-active="${key}"]`)?.checked)
+          active: Boolean(root.querySelector(`[data-gate-active="${key}"]`)?.checked),
+          autoPass: Boolean(root.querySelector(`[data-gate-auto="${key}"]`)?.checked)
         });
         state.releasesMessage = "Gate saved.";
       } catch (error) {
@@ -2888,7 +2898,9 @@
       }
       await loadReleases();
     } else if (action === "release-frames-gate") {
-      const vin = event.target.closest("[data-action]").dataset.vin;
+      const button = event.target.closest("[data-action]");
+      const vin = button.dataset.vin;
+      const override = button.dataset.override === "1";
       const pilot = (state.releases?.pilots || []).find(p => String(p.vin) === String(vin));
       const checklist = pilot?.framesGate?.checklist || [];
       const ticked = [...root.querySelectorAll(`[data-gate-check="${vin}"]`)].filter(input => input.checked).map(input => checklist[Number(input.dataset.gateItem)]);
@@ -2897,9 +2909,14 @@
         render();
         return;
       }
-      if (!window.confirm(`Pass the Frames gate for VIN ${vin}? Hawley releases the next phase into the VIN project and moves the A1/A2 tasks there.`)) return;
+      let reason = "";
+      if (override) {
+        const open = (pilot?.framesGate?.total || 0) - (pilot?.framesGate?.complete || 0);
+        reason = (window.prompt(`Pass the Frames gate for VIN ${vin} with ${open} A1/A2 task(s) still open? The open tasks move into the VIN project too. Reason:`) || "").trim();
+        if (!reason) return;
+      } else if (!window.confirm(`Pass the Frames gate for VIN ${vin}? Hawley releases the next phase into the VIN project and moves the A1/A2 tasks there.`)) return;
       try {
-        const result = await postJson("/api/admin/releases/frames-gate", { vin, checked: ticked });
+        const result = await postJson("/api/admin/releases/frames-gate", { vin, checked: ticked, override, reason });
         state.releasesMessage = result.message;
       } catch (error) {
         state.releasesMessage = error.message || "Could not pass the Frames gate.";
