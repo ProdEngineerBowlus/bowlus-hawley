@@ -12816,18 +12816,23 @@ async function createAdminAsanaProject(token, projectName, runId = "") {
   }
 }
 
+// Safe to repeat on an existing project (phase and Frame work releases add to one): fields already on the project
+// are skipped, so shared fields are not re-attached and project-local fields are not created twice.
 async function adminAttachProjectCustomFields(token, projectGid) {
-  for (const field of ADMIN_PROJECT_SHARED_CUSTOM_FIELDS) {
-    await adminAsanaRequest(token, `/projects/${projectGid}/addCustomFieldSetting`, "POST", {
-      custom_field: field.gid,
-      is_important: false
+  const settings = await adminAsanaRequest(token, `/projects/${projectGid}/custom_field_settings?opt_fields=custom_field.gid,custom_field.name&limit=100`);
+  const existing = Array.isArray(settings) ? settings : settings?.data || [];
+  const existingGids = new Set(existing.map(setting => String(setting.custom_field?.gid || "")));
+  const existingNames = new Set(existing.map(setting => projectCreatorNormalizeKey(setting.custom_field?.name)));
+  const attach = custom_field => adminAsanaRequest(token, `/projects/${projectGid}/addCustomFieldSetting`, "POST", { custom_field, is_important: false })
+    .catch(error => {
+      if (/custom_field_already_in_object|already exists/i.test(error.message || "")) return null;
+      throw error;
     });
+  for (const field of ADMIN_PROJECT_SHARED_CUSTOM_FIELDS) {
+    if (!existingGids.has(String(field.gid))) await attach(field.gid);
   }
   for (const field of ADMIN_PROJECT_LOCAL_CUSTOM_FIELDS) {
-    await adminAsanaRequest(token, `/projects/${projectGid}/addCustomFieldSetting`, "POST", {
-      custom_field: field,
-      is_important: false
-    });
+    if (!existingNames.has(projectCreatorNormalizeKey(field.name))) await attach(field);
   }
   // Team tasks: new projects get the Helpers field once it is set up. Best effort; never blocks creation.
   const helpersFieldGid = (await pool.query("select helpers_field_gid from hb.team_task_settings where settings_key = 'default'").catch(() => ({ rows: [] }))).rows[0]?.helpers_field_gid;
