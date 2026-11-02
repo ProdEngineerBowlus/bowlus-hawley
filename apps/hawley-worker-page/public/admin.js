@@ -2374,9 +2374,9 @@
           <span class="pill">${escapeHtml(settings.autoVinPhases || settings.autoFabrication ? "On" : "Off")}</span>
         </div>
         <div class="panel-body">
-          <p class="muted">When on, Hawley checks every ${escapeHtml(auto.intervalMinutes || 10)} minutes and releases whatever is due: the next phase of each pilot VIN, and the next cycle's Fabrication project. A Fabrication project that already exists in Asana (made here or by hand) is never created again.</p>
+          <p class="muted">When on, Hawley checks every ${escapeHtml(auto.intervalMinutes || 10)} minutes and releases whatever is due: the next phase of each pilot VIN, and the next cycle's Frame work and Fabrication project. A Fabrication project that already exists in Asana (made here or by hand) is never created again.</p>
           <label class="field production-checks"><span>Pilot VIN phases</span><span><input type="checkbox" data-release-auto-vin ${settings.autoVinPhases ? "checked" : ""} /> Release automatically on the due date</span></label>
-          <label class="field production-checks"><span>Fabrication projects</span><span><input type="checkbox" data-release-auto-fab ${settings.autoFabrication ? "checked" : ""} /> Create each cycle's project automatically on the due date</span></label>
+          <label class="field production-checks"><span>Fabrication projects</span><span><input type="checkbox" data-release-auto-fab ${settings.autoFabrication ? "checked" : ""} /> Create each cycle's Fabrication project and release its Frame work automatically on the due date</span></label>
           <label class="field"><span>Fabrication lead time (working days)</span><input type="number" min="0" max="20" value="${escapeAttr(settings.fabricationLeadWorkingDays ?? 2)}" data-release-fab-lead /></label>
           <div class="inline-actions"><button class="btn primary" type="button" data-action="release-settings-save">Save automatic release</button></div>
           <p class="muted">${escapeHtml(auto.lastRunAt ? `Last check ${new Date(auto.lastRunAt).toLocaleString()}${auto.lastReleased?.length ? `: released ${auto.lastReleased.join(", ")}` : ": nothing due"}` : "Not run since the last restart.")}</p>
@@ -2409,7 +2409,34 @@
           </table>
         </div>
       </section>`;
-    return intro + renderWorkflow(data.workflow) + automatic + pilots + fabrication;
+    const fw = data.framesWork || { plan: [], workAreas: [] };
+    const framesWork = `
+      <section class="panel">
+        <div class="panel-header">
+          <h3 class="panel-title">Frames projects</h3>
+          <span class="pill">${escapeHtml(`${(fw.workAreas || []).join(", ") || "Frame work"} each cycle`)}</span>
+        </div>
+        <div class="panel-body"><p class="muted">From C22.26 the cycle's Frame-A/B work goes into its Frames project (FR22.26) instead of the Fabrication project, which keeps FAB work only. The same FR project holds the pilot VINs' A1/A2 sections. Released like Fabrication: by hand here, or automatically with the Fabrication switch.</p></div>
+        ${fw.lastError ? `<div class="panel-body"><div class="notice risk">${escapeHtml(fw.lastError)}</div></div>` : ""}
+        <div class="panel-body table-wrap">
+          <table class="table">
+            <thead><tr><th>Project</th><th>Cycle</th><th>Cycle starts</th><th>Release due</th><th>Frame work</th><th>Tasks</th><th></th></tr></thead>
+            <tbody>
+              ${fw.plan.map(p => `
+                <tr>
+                  <td>${p.projectGid ? `<a href="https://app.asana.com/0/${escapeAttr(p.projectGid)}" target="_blank" rel="noopener"><strong>${escapeHtml(p.projectName)}</strong></a>` : `<strong>${escapeHtml(p.projectName)}</strong>`}</td>
+                  <td>${escapeHtml(p.cycleLabel)}</td>
+                  <td>${escapeHtml(formatDate(p.cycleStart))}</td>
+                  <td>${escapeHtml(formatDate(p.releaseDue))}</td>
+                  <td>${escapeHtml(RELEASE_STATUS_TEXT[p.status] || p.status)}${p.releasedAt ? `<div class="muted">${escapeHtml(new Date(p.releasedAt).toLocaleString())}</div>` : ""}</td>
+                  <td>${p.taskCount == null ? "" : escapeHtml(formatNumber(p.taskCount))}</td>
+                  <td>${p.canRelease && data.createEnabled ? `<button class="btn ${p.status === "due" ? "primary" : ""}" type="button" data-action="release-frames-work-now" data-cycle-key="${escapeAttr(p.cycleKey)}" data-project="${escapeAttr(p.projectName)}">${p.status === "failed" ? "Retry" : "Release now"}</button>` : ""}</td>
+                </tr>`).join("") || `<tr><td colspan="7">No upcoming cycles with Frame work.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>`;
+    return intro + renderWorkflow(data.workflow) + automatic + pilots + framesWork + fabrication;
   }
 
   // Stages and gates (hb.workflow_stages / hb.workflow_gates). Only the parts already wired into releases are editable;
@@ -2806,6 +2833,18 @@
         state.releasesMessage = "Automatic release saved.";
       } catch (error) {
         state.releasesMessage = error.message || "Could not save automatic release.";
+      }
+      await loadReleases();
+    } else if (action === "release-frames-work-now") {
+      const { cycleKey, project } = event.target.closest("[data-action]").dataset;
+      if (!window.confirm(`Release ${cycleKey}'s Frame-A/B work into ${project} now? Its tasks become visible to leads and workers.`)) return;
+      state.releasesMessage = "Releasing…";
+      render();
+      try {
+        const result = await postJson("/api/admin/releases/frames-work", { cycleKey });
+        state.releasesMessage = result.message;
+      } catch (error) {
+        state.releasesMessage = error.message || "Could not release the Frame work.";
       }
       await loadReleases();
     } else if (action === "release-fab-now") {
