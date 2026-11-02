@@ -2094,7 +2094,8 @@
     failed: "Failed",
     due: "Due now",
     upcoming: "Upcoming",
-    waiting: "Waits for previous phase"
+    waiting: "Waits for previous phase",
+    exists: "Already in Asana"
   };
 
   // Phase release pilot: a pilot VIN's Asana project starts with Phase A1 and each next phase is released into it
@@ -2165,7 +2166,51 @@
         </div>
       </section>`;
     }).join("");
-    return intro + pilots;
+    const settings = data.settings || {};
+    const auto = data.autoRelease || {};
+    const automatic = `
+      <section class="panel">
+        <div class="panel-header">
+          <h3 class="panel-title">Automatic release</h3>
+          <span class="pill">${escapeHtml(settings.autoVinPhases || settings.autoFabrication ? "On" : "Off")}</span>
+        </div>
+        <div class="panel-body">
+          <p class="muted">When on, Hawley checks every ${escapeHtml(auto.intervalMinutes || 10)} minutes and releases whatever is due: the next phase of each pilot VIN, and the next cycle's Fabrication project. A Fabrication project that already exists in Asana (made here or by hand) is never created again.</p>
+          <label class="field production-checks"><span>Pilot VIN phases</span><span><input type="checkbox" data-release-auto-vin ${settings.autoVinPhases ? "checked" : ""} /> Release automatically on the due date</span></label>
+          <label class="field production-checks"><span>Fabrication projects</span><span><input type="checkbox" data-release-auto-fab ${settings.autoFabrication ? "checked" : ""} /> Create each cycle's project automatically on the due date</span></label>
+          <label class="field"><span>Fabrication lead time (working days)</span><input type="number" min="0" max="20" value="${escapeAttr(settings.fabricationLeadWorkingDays ?? 2)}" data-release-fab-lead /></label>
+          <div class="inline-actions"><button class="btn primary" type="button" data-action="release-settings-save">Save automatic release</button></div>
+          <p class="muted">${escapeHtml(auto.lastRunAt ? `Last check ${new Date(auto.lastRunAt).toLocaleString()}${auto.lastReleased?.length ? `: released ${auto.lastReleased.join(", ")}` : ": nothing due"}` : "Not run since the last restart.")}</p>
+          ${auto.lastError ? `<div class="notice risk">Last automatic release error: ${escapeHtml(auto.lastError)}</div>` : ""}
+        </div>
+      </section>`;
+    const fab = data.fabrication || { plan: [] };
+    const fabrication = `
+      <section class="panel">
+        <div class="panel-header">
+          <h3 class="panel-title">Fabrication projects</h3>
+          <span class="pill">Full project each cycle</span>
+        </div>
+        ${fab.lastError ? `<div class="panel-body"><div class="notice risk">${escapeHtml(fab.lastError)}</div></div>` : ""}
+        <div class="panel-body table-wrap">
+          <table class="table">
+            <thead><tr><th>Project</th><th>Cycle</th><th>Cycle starts</th><th>Release due</th><th>Status</th><th>Tasks</th><th></th></tr></thead>
+            <tbody>
+              ${fab.plan.map(p => `
+                <tr>
+                  <td><strong>${escapeHtml(p.projectName)}</strong></td>
+                  <td>${escapeHtml(p.cycleLabel)}</td>
+                  <td>${escapeHtml(formatDate(p.cycleStart))}</td>
+                  <td>${escapeHtml(formatDate(p.releaseDue))}</td>
+                  <td>${escapeHtml(RELEASE_STATUS_TEXT[p.status] || p.status)}${p.releasedAt ? `<div class="muted">${escapeHtml(new Date(p.releasedAt).toLocaleString())}</div>` : ""}</td>
+                  <td>${p.taskCount == null ? "" : escapeHtml(formatNumber(p.taskCount))}</td>
+                  <td>${p.canRelease && data.createEnabled ? `<button class="btn ${p.status === "due" ? "primary" : ""}" type="button" data-action="release-fab-now" data-cycle-key="${escapeAttr(p.cycleKey)}" data-project="${escapeAttr(p.projectName)}">${p.status === "failed" ? "Retry" : "Create now"}</button>` : ""}</td>
+                </tr>`).join("") || `<tr><td colspan="7">No upcoming Fabrication cycles in the production schedule.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </section>`;
+    return intro + automatic + pilots + fabrication;
   }
 
   async function loadTemplates() {
@@ -2490,6 +2535,33 @@
         state.templatesLoading = false;
         render();
       }
+    } else if (action === "release-settings-save") {
+      const autoVinPhases = Boolean(root.querySelector("[data-release-auto-vin]")?.checked);
+      const autoFabrication = Boolean(root.querySelector("[data-release-auto-fab]")?.checked);
+      if ((autoVinPhases || autoFabrication) && !window.confirm("Turn on automatic release? Hawley will create Asana projects and tasks on their due dates without a click.")) return;
+      try {
+        await postJson("/api/admin/releases/settings", {
+          autoVinPhases,
+          autoFabrication,
+          fabricationLeadWorkingDays: Number(root.querySelector("[data-release-fab-lead]")?.value || 2)
+        });
+        state.releasesMessage = "Automatic release saved.";
+      } catch (error) {
+        state.releasesMessage = error.message || "Could not save automatic release.";
+      }
+      await loadReleases();
+    } else if (action === "release-fab-now") {
+      const { cycleKey, project } = event.target.closest("[data-action]").dataset;
+      if (!window.confirm(`Create ${project} in Asana now? Its tasks become visible to leads and workers.`)) return;
+      state.releasesMessage = "Creating…";
+      render();
+      try {
+        const result = await postJson("/api/admin/releases/fabrication", { cycleKey });
+        state.releasesMessage = result.message;
+      } catch (error) {
+        state.releasesMessage = error.message || "Could not create the Fabrication project.";
+      }
+      await loadReleases();
     } else if (action === "release-enroll") {
       const vin = root.querySelector("[data-release-candidate]")?.value || "";
       const leadWorkingDays = Number(root.querySelector("[data-release-lead-new]")?.value || 2);

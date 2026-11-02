@@ -11,7 +11,7 @@ import { buildTaskTimeTable, saveTaskMappingRules, taskMappingGroups, taskTimeCo
 import { HB_BUILD_LOCK_KEY, HB_BUILD_LOCK_NAMESPACE } from "../postgres-sync/src/hb-build-transaction.js";
 import { listTemplates, saveTemplateVersion, templateDetail, templateEditorOptions } from "../postgres-sync/src/template-editor.js";
 import { parseTrialEmails } from "../postgres-sync/src/team-tasks.js";
-import { releasePlan } from "./phase-release.js";
+import { fabricationReleasePlan, releasePlan } from "./phase-release.js";
 import { ASANA_CYCLE_FIELD_GID, addCycleOptions, pushCycleField } from "./asana-cycle-push.js";
 import { buildCyclePreview, cyclePlannerOverview, pendingAsanaPushes, productionScheduleRows, publishCyclePlan, recordAsanaPushResults } from "./cycle-planner.js";
 import { getDatabaseConfig } from "../postgres-sync/src/config.js";
@@ -11492,7 +11492,22 @@ async function handleAdminReleases(req) {
         .sort((a, b) => String(a.start_date).localeCompare(String(b.start_date)))[0];
       return { vin: choice.vin, firstPhase: first?.phase_name || "", firstCycle: first?.cycle_label || "", firstCycleStart: first?.start_date || "" };
     });
-  return { today, createEnabled: ADMIN_PROJECT_CREATE_ENABLED, pilots, candidates };
+  let fabrication;
+  try {
+    const { plan, lastError } = await fabricationPlan();
+    fabrication = { plan, lastError };
+  } catch (error) {
+    fabrication = { plan: [], lastError: error.message || String(error) };
+  }
+  return {
+    today,
+    createEnabled: ADMIN_PROJECT_CREATE_ENABLED,
+    settings: await releaseSettings(),
+    autoRelease: { ...autoReleaseState, intervalMinutes: Math.round(AUTO_RELEASE_INTERVAL_MS / 60000) },
+    pilots,
+    candidates,
+    fabrication
+  };
 }
 
 async function handleAdminReleasePilot(req) {
@@ -11527,15 +11542,17 @@ async function handleAdminReleasePilot(req) {
   return { ok: true, vin, leadWorkingDays: lead };
 }
 
-async function handleAdminPhaseRelease(req) {
-  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
-  requireAdminActor(actor);
-  const body = await readJsonBody(req);
+function requireReleaseWrites() {
   if (!ADMIN_PROJECT_CREATE_ENABLED) throw actionError("Project creation is in preview mode (HAWLEY_ADMIN_PROJECT_CREATE_ENABLED).", 409);
   const token = process.env.ASANA_PAT;
   if (!token) throw actionError("ASANA_PAT is not configured.", 503);
-  const vin = projectCreatorVinNumber(body.vin);
-  const phase = String(body.phase || "").trim();
+  return token;
+}
+
+// Release one pilot VIN phase: Project Creator for that phase only, into the VIN's project (the first release
+// creates it). Used by "Release now" and by the automatic release.
+async function releaseVinPhase({ vin, phase, projectName: requestedName = "", actorEmail = "" }) {
+  const token = requireReleaseWrites();
   const pilot = (await pool.query("select * from hb.release_pilots where vin = $1", [String(vin)])).rows[0];
   if (!pilot) throw actionError(`VIN ${vin} is not in the release pilot.`, 404);
 
@@ -11557,7 +11574,7 @@ async function handleAdminPhaseRelease(req) {
   if (!preview?.tasks?.length) throw actionError(`No template tasks match VIN ${vin} Phase ${phase}.`, 409, { skipped: preview?.skipped || {} });
   // Same naming as existing VIN projects ("334 - Endless Highways 1.2"); only used when the first release creates it.
   const modelName = String(preview.tasks[0]?.vinModelTypes?.[0] || "").trim();
-  const projectName = String(body.projectName || "").trim()
+  const projectName = String(requestedName || "").trim()
     || (modelName ? `${vin} - ${modelName}` : adminProjectNameForPreview("VIN", { vin }));
   const previous = releases.find(row => row.phase_name === phase);
   const runId = previous?.project_creation_run_id || crypto.randomUUID();
@@ -11568,41 +11585,254 @@ async function handleAdminPhaseRelease(req) {
     );
   } else {
     if (preview.existingSyncedTasks || preview.existingLegacyTasks) throw actionError(`VIN ${vin} Phase ${phase} already has tasks.`, 409);
-    await insertAdminProjectCreationRows(preview, runId, projectName, actor, { ...body, phaseRelease: true });
+    await insertAdminProjectCreationRows(preview, runId, projectName, { email: actorEmail }, { vin, phase, phaseRelease: true });
     await writePool.query(
       `insert into hb.phase_releases (vin, phase_name, production_record_id, cycle_label, project_creation_run_id, task_count, released_by)
        values ($1, $2, $3, $4, $5, $6, $7)`,
-      [String(vin), phase, item.productionRecordId, item.cycleLabel, runId, preview.tasks.length, actor?.email || ""]
+      [String(vin), phase, item.productionRecordId, item.cycleLabel, runId, preview.tasks.length, actorEmail]
     );
   }
   // A retried first release may already have created the project; reuse it rather than making a second one.
   const existingProjectGid = pilot.asana_project_gid
     || releases.find(row => row.run_project_gid)?.run_project_gid
     || "";
-  console.log("[hawley-phase-release]", JSON.stringify({ action: previous ? "retry" : "release", vin, phase, runId, tasks: preview.tasks.length, existingProjectGid, actor: actor?.email || "" }));
-  setImmediate(async () => {
-    try {
-      await runAdminProjectCreation({ token, preview, projectName, projectType: "VIN", runId, existingProjectGid });
-    } catch {
+  console.log("[hawley-phase-release]", JSON.stringify({ action: previous ? "retry" : "release", vin, phase, runId, tasks: preview.tasks.length, existingProjectGid, actor: actorEmail }));
+  const done = runAdminProjectCreation({ token, preview, projectName, projectType: "VIN", runId, existingProjectGid })
+    .catch(() => {
       // runAdminProjectCreation records the failure on the run; the Releases tab shows it with Retry.
-    } finally {
-      await writePool.query(
-        `update hb.release_pilots p set asana_project_gid = run.asana_project_gid
-           from hb.project_creation_runs run
-          where p.vin = $1 and p.asana_project_gid is null and run.project_creation_run_id::text = $2
-            and nullif(run.asana_project_gid, '') is not null`,
-        [String(vin), runId]
-      ).catch(() => {});
-    }
-  });
+    })
+    .finally(() => writePool.query(
+      `update hb.release_pilots p set asana_project_gid = run.asana_project_gid
+         from hb.project_creation_runs run
+        where p.vin = $1 and p.asana_project_gid is null and run.project_creation_run_id::text = $2
+          and nullif(run.asana_project_gid, '') is not null`,
+      [String(vin), runId]
+    ).catch(() => {}));
   return {
-    ok: true,
-    queued: true,
-    vin,
-    phase,
-    tasks: preview.tasks.length,
-    message: `Releasing VIN ${vin} Phase ${phase} (${preview.tasks.length} tasks) to ${existingProjectGid ? "its Asana project" : `a new Asana project "${projectName}"`}. Reload in a minute to see it.`
+    done,
+    result: {
+      ok: true,
+      queued: true,
+      vin,
+      phase,
+      tasks: preview.tasks.length,
+      message: `Releasing VIN ${vin} Phase ${phase} (${preview.tasks.length} tasks) to ${existingProjectGid ? "its Asana project" : `a new Asana project "${projectName}"`}. Reload in a minute to see it.`
+    }
   };
+}
+
+async function handleAdminPhaseRelease(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const { result } = await releaseVinPhase({
+    vin: projectCreatorVinNumber(body.vin),
+    phase: String(body.phase || "").trim(),
+    projectName: body.projectName,
+    actorEmail: actor?.email || ""
+  });
+  return result;
+}
+
+// Fabrication cycle projects (F21.26, ...) stay full copies per cycle; this only times their creation.
+async function releaseSettings(client = pool) {
+  const row = (await client.query("select * from hb.release_settings where settings_key = 'default'")).rows[0] || {};
+  return {
+    autoVinPhases: Boolean(row.auto_vin_phases),
+    autoFabrication: Boolean(row.auto_fabrication),
+    fabricationLeadWorkingDays: Number(row.fabrication_lead_working_days ?? 2),
+    updatedBy: row.updated_by || "",
+    updatedAt: row.updated_at || null
+  };
+}
+
+function fabricationProjectNameFor(cycle) {
+  return adminProjectNameForPreview("Fabrication", {
+    cycleRecordId: cycle.cycle_record_id,
+    cycleNumber: cycle.cycle_number,
+    cycleYear: cycle.cycle_year,
+    cycleKey: cycle.cycle_key
+  });
+}
+
+// Project names already in the Fabrication portfolio, whether made by Hawley or by hand in Asana.
+async function existingFabricationProjectNames(token) {
+  const names = new Set((await pool.query(
+    `select distinct asana_project_name as name from hb.rev1_task_instances where asana_portfolio_name ilike 'Fabrication%' and asana_project_name is not null
+     union select project_name from hb.project_creation_runs where project_type = 'Fabrication' and status <> 'failed'`
+  )).rows.map(row => String(row.name || "").trim()));
+  if (token) {
+    let offset = "";
+    do {
+      const page = await fetch(`https://app.asana.com/api/1.0/portfolios/${ADMIN_PROJECT_PORTFOLIOS.Fabrication}/items?opt_fields=name&limit=100${offset ? `&offset=${offset}` : ""}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!page.ok) throw actionError(`Asana Fabrication portfolio read failed (${page.status}).`, 502);
+      const json = await page.json();
+      for (const item of json.data || []) names.add(String(item.name || "").trim());
+      offset = json.next_page?.offset || "";
+    } while (offset);
+  }
+  return names;
+}
+
+async function fabricationReleaseRows(client = pool) {
+  return (await client.query(
+    `select r.*, run.status as run_status, run.error_message
+       from hb.fabrication_releases r
+       left join hb.project_creation_runs run on run.project_creation_run_id::text = r.project_creation_run_id`
+  )).rows;
+}
+
+async function fabricationPlan({ token = process.env.ASANA_PAT, client = pool } = {}) {
+  const [scheduleData, releases, settings] = await Promise.all([
+    adminProjectCreatorScheduleData("Fabrication", {}),
+    fabricationReleaseRows(client),
+    releaseSettings(client)
+  ]);
+  const cycles = scheduleData.cycles.filter(cycle => scheduleData.allScheduleRows.some(row =>
+    projectCreatorScheduleMatchesCycle(row, cycle) && projectCreatorScheduleIsFabrication(row)));
+  const existingProjectNames = await existingFabricationProjectNames(token);
+  return {
+    scheduleData,
+    cycles,
+    plan: fabricationReleasePlan(cycles, releases, {
+      today: todayIso(),
+      leadWorkingDays: settings.fabricationLeadWorkingDays,
+      existingProjectNames,
+      projectNameFor: fabricationProjectNameFor
+    }),
+    lastError: releases.find(row => row.run_status === "failed")?.error_message || ""
+  };
+}
+
+async function releaseFabricationCycle({ cycleKey, actorEmail = "" }) {
+  const token = requireReleaseWrites();
+  const { cycles, plan } = await fabricationPlan({ token, client: writePool });
+  const item = plan.find(row => row.cycleKey === cycleKey);
+  const cycle = cycles.find(row => row.cycle_key === cycleKey);
+  if (!item || !cycle) throw actionError(`Cycle ${cycleKey} is not an upcoming Fabrication cycle.`, 404);
+  if (!item.canRelease) throw actionError(`${item.projectName} is ${item.status === "exists" ? "already in Asana" : item.status}.`, 409);
+
+  const scheduleData = await adminProjectCreatorScheduleData("Fabrication", cycleIdentity({
+    cycleRecordId: cycle.cycle_record_id,
+    cycleNumber: cycle.cycle_number,
+    cycleYear: cycle.cycle_year,
+    cycleLabel: cycle.cycle_key
+  }));
+  if (scheduleData.selectedCycle?.cycle_key !== cycleKey) throw actionError(`Could not select cycle ${cycleKey} for the Fabrication project.`, 409);
+  const preview = await adminProjectCreatorPreview({
+    projectType: "Fabrication",
+    cycleNumber: Number(scheduleData.selectedCycle?.cycle_number || 0) || null,
+    selectedCycle: scheduleData.selectedCycle,
+    selectedVin: null,
+    projectName: item.projectName,
+    allScheduleRows: scheduleData.allScheduleRows,
+    selectedCycleRows: scheduleData.selectedCycleRows
+  });
+  if (!preview?.tasks?.length) throw actionError(`No Fabrication tasks for ${cycleKey}.`, 409, { skipped: preview?.skipped || {} });
+  const previous = (await fabricationReleaseRows(writePool)).find(row => row.cycle_key === cycleKey);
+  const runId = previous?.project_creation_run_id || crypto.randomUUID();
+  let existingProjectGid = "";
+  if (previous) {
+    existingProjectGid = (await writePool.query("select asana_project_gid from hb.project_creation_runs where project_creation_run_id::text = $1", [runId])).rows[0]?.asana_project_gid || "";
+    await writePool.query("update hb.project_creation_runs set status = 'started', error_message = null, completed_at = null where project_creation_run_id::text = $1", [runId]);
+  } else {
+    if (preview.existingSyncedTasks || preview.existingLegacyTasks || preview.existingNativePendingTasks) throw actionError(`${item.projectName} already has tasks.`, 409);
+    await insertAdminProjectCreationRows(preview, runId, item.projectName, { email: actorEmail }, { cycleKey, fabricationRelease: true });
+    await writePool.query(
+      `insert into hb.fabrication_releases (cycle_key, cycle_label, project_name, project_creation_run_id, task_count, released_by)
+       values ($1, $2, $3, $4, $5, $6)`,
+      [cycleKey, item.cycleLabel, item.projectName, runId, preview.tasks.length, actorEmail]
+    );
+  }
+  console.log("[hawley-fabrication-release]", JSON.stringify({ action: previous ? "retry" : "release", cycleKey, projectName: item.projectName, runId, tasks: preview.tasks.length, actor: actorEmail }));
+  const done = runAdminProjectCreation({ token, preview, projectName: item.projectName, projectType: "Fabrication", runId, existingProjectGid }).catch(() => {});
+  return {
+    done,
+    result: { ok: true, queued: true, cycleKey, tasks: preview.tasks.length, message: `Creating ${item.projectName} (${preview.tasks.length} tasks) in Asana. Reload in a minute to see it.` }
+  };
+}
+
+async function handleAdminFabricationRelease(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  return (await releaseFabricationCycle({ cycleKey: String(body.cycleKey || "").trim(), actorEmail: actor?.email || "" })).result;
+}
+
+async function handleAdminReleaseSettings(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const lead = Math.round(Number(body.fabricationLeadWorkingDays ?? 2));
+  if (!Number.isFinite(lead) || lead < 0 || lead > 20) throw actionError("Lead time must be 0 to 20 working days.", 400);
+  await writePool.query(
+    `update hb.release_settings set auto_vin_phases = $1, auto_fabrication = $2, fabrication_lead_working_days = $3, updated_by = $4, updated_at = now()
+      where settings_key = 'default'`,
+    [body.autoVinPhases === true, body.autoFabrication === true, lead, actor?.email || ""]
+  );
+  const settings = await releaseSettings(writePool);
+  console.log("[hawley-auto-release]", JSON.stringify({ action: "settings", ...settings }));
+  return settings;
+}
+
+// Automatic release: every few minutes, release whatever is due (pilot VIN phases in order, then the next
+// Fabrication cycle project) when the matching switch is on. One server at a time via an advisory lock.
+const AUTO_RELEASE_INTERVAL_MS = Number(process.env.HAWLEY_AUTO_RELEASE_INTERVAL_MS || 10 * 60 * 1000);
+const AUTO_RELEASE_LOCK = [1212241740, 1381123393];
+const autoReleaseState = { running: false, lastRunAt: "", lastReleased: [], lastError: "" };
+let autoReleaseTimer = null;
+
+async function runAutomaticReleases() {
+  if (autoReleaseState.running || !ADMIN_PROJECT_CREATE_ENABLED || !process.env.ASANA_PAT) return;
+  autoReleaseState.running = true;
+  const client = await writePool.connect();
+  let locked = false;
+  try {
+    locked = (await client.query("select pg_try_advisory_lock($1, $2) as ok", AUTO_RELEASE_LOCK)).rows[0].ok;
+    if (!locked) return;
+    const settings = await releaseSettings(client);
+    const released = [];
+    if (settings.autoVinPhases) {
+      const scheduleData = await adminProjectCreatorScheduleData("VIN", {});
+      for (const pilot of (await client.query("select * from hb.release_pilots order by vin::int")).rows) {
+        const vin = Number(pilot.vin);
+        const next = releasePlan(phaseReleaseScheduleRows(scheduleData.allScheduleRows, vin), await phaseReleaseRows(client, vin), { today: todayIso(), leadWorkingDays: pilot.lead_working_days })
+          .find(row => row.status === "due");
+        if (!next) continue;
+        const { done } = await releaseVinPhase({ vin, phase: next.phase, actorEmail: "automatic release" });
+        await done;
+        released.push(`VIN ${vin} ${next.phase}`);
+      }
+    }
+    if (settings.autoFabrication) {
+      for (const item of (await fabricationPlan({ client })).plan.filter(row => row.status === "due")) {
+        const { done } = await releaseFabricationCycle({ cycleKey: item.cycleKey, actorEmail: "automatic release" });
+        await done;
+        released.push(item.projectName);
+      }
+    }
+    autoReleaseState.lastReleased = released;
+    autoReleaseState.lastError = "";
+    if (released.length) console.log("[hawley-auto-release]", JSON.stringify({ action: "released", released }));
+  } catch (error) {
+    autoReleaseState.lastError = error.message || String(error);
+    console.error("[hawley-auto-release]", JSON.stringify({ action: "failed", error: autoReleaseState.lastError }));
+  } finally {
+    if (locked) await client.query("select pg_advisory_unlock($1, $2)", AUTO_RELEASE_LOCK).catch(() => {});
+    client.release();
+    autoReleaseState.running = false;
+    autoReleaseState.lastRunAt = new Date().toISOString();
+  }
+}
+
+function startAutomaticReleaseWatcher() {
+  if (!Number.isFinite(AUTO_RELEASE_INTERVAL_MS) || AUTO_RELEASE_INTERVAL_MS < 60000) {
+    console.warn("Hawley automatic release disabled: HAWLEY_AUTO_RELEASE_INTERVAL_MS must be at least 60000.");
+    return;
+  }
+  autoReleaseTimer = setInterval(() => void runAutomaticReleases(), AUTO_RELEASE_INTERVAL_MS);
+  autoReleaseTimer.unref?.();
+  setTimeout(() => void runAutomaticReleases(), 60000).unref?.();
 }
 
 async function handleAdminTemplates(req, url) {
@@ -13967,6 +14197,16 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/admin/releases/fabrication" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminFabricationRelease(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/releases/settings" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminReleaseSettings(req));
+      return;
+    }
+
     if (url.pathname === "/api/admin/releases/release" && req.method === "POST") {
       sendJson(res, 200, await handleAdminPhaseRelease(req));
       return;
@@ -14235,6 +14475,7 @@ async function startServer() {
   startAirtableCurrentAssignmentsWatcher();
   startAutomaticBendingStudyWatcher();
   startNightlyRefreshScheduler();
+  startAutomaticReleaseWatcher();
   server.listen(PORT, HOST, () => {
     console.log(`Hawley worker pilot listening on http://${HOST}:${PORT}`);
     // One-time, idempotent repair explicitly authorized for the first direct VIN 327 project.
