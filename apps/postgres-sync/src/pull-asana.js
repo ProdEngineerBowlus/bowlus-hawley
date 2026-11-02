@@ -13,6 +13,18 @@ const PORTFOLIOS = Object.freeze({
     expectedName: "Fabrication - 2026",
     taskType: "Cycle Project"
   },
+  // Department portfolios (2026-11): one project per cycle, like Fabrication. Frames holds Phase A1/A2 and
+  // Frame-A/B work; CNC holds CNC-A/B work.
+  frames: {
+    gid: process.env.HAWLEY_ASANA_FRAMES_PORTFOLIO_GID || "1220139579883873",
+    expectedName: "Frames - 2026",
+    taskType: "Cycle Project"
+  },
+  cnc: {
+    gid: process.env.HAWLEY_ASANA_CNC_PORTFOLIO_GID || "1220139579883877",
+    expectedName: "CNC - 2026",
+    taskType: "Cycle Project"
+  },
   vin: {
     gid: process.env.HAWLEY_ASANA_VIN_PORTFOLIO_GID || "1212620750946276",
     expectedName: "VINs - 2026",
@@ -43,11 +55,14 @@ const PORTFOLIOS = Object.freeze({
 });
 
 const PORTFOLIO_ALIASES = Object.freeze({
-  both: ["fabrication", "vin", "vin2025", "engineeringChanges"],
-  all: ["fabrication", "vin", "vin2025", "engineeringChanges"],
+  both: ["fabrication", "frames", "cnc", "vin", "vin2025", "engineeringChanges"],
+  all: ["fabrication", "frames", "cnc", "vin", "vin2025", "engineeringChanges"],
   cycle: ["fabrication"],
   fabrication: ["fabrication"],
   fab: ["fabrication"],
+  frames: ["frames"],
+  frame: ["frames"],
+  cnc: ["cnc"],
   // Keep the existing `vin` scope precise for project-level refreshes.  The
   // all/both scopes include both VIN portfolios for recurring full refreshes.
   vin: ["vin"],
@@ -155,7 +170,7 @@ function parseArgs(argv) {
         "Usage: npm run pg:pull:asana -- [options]",
         "",
         "Options:",
-        "  --portfolio both|fabrication|cycle|vin|vin2025|engineering",
+        "  --portfolio both|fabrication|cycle|frames|cnc|vin|vin2025|engineering",
         "  --project GID          Pull one project under the selected portfolio context.",
         "  --limit-projects N     Limit project count for testing.",
         "  --skip-subtasks        Pull top-level project tasks only.",
@@ -169,7 +184,7 @@ function parseArgs(argv) {
   }
 
   if (!PORTFOLIO_ALIASES[args.portfolio]) {
-    throw new Error("--portfolio must be both, fabrication, cycle, vin, vin2025, or engineering.");
+    throw new Error("--portfolio must be both, fabrication, cycle, frames, cnc, vin, vin2025, or engineering.");
   }
   if (args.projectGid && args.limitProjects > 0) {
     throw new Error("--project and --limit-projects cannot be combined.");
