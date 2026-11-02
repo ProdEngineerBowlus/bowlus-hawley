@@ -11458,6 +11458,62 @@ async function phaseReleaseRows(client, vin) {
   )).rows;
 }
 
+// Workflow definition (hb.workflow_stages / hb.workflow_gates, issue 49): stages, their phases and projects, and
+// the gates between them. Read on each use so Admin edits apply immediately.
+async function workflowDefinition(client = pool) {
+  const [stages, gates] = await Promise.all([
+    client.query("select * from hb.workflow_stages order by sort_order, stage_key"),
+    client.query("select * from hb.workflow_gates order by gate_key")
+  ]);
+  return {
+    stages: stages.rows,
+    gates: gates.rows,
+    stage: key => stages.rows.find(row => row.stage_key === key) || null,
+    gate: key => gates.rows.find(row => row.gate_key === key) || null
+  };
+}
+
+// Phases and work areas: comma or line separated. Checklist items: one per line (they may contain commas).
+function cleanList(value, separator = /[\n,]+/) {
+  const list = Array.isArray(value) ? value : String(value || "").split(separator);
+  return [...new Set(list.map(item => String(item).trim()).filter(Boolean))];
+}
+
+async function handleAdminWorkflowStage(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const key = String(body.stageKey || "").trim();
+  const current = (await pool.query("select * from hb.workflow_stages where stage_key = $1", [key])).rows[0];
+  if (!current) throw actionError(`Unknown stage ${key}.`, 404);
+  const pattern = String(body.projectNamePattern ?? current.project_name_pattern).trim();
+  if (current.project_scope === "cycle" && pattern && !pattern.includes("{cycle}")) throw actionError("A per-cycle project name must include {cycle}.", 400);
+  await writePool.query(
+    `update hb.workflow_stages set phases = $2, work_areas = $3, project_name_pattern = $4, active = $5, notes = $6, updated_by = $7, updated_at = now()
+      where stage_key = $1`,
+    [key, cleanList(body.phases ?? current.phases), cleanList(body.workAreas ?? current.work_areas), pattern,
+      body.active === undefined ? current.active : body.active === true, String(body.notes ?? current.notes), actor?.email || ""]
+  );
+  console.log("[hawley-workflow]", JSON.stringify({ action: "stage", key, actor: actor?.email || "" }));
+  return { ok: true, workflow: await workflowDefinition(writePool) };
+}
+
+async function handleAdminWorkflowGate(req) {
+  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
+  requireAdminActor(actor);
+  const body = await readJsonBody(req);
+  const key = String(body.gateKey || "").trim();
+  const current = (await pool.query("select * from hb.workflow_gates where gate_key = $1", [key])).rows[0];
+  if (!current) throw actionError(`Unknown gate ${key}.`, 404);
+  await writePool.query(
+    `update hb.workflow_gates set checklist = $2, active = $3, notes = $4, updated_by = $5, updated_at = now() where gate_key = $1`,
+    [key, cleanList(body.checklist ?? current.checklist, /\n+/), body.active === undefined ? current.active : body.active === true,
+      String(body.notes ?? current.notes), actor?.email || ""]
+  );
+  console.log("[hawley-workflow]", JSON.stringify({ action: "gate", key, actor: actor?.email || "" }));
+  return { ok: true, workflow: await workflowDefinition(writePool) };
+}
+
 async function framesGateRow(client, vin) {
   return (await client.query("select * from hb.vin_gates where vin = $1 and gate = 'frames'", [String(vin)])).rows[0] || null;
 }
@@ -11477,17 +11533,21 @@ async function framesStageTasks(client, releases) {
 
 async function pilotPlan(client, pilot, allScheduleRows) {
   const vin = Number(pilot.vin);
-  const [releases, gate] = await Promise.all([phaseReleaseRows(client, vin), framesGateRow(client, vin)]);
-  const framesStage = pilot.frames_stage !== false;
+  const [releases, gate, workflow] = await Promise.all([phaseReleaseRows(client, vin), framesGateRow(client, vin), workflowDefinition(client)]);
+  const framesDefinition = workflow.stage("frames");
+  const gateDefinition = workflow.gate("frames");
+  const framesStage = pilot.frames_stage !== false && Boolean(framesDefinition?.active) && Boolean(gateDefinition?.active);
   const plan = releasePlan(phaseReleaseScheduleRows(allScheduleRows, vin), releases, {
     today: todayIso(),
     leadWorkingDays: pilot.lead_working_days,
     framesStage,
-    framesGatePassed: gate?.status === "passed" || gate?.status === "passing"
+    framesGatePassed: gate?.status === "passed" || gate?.status === "passing",
+    framesPhases: framesDefinition?.phases?.length ? framesDefinition.phases : undefined,
+    framesProjectPattern: framesDefinition?.project_name_pattern || undefined
   });
   const tasks = framesStage ? await framesStageTasks(client, releases) : [];
   const framesGate = framesStage
-    ? framesGateStatus(plan, { total: tasks.length, complete: tasks.filter(row => row.completed).length, gate })
+    ? framesGateStatus(plan, { total: tasks.length, complete: tasks.filter(row => row.completed).length, gate, checklist: gateDefinition?.checklist || [] })
     : null;
   const vinProjectGid = pilot.asana_project_gid
     || releases.find(row => row.target !== "frames" && row.run_project_gid)?.run_project_gid
@@ -11540,9 +11600,11 @@ async function handleAdminReleases(req) {
   } catch (error) {
     fabrication = { plan: [], lastError: error.message || String(error) };
   }
+  const workflow = await workflowDefinition();
   return {
     today,
     createEnabled: ADMIN_PROJECT_CREATE_ENABLED,
+    workflow: { stages: workflow.stages, gates: workflow.gates },
     settings: await releaseSettings(),
     autoRelease: { ...autoReleaseState, intervalMinutes: Math.round(AUTO_RELEASE_INTERVAL_MS / 60000) },
     pilots,
@@ -11684,7 +11746,8 @@ async function releaseVinPhase({ vin, phase, projectName: requestedName = "", ac
 // phase (B) into the VIN project, then moves the A1/A2 tasks from the Frames project into it. Frame-A/B work stays
 // in Frames. Every step is safe to repeat, so a failed gate can simply be passed again.
 async function passFramesGate({ vin, actorEmail }) {
-  const result = { nextPhase: null, moved: 0, failed: [] };
+  const checklist = (await writePool.query("select result -> 'checklist' as checklist from hb.vin_gates where vin = $1 and gate = 'frames'", [String(vin)])).rows[0]?.checklist || [];
+  const result = { checklist, nextPhase: null, moved: 0, failed: [] };
   try {
     const token = requireReleaseWrites();
     const scheduleData = await adminProjectCreatorScheduleData("VIN", {});
@@ -11748,6 +11811,9 @@ async function handleAdminFramesGate(req) {
   const scheduleData = await adminProjectCreatorScheduleData("VIN", {});
   const { framesGate } = await pilotPlan(writePool, pilot, scheduleData.allScheduleRows);
   if (!framesGate) throw actionError(`VIN ${vin} does not use the Frames stage.`, 409);
+  const checked = cleanList(body.checked, /\n+/);
+  const missing = framesGate.checklist.filter(item => !checked.includes(item));
+  if (framesGate.canPass && missing.length) throw actionError(`Tick every gate check first: ${missing.join("; ")}.`, 409);
   if (!framesGate.canPass) {
     throw actionError(framesGate.status === "passed" ? `VIN ${vin} already passed the Frames gate.`
       : framesGate.status === "passing" ? `VIN ${vin} is passing the Frames gate now.`
@@ -11755,9 +11821,9 @@ async function handleAdminFramesGate(req) {
           : `${framesGate.complete} of ${framesGate.total} A1/A2 tasks are complete.`, 409);
   }
   await writePool.query(
-    `insert into hb.vin_gates (vin, gate, status, passed_by, passed_at) values ($1, 'frames', 'passing', $2, now())
-     on conflict (vin, gate) do update set status = 'passing', passed_by = excluded.passed_by, passed_at = now()`,
-    [String(vin), actor?.email || ""]
+    `insert into hb.vin_gates (vin, gate, status, passed_by, passed_at, result) values ($1, 'frames', 'passing', $2, now(), $3)
+     on conflict (vin, gate) do update set status = 'passing', passed_by = excluded.passed_by, passed_at = now(), result = excluded.result`,
+    [String(vin), actor?.email || "", JSON.stringify({ checklist: framesGate.checklist })]
   );
   console.log("[hawley-frames-gate]", JSON.stringify({ action: "pass", vin, tasks: framesGate.total, actor: actor?.email || "" }));
   setImmediate(() => void passFramesGate({ vin, actorEmail: actor?.email || "" }));
@@ -14336,6 +14402,16 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/releases/pilot" && req.method === "POST") {
       sendJson(res, 200, await handleAdminReleasePilot(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/workflow/stage" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminWorkflowStage(req));
+      return;
+    }
+
+    if (url.pathname === "/api/admin/workflow/gate" && req.method === "POST") {
+      sendJson(res, 200, await handleAdminWorkflowGate(req));
       return;
     }
 

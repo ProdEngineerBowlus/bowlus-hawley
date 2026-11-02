@@ -73,7 +73,9 @@ test("Frames stage: A1/A2 go to the cycle's Frames project and Phase B waits for
     ["C", "vin", null, "waiting", false]
   ]);
   assert.deepEqual(framesGateStatus(plan, { total: 30, complete: 29 }).status, "open", "one task still open");
-  assert.deepEqual(framesGateStatus(plan, { total: 30, complete: 30 }), { status: "ready", total: 30, complete: 30, released: true, canPass: true, result: null });
+  assert.deepEqual(framesGateStatus(plan, { total: 30, complete: 30 }), { status: "ready", total: 30, complete: 30, released: true, canPass: true, result: null, checklist: [] });
+  assert.equal(releasePlan(rows, released, { today: "2026-12-18", framesStage: true, framesPhases: ["A1"], framesProjectPattern: "Frames {cycle}" })[1].target, "vin", "stage phases come from the workflow");
+  assert.equal(framesProjectName("C22.26", "Frames {cycle}"), "Frames 22.26");
 
   plan = releasePlan(rows, released, { today: "2026-12-18", framesStage: true, framesGatePassed: true });
   assert.equal(plan[2].status, "due", "after the gate, Phase B releases as usual");

@@ -48,30 +48,37 @@ export function fabricationReleasePlan(cycles, releases, { today, leadWorkingDay
     });
 }
 
-// Frames stage: Phase A1/A2 go to the cycle's Frames project and must pass the Frames gate before Phase B.
+// Frames stage: its phases (A1/A2 by default; hb.workflow_stages) go to the cycle's Frames project and must pass
+// the Frames gate before the next phase.
 export const FRAMES_PHASES = Object.freeze(["A1", "A2"]);
 
-// "C22.26" -> "FR22.26", alongside Fabrication's F22.26.
-export function framesProjectName(cycleLabel) {
+// Project names from a stage pattern: {cycle} -> "22.26", {vin}, {model}. "FR{cycle}" + "C22.26" -> "FR22.26".
+export function stageProjectName(pattern, { cycleLabel = "", vin = "", model = "" } = {}) {
   const match = /^C?(\d+)\.(\d{2})$/i.exec(String(cycleLabel || "").trim());
-  return match ? `FR${match[1]}.${match[2]}` : `FR ${cycleLabel}`;
+  const cycle = match ? `${match[1]}.${match[2]}` : String(cycleLabel || "");
+  return String(pattern || "").replaceAll("{cycle}", cycle).replaceAll("{vin}", String(vin)).replaceAll("{model}", String(model)).trim();
 }
 
-// The Frames gate is ready when every A1/A2 phase is released and all of their tasks are complete.
-export function framesGateStatus(plan, { total = 0, complete = 0, gate = null } = {}) {
+export function framesProjectName(cycleLabel, pattern = "FR{cycle}") {
+  return stageProjectName(pattern, { cycleLabel });
+}
+
+// The Frames gate is ready when every Frames phase is released and all of its tasks are complete. Checklist items
+// (hb.workflow_gates) must all be ticked when passing.
+export function framesGateStatus(plan, { total = 0, complete = 0, gate = null, checklist = [] } = {}) {
   const framesPhases = (plan || []).filter(row => row.target === "frames");
   const released = framesPhases.length > 0 && framesPhases.every(row => row.status === "released");
   const status = gate?.status === "passed" ? "passed"
     : gate?.status === "passing" ? "passing"
       : gate?.status === "failed" ? "failed"
         : released && total > 0 && complete >= total ? "ready" : "open";
-  return { status, total, complete, released, canPass: status === "ready" || status === "failed", result: gate?.result || null };
+  return { status, total, complete, released, canPass: status === "ready" || status === "failed", result: gate?.result || null, checklist: [...checklist] };
 }
 
 // scheduleRows: { phase_name, production_record_id, cycle_label, start_date } for one VIN.
 // releases: hb.phase_releases rows joined with their run status ({ phase_name, run_status, task_count, ... }).
 // framesStage: A1/A2 release into Frames and the first later phase waits for the Frames gate (framesGatePassed).
-export function releasePlan(scheduleRows, releases, { today, leadWorkingDays = 2, framesStage = false, framesGatePassed = false } = {}) {
+export function releasePlan(scheduleRows, releases, { today, leadWorkingDays = 2, framesStage = false, framesGatePassed = false, framesPhases = FRAMES_PHASES, framesProjectPattern = "FR{cycle}" } = {}) {
   const releaseByPhase = new Map((releases || []).map(row => [row.phase_name, row]));
   const phases = [...(scheduleRows || [])]
     .filter(row => row.phase_name)
@@ -82,7 +89,7 @@ export function releasePlan(scheduleRows, releases, { today, leadWorkingDays = 2
     const release = releaseByPhase.get(row.phase_name) || null;
     const cycleStart = row.start_date ? String(row.start_date).slice(0, 10) : null;
     const due = releaseDueDate(cycleStart, leadWorkingDays);
-    const target = framesStage && FRAMES_PHASES.includes(row.phase_name) ? "frames" : "vin";
+    const target = framesStage && framesPhases.includes(row.phase_name) ? "frames" : "vin";
     const waitsForGate = framesStage && target === "vin" && !gateChecked;
     if (target === "vin") gateChecked = true;
     let status;
@@ -103,7 +110,7 @@ export function releasePlan(scheduleRows, releases, { today, leadWorkingDays = 2
       cycleStart,
       releaseDue: due,
       target,
-      projectName: target === "frames" ? framesProjectName(row.cycle_label) : null,
+      projectName: target === "frames" ? framesProjectName(row.cycle_label, framesProjectPattern) : null,
       status,
       canRelease: status === "due" || status === "upcoming" || status === "failed",
       runId: release?.project_creation_run_id || null,
