@@ -36,25 +36,23 @@ The repo is `ProdEngineerBowlus/bowlus-hawley`, and it is public. Erick uses the
   `npm test` should pass, with 93 or more tests. It uses an embedded Postgres (PGlite), so it doesn't need a database.
 - [ ] **E** In the Claude desktop app, open the Code tab, choose **C:\dev\bowlus-hawley** as the folder, and start a session.
 - [ ] **E** Open the onboarding guide in Claude Code: https://claude.ai/claude-code/onboard/xKTWCwUVisLz
+- The repo's `CLAUDE.md` loads automatically in every Claude Code session. It gives Erick's agent the same rules, commands and database tools that Jacob's agent uses.
 
 ## 5. DigitalOcean: deploys, logs, database
 The app deploys from `main` to DigitalOcean App Platform (app `b56a733a-3704-4537-8e43-560675c9cdae`, database `3173c8b8-455b-423f-a86f-a90a322a18ef`).
 - [ ] **J** Invite erick@bowlus.com to the DigitalOcean team: cloud.digitalocean.com → Settings → Team → Invite Members. Give him the **Member** role, or **Owner** if he needs to manage billing and the team.
 - [ ] **E** Accept the invite. Then go to API → Generate New Token, give the token a name, and choose read + write. Run `doctl auth init` and paste the token **into the terminal only**.
 - [ ] **E** Check it worked: `doctl apps get b56a733a-3704-4537-8e43-560675c9cdae`.
-- [ ] **E** For read-only DB checks, use the `bowlus_readonly` user. The agent can get its connection details from `doctl databases connection` and `doctl databases user get … --show` at runtime. Never copy them into files or chat.
+- [ ] **E** Check database access. Both commands fetch credentials from doctl at runtime and never print them:
+  - Read-only test: `node scripts/hawley-db.mjs query some.sql`
+  - Admin test (only reads the user list): `node scripts/hawley-db.mjs admin -- npm run pg:hawley-auth-user -- list`
 
 ## 6. Hawley app: admin role
-- [ ] **J** Make Erick a Hawley admin so he can use the Admin pages (Releases, Workflow, Handoffs). The CLI needs the sync/admin database URL in your shell (`HAWLEY_SYNC_DATABASE_URL`, read from doctl, not a file).
-  - Check whether he's already an admin (the pilot roster may have set "Erick T"): `npm run pg:hawley-auth-user -- list`
-  - If he isn't, run: `npm run pg:hawley-auth-user -- set-role erick@bowlus.com admin`
-  - If he has never signed in, set a temporary password instead, typing it only in the shell:
-    ```powershell
-    $env:HAWLEY_AUTH_PASSWORD="<temporary password>"
-    npm run pg:hawley-auth-user -- set-password erick@bowlus.com --active --role=admin
-    Remove-Item Env:\HAWLEY_AUTH_PASSWORD
-    ```
+- [x] Erick (erick@bowlus.com) is already a Hawley **admin**.
 - [ ] **E** Sign in to the Hawley web app, open **Admin**, and change the temporary password if asked.
+- To make someone else an admin, for example Alex (systemslead@bowlusroadchief.com, currently a worker), Erick's agent runs:
+  `node scripts/hawley-db.mjs admin -- npm run pg:hawley-auth-user -- set-role systemslead@bowlusroadchief.com admin`
+  This is a production write, so tell Jacob first.
 
 ## 7. Asana
 - [ ] **J** Make sure Erick is a member, with edit rights, of the portfolios **VINs - 2026**, **Fabrication - 2026**, **Frames - 2026**, **CNC - 2026**, and their projects.
