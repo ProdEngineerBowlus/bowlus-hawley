@@ -1,3 +1,4 @@
+import { pathToFileURL } from "node:url";
 import pg from "pg";
 import { getDatabaseConfig } from "./config.js";
 
@@ -9,6 +10,7 @@ const TABLES = Object.freeze([
   {
     envKey: "HAWLEY_AIRTABLE_TASK_INSTANCES_TABLE",
     sourceName: "Task Instances Rev1",
+    appOwned: true,
     targetTable: "raw.airtable_task_instances"
   },
   {
@@ -39,6 +41,7 @@ const TABLES = Object.freeze([
   {
     envKey: "HAWLEY_AIRTABLE_WORK_FORCE_TABLE",
     sourceName: "Work Force",
+    appOwned: true,
     targetTable: "raw.airtable_work_force"
   },
   {
@@ -49,6 +52,7 @@ const TABLES = Object.freeze([
   {
     envKey: "HAWLEY_AIRTABLE_WORKER_DAILY_ACTUALS_TABLE",
     sourceName: "Worker Daily Task Actuals",
+    appOwned: true,
     targetTable: "raw.airtable_worker_daily_actuals"
   },
   {
@@ -62,6 +66,71 @@ const TABLES = Object.freeze([
     targetTable: "raw.airtable_cnc_sheets"
   }
 ]);
+
+// Airtable tables that already have a raw.airtable_* table but were retired from pulls (Rev1 capacity, 2026-10-29).
+const RETIRED_SOURCES = Object.freeze(["Phase Cycle Load Rev1", "Worker Cycle Bank Rev1", "Worker Phase Allocation Rev1"]);
+
+// Usage: pull-airtable.js [--tables "CNC Parts Master,CNC Sheets"] [--extra] [--dry-run] [--allow-app-owned]
+//   --tables           only these configured tables (default: all configured tables)
+//   --extra            also mirror every other table in the base into raw.airtable_records (Engineering Changes, ...)
+//   --dry-run          fetch and compare with what Hawley holds; write nothing
+//   --allow-app-owned  include tables whose Hawley data the app now owns (Work Force, Task Instances, Worker Daily
+//                      Task Actuals). Without it they are skipped, so a refresh can't overwrite live app data with
+//                      Airtable's. Only fresh-database bootstraps pass it.
+export function parseArgs(argv) {
+  const options = { tables: null, extra: false, dryRun: false, allowAppOwned: false };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--extra") options.extra = true;
+    else if (arg === "--dry-run") options.dryRun = true;
+    else if (arg === "--allow-app-owned") options.allowAppOwned = true;
+    else if (arg === "--tables") options.tables = String(argv[++i] || "").split(",").map(name => name.trim()).filter(Boolean);
+    else if (arg.startsWith("--tables=")) options.tables = arg.slice(9).split(",").map(name => name.trim()).filter(Boolean);
+    else throw new Error(`Unknown option ${arg}`);
+  }
+  return options;
+}
+
+export function selectTables(options, env = process.env) {
+  const configured = TABLES.map(table => ({ ...table, sourceName: env[table.envKey] || table.sourceName }));
+  let selected = configured;
+  if (options.tables) {
+    const unknown = options.tables.filter(name => !configured.some(table => table.sourceName === name));
+    if (unknown.length) throw new Error(`Not a configured Airtable table: ${unknown.join(", ")}`);
+    selected = configured.filter(table => options.tables.includes(table.sourceName));
+  }
+  const blocked = selected.filter(table => table.appOwned && !options.allowAppOwned);
+  if (blocked.length && options.tables) {
+    throw new Error(`${blocked.map(table => table.sourceName).join(", ")}: Hawley's app owns this data now; refreshing from Airtable would overwrite it. Pass --allow-app-owned only for a fresh-database bootstrap.`);
+  }
+  return { selected: selected.filter(table => !table.appOwned || options.allowAppOwned), skipped: blocked.map(table => table.sourceName), configured };
+}
+
+export function extraTables(schema, configured) {
+  const known = new Set([...configured.map(table => table.sourceName), ...RETIRED_SOURCES]);
+  return (schema.tables || []).filter(table => !known.has(table.name));
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  return JSON.stringify(value ?? null);
+}
+
+export function diffRecords(currentRows, records) {
+  const current = new Map(currentRows.map(row => [row.record_id, stableJson(row.fields_json)]));
+  const incoming = new Set();
+  let added = 0;
+  let changed = 0;
+  for (const record of records) {
+    incoming.add(record.id);
+    const before = current.get(record.id);
+    if (before === undefined) added += 1;
+    else if (before !== stableJson(record.fields || {})) changed += 1;
+  }
+  const removed = [...current.keys()].filter(id => !incoming.has(id)).length;
+  return { airtable: records.length, hawley: current.size, added, changed, removed };
+}
 
 function requiredEnv(name) {
   const value = process.env[name];
@@ -148,6 +217,26 @@ async function upsertRawRecords(client, table, records, sourceTableName) {
   }
 }
 
+async function upsertGenericRecords(client, table, records) {
+  for (let i = 0; i < records.length; i += 200) {
+    const batch = records.slice(i, i + 200);
+    await client.query(
+      `
+        insert into raw.airtable_records (table_id, table_name, record_id, fields_json, airtable_created_at, synced_at)
+        select $1, $2, r.id, r.fields, r.created, now()
+          from jsonb_to_recordset($3::jsonb) as r(id text, fields jsonb, created timestamptz)
+        on conflict (table_id, record_id) do update set
+          table_name = excluded.table_name,
+          fields_json = excluded.fields_json,
+          airtable_created_at = excluded.airtable_created_at,
+          synced_at = now()
+      `,
+      [table.id, table.name, JSON.stringify(batch.map(record => ({ id: record.id, fields: record.fields || {}, created: record.createdTime || null })))]
+    );
+  }
+  await client.query("delete from raw.airtable_records where table_id = $1 and not (record_id = any($2::text[]))", [table.id, records.map(record => record.id)]);
+}
+
 async function upsertSchemaCatalog(client, schema, tableNames) {
   const wanted = new Set(tableNames);
   const tables = (schema.tables || []).filter(table => wanted.has(table.name));
@@ -214,13 +303,14 @@ async function upsertSchemaCatalog(client, schema, tableNames) {
   return tables;
 }
 
-async function startRun(client) {
+async function startRun(client, jobName = "pull_airtable", mode = "live-readonly") {
   const result = await client.query(
     `
       insert into sync.run_log (job_name, mode, status)
-      values ('pull_airtable', 'live-readonly', 'running')
+      values ($1, $2, 'running')
       returning id
-    `
+    `,
+    [jobName, mode]
   );
   return result.rows[0].id;
 }
@@ -249,59 +339,80 @@ async function finishRun(client, id, status, summary) {
 }
 
 async function main() {
+  const options = parseArgs(process.argv.slice(2));
   const baseId = requiredEnv("AIRTABLE_BASE");
   const token = requiredEnv("AIRTABLE_PAT");
+  const { selected, skipped, configured } = selectTables(options);
   const client = new Client(getDatabaseConfig({ useSyncUrl: true }));
   await client.connect();
 
-  const runId = await startRun(client);
+  const selective = Boolean(options.tables || options.extra || !options.allowAppOwned);
+  const runId = options.dryRun ? null : await startRun(client, selective ? "pull_airtable_reference" : "pull_airtable");
   const summary = {
+    dryRun: options.dryRun,
     tables: {},
+    extraTables: {},
+    skippedAppOwned: skipped,
     recordsRead: 0,
     recordsWritten: 0,
     errorCount: 0
   };
 
   try {
-    const sourceTableNames = TABLES.map(tableConfig => process.env[tableConfig.envKey] || tableConfig.sourceName);
     const schema = await fetchAirtableSchema({ baseId, token });
-    const schemaTables = await upsertSchemaCatalog(client, schema, sourceTableNames);
-    summary.schemaTables = Object.fromEntries(
-      schemaTables.map(table => [table.name, { fields: (table.fields || []).length }])
-    );
-
-    for (const tableConfig of TABLES) {
-      const sourceName = process.env[tableConfig.envKey] || tableConfig.sourceName;
-      const records = await fetchAllAirtableRecords({ baseId, token, tableName: sourceName });
-      await upsertRawRecords(client, tableConfig.targetTable, records, sourceName);
-      summary.tables[sourceName] = {
-        targetTable: tableConfig.targetTable,
-        records: records.length
-      };
-      summary.recordsRead += records.length;
-      summary.recordsWritten += records.length;
-      console.log(`${sourceName}: ${records.length} record(s) mirrored to ${tableConfig.targetTable}`);
+    const extras = options.extra ? extraTables(schema, configured) : [];
+    if (!options.dryRun) {
+      const schemaTables = await upsertSchemaCatalog(client, schema, [...selected.map(table => table.sourceName), ...extras.map(table => table.name)]);
+      summary.schemaTables = Object.fromEntries(schemaTables.map(table => [table.name, { fields: (table.fields || []).length }]));
     }
 
-    await finishRun(client, runId, "success", summary);
+    for (const tableConfig of selected) {
+      const records = await fetchAllAirtableRecords({ baseId, token, tableName: tableConfig.sourceName });
+      const current = (await client.query(`select record_id, fields_json from ${tableConfig.targetTable}`)).rows;
+      const diff = diffRecords(current, records);
+      if (!options.dryRun) await upsertRawRecords(client, tableConfig.targetTable, records, tableConfig.sourceName);
+      summary.tables[tableConfig.sourceName] = { targetTable: tableConfig.targetTable, ...diff };
+      summary.recordsRead += records.length;
+      if (!options.dryRun) summary.recordsWritten += records.length;
+      console.log(`${tableConfig.sourceName}: ${records.length} record(s), ${diff.added} new, ${diff.changed} changed, ${diff.removed} removed${options.dryRun ? " (dry run)" : ` -> ${tableConfig.targetTable}`}`);
+    }
+
+    for (const table of extras) {
+      const records = await fetchAllAirtableRecords({ baseId, token, tableName: table.id });
+      const current = (await client.query("select record_id, fields_json from raw.airtable_records where table_id = $1", [table.id])).rows;
+      const diff = diffRecords(current, records);
+      if (!options.dryRun) await upsertGenericRecords(client, table, records);
+      summary.extraTables[table.name] = { tableId: table.id, ...diff };
+      summary.recordsRead += records.length;
+      if (!options.dryRun) summary.recordsWritten += records.length;
+      console.log(`${table.name}: ${records.length} record(s), ${diff.added} new, ${diff.changed} changed${options.dryRun ? " (dry run)" : " -> raw.airtable_records"}`);
+    }
+
+    if (runId) await finishRun(client, runId, "success", summary);
+    console.log(`HAWLEY_PULL_SUMMARY ${JSON.stringify(summary)}`);
   } catch (error) {
     summary.errorCount += 1;
     summary.errorMessage = error.message;
-    await client.query(
-      `
-        insert into sync.errors (run_log_id, source_system, error_type, error_message)
-        values ($1, 'airtable', 'pull_airtable', $2)
-      `,
-      [runId, error.message]
-    );
-    await finishRun(client, runId, "failed", summary);
+    if (runId) {
+      await client.query(
+        `
+          insert into sync.errors (run_log_id, source_system, error_type, error_message)
+          values ($1, 'airtable', 'pull_airtable', $2)
+        `,
+        [runId, error.message]
+      );
+      await finishRun(client, runId, "failed", summary);
+    }
+    console.log(`HAWLEY_PULL_SUMMARY ${JSON.stringify(summary)}`);
     throw error;
   } finally {
     await client.end();
   }
 }
 
-main().catch(error => {
-  console.error(error.message);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(error => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+}
