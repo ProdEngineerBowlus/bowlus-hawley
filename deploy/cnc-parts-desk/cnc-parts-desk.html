@@ -88,6 +88,11 @@ label span.req { color: var(--bad); }
 .req-top .what { font-weight: 600; }
 .req-result { font-size: 13px; padding: 6px 10px; border-radius: 6px; background: var(--soft); }
 .empty { padding: 28px 14px; color: var(--muted); text-align: center; }
+.ask-row { display: flex; gap: 8px; }
+.ask-row input { flex: 1; min-width: 0; font-size: 15px; padding: 9px 11px; }
+.ask-examples { display: flex; flex-wrap: wrap; gap: 6px; }
+.answer { border-left: 3px solid var(--accent); background: var(--soft); border-radius: 0 8px 8px 0; padding: 10px 14px; white-space: pre-wrap; max-width: 80ch; overflow-wrap: anywhere; }
+.answer .pn-link { font: 600 13px var(--mono); color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
 @media (prefers-reduced-motion: no-preference) { .part, .chip, .btn { transition: background-color .12s, border-color .12s; } }
 </style>
 
@@ -95,13 +100,30 @@ label span.req { color: var(--bad); }
   <header>
     <div>
       <h1>CNC Parts Desk</h1>
-      <p class="sub">Every CNC part, its revisions and which VIN each one starts at. Ask for a change here; Claude checks it and applies it to Hawley, with your name on the history.</p>
+      <p class="sub">Every CNC part, its revisions and which VIN each one starts at. Ask Claude anything about the parts in plain words. Changes are made by Jacob and applied to Hawley by Claude, with the history kept.</p>
     </div>
     <div class="tabs" role="tablist" aria-label="Views">
       <button id="tab-parts" role="tab" aria-selected="true" type="button">Parts<span class="count" id="count-parts"></span></button>
-      <button id="tab-requests" role="tab" aria-selected="false" type="button">Requests<span class="count" id="count-requests"></span></button>
+      <button id="tab-requests" role="tab" aria-selected="false" type="button">Changes<span class="count" id="count-requests"></span></button>
     </div>
   </header>
+
+  <form class="panel ask" id="ask-form" novalidate>
+    <div class="panel-body">
+      <label for="ask-input">Ask about a part
+        <div class="ask-row">
+          <input id="ask-input" autocomplete="off" placeholder="e.g. Find part 34751 and tell me the current version">
+          <button class="btn primary" type="submit" id="ask-submit">Ask</button>
+        </div>
+      </label>
+      <div class="ask-examples" id="ask-examples">
+        <button class="chip" type="button">What's the current version of 34751?</button>
+        <button class="chip" type="button">Which revision of 01201 does VIN 338 use?</button>
+        <button class="chip" type="button">List the bathroom floor parts and their materials</button>
+      </div>
+      <div class="answer" id="ask-answer" hidden aria-live="polite"></div>
+    </div>
+  </form>
 
   <div class="notice" id="snapshot-note">Loading parts…</div>
 
@@ -141,7 +163,7 @@ const TYPES = {
   new_part: "New part"
 };
 const STATUS_TEXT = { released: "Released", draft: "Draft", superseded: "Superseded", retired: "Retired", pending: "Waiting for Claude", applied: "Applied", rejected: "Not applied" };
-const state = { parts: [], history: [], selected: "", search: "", filter: "active", rfilter: "pending", requests: [], db: null, user: null, me: null, profiles: {}, tab: "parts", draft: null };
+const state = { isOwner: false, sample: null, generatedAt: "", parts: [], history: [], selected: "", search: "", filter: "active", rfilter: "pending", requests: [], db: null, user: null, me: null, profiles: {}, tab: "parts", draft: null };
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const when = iso => iso ? new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
@@ -216,7 +238,8 @@ function renderDetail() {
 }
 
 function requestForm(part) {
-  if (!state.db) return `<div class="notice">Requests can't be sent from this view. Open the page signed in to the Bowlus Claude workspace to ask for a change.</div>`;
+  if (!state.isOwner) return `<div class="notice">Changes to parts are made by Jacob. To look something up, use “Ask about a part” at the top.</div>`;
+  if (!state.db) return `<div class="notice">Changes can't be sent from this view. Reload the page signed in to the Bowlus Claude workspace.</div>`;
   const d = state.draft && state.draft.part_base === part.part_base ? state.draft : { part_base: part.part_base, type: "new_revision" };
   const revOptions = part.revisions.map(r => `<option value="${esc(r.part_number)}" ${d.part_number === r.part_number ? "selected" : ""}>${esc(r.part_number)} (${esc(STATUS_TEXT[r.status])})</option>`).join("");
   const field = (key, label, html) => `<label for="f-${key}">${label}${html}</label>`;
@@ -335,7 +358,7 @@ async function renderRequests() {
   $("count-requests").textContent = waiting ? `${waiting} waiting` : "";
   if (!state.db) { $("request-list").innerHTML = `<div class="empty">Requests show here when you open the page signed in to the Bowlus Claude workspace.</div>`; return; }
   if (!list.length) {
-    $("request-list").innerHTML = `<div class="empty">${state.rfilter === "pending" ? "Nothing waiting. Pick a part and use “Ask for a change” to send one." : "No requests yet."}</div>`;
+    $("request-list").innerHTML = `<div class="empty">${state.rfilter === "pending" ? (state.isOwner ? "Nothing waiting. Pick a part and use “Ask for a change” to send one." : "Nothing waiting.") : "No changes yet."}</div>`;
     return;
   }
   const ids = [...new Set(list.map(r => r.requestedBy).filter(Boolean))];
@@ -389,6 +412,7 @@ async function loadSnapshot() {
     const snap = await (await fetch("parts.json", { cache: "no-store" })).json();
     state.parts = snap.parts || [];
     state.history = snap.history || [];
+    state.generatedAt = snap.generatedAt;
     const revs = state.parts.reduce((n, p) => n + p.revisions.length, 0);
     const preview = /^preview/.test(snap.source || "");
     $("snapshot-note").innerHTML = `<strong>${state.parts.length.toLocaleString()} parts, ${revs.toLocaleString()} revisions</strong> as of ${esc(when(snap.generatedAt))}. ${preview ? "Preview built from the Airtable parts list; it becomes live Hawley data once the parts tables are deployed." : "Refreshed by Claude each time it applies requests."}`;
@@ -399,10 +423,135 @@ async function loadSnapshot() {
   }
 }
 
+// --- Ask Claude: natural-language questions answered with lookups over the parts data on this page ---
+const findBase = value => {
+  const q = String(value || "").trim().toUpperCase();
+  return state.parts.find(p => p.part_base.toUpperCase() === q)
+    || state.parts.find(p => p.revisions.some(r => r.part_number.toUpperCase() === q))
+    || state.parts.find(p => /^[0-9]+[A-Z]$/.test(q) && p.part_base === q.slice(0, -1));
+};
+const revisionForVin = (part, vin) => part.revisions
+  .filter(r => (r.status === "released" || r.status === "superseded") && (r.effective_from_vin ?? 0) <= vin)
+  .sort((a, b) => (b.effective_from_vin ?? 0) - (a.effective_from_vin ?? 0) || b.revision.localeCompare(a.revision))[0] || null;
+const slimRev = r => ({ part_number: r.part_number, status: r.status, applies_from: r.status === "released" || r.status === "superseded" ? vinText(r.effective_from_vin) : null, part_name: r.part_name, material: r.material_name, qty_on_sheet: r.quantity_on_sheet, reason: r.change_reason, eco: r.engineering_change_ref || undefined, released_at: r.released_at, released_by: r.released_by || undefined });
+
+const ASK_TOOLS = [
+  {
+    name: "search_parts",
+    description: "Search CNC parts by part number, base number or words in the name. Returns up to 25 matches with their current revision.",
+    inputSchema: { type: "object", properties: { query: { type: "string" }, include_retired: { type: "boolean" } }, required: ["query"] },
+    execute({ query, include_retired }) {
+      const words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
+      const hits = state.parts.filter(p => {
+        if (!include_retired && !p.revisions.some(r => r.status !== "retired")) return false;
+        const hay = `${p.part_base} ${p.part_name} ${p.revisions.map(r => `${r.part_number} ${r.material_name || ""}`).join(" ")}`.toLowerCase();
+        return words.every(w => hay.includes(w));
+      });
+      return { total: hits.length, parts: hits.slice(0, 25).map(p => ({ part_base: p.part_base, part_name: p.part_name, current: currentRevision(p)?.part_number || null, revisions: p.revisions.length })) };
+    }
+  },
+  {
+    name: "get_part",
+    description: "Full detail of one part: every revision with status, the VIN it applies from, material, quantity on sheet and reason. Accepts a base number (34751) or a full part number (34751F).",
+    inputSchema: { type: "object", properties: { part: { type: "string" } }, required: ["part"] },
+    execute({ part }) {
+      const p = findBase(part);
+      if (!p) return { found: false, note: `No part ${part}. Try search_parts.` };
+      const current = currentRevision(p);
+      return { found: true, part_base: p.part_base, part_name: p.part_name, current: current?.part_number || null, revisions: p.revisions.map(slimRev) };
+    }
+  },
+  {
+    name: "revision_for_vin",
+    description: "Which revision of a part a given VIN uses.",
+    inputSchema: { type: "object", properties: { part: { type: "string" }, vin: { type: "integer" } }, required: ["part", "vin"] },
+    execute({ part, vin }) {
+      const p = findBase(part);
+      if (!p) return { found: false };
+      const r = revisionForVin(p, Number(vin));
+      return { found: true, part_base: p.part_base, vin: Number(vin), revision: r ? slimRev(r) : null };
+    }
+  },
+  {
+    name: "part_history",
+    description: "Recorded changes to a part since Hawley started tracking versions (newest first): who changed what and when.",
+    inputSchema: { type: "object", properties: { part: { type: "string" } }, required: ["part"] },
+    execute({ part }) {
+      const p = findBase(part);
+      if (!p) return { found: false };
+      return { found: true, part_base: p.part_base, changes: historyFor(p.part_base).map(h => ({ when: h.changed_at, by: h.changed_by, what: describeEvent(h).replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'") })) };
+    }
+  }
+];
+
+function renderAnswer(text) {
+  const el = $("ask-answer");
+  el.hidden = false;
+  const known = new Set(state.parts.flatMap(p => [p.part_base, ...p.revisions.map(r => r.part_number)]));
+  el.innerHTML = esc(text).replace(/\b([0-9]{4,6}[A-Z]?)\b/g, m => {
+    const p = known.has(m) ? findBase(m) : null;
+    return p ? `<button type="button" class="pn-link" data-goto="${esc(p.part_base)}">${m}</button>` : m;
+  });
+}
+
+let askAbort = null;
+async function ask(question) {
+  question = question.trim();
+  if (!question) return;
+  const sample = state.sample || (state.sample = await window.claude?.use?.("sample"));
+  if (!sample) { renderAnswer("Asking Claude isn't available in this view. Open the page signed in to the Bowlus Claude workspace."); return; }
+  askAbort?.abort();
+  askAbort = new AbortController();
+  $("ask-submit").disabled = true;
+  renderAnswer("Looking it up…");
+  try {
+    const result = await sample([{ role: "user", content:
+      `You answer questions about Bowlus CNC parts for shop staff, using only the tools (they read Hawley's CNC parts data as of ${state.generatedAt || "the last refresh"}).
+Part numbers are a base number plus a revision letter: 34751F is revision F of part 34751. The "current" revision is the released one with the latest effective VIN; superseded revisions are still used by earlier VINs; drafts are not in use yet.
+Always look parts up with the tools before answering; never guess. If a part isn't found, say so and suggest a search.
+Answer in plain words, short (1-4 sentences or a compact list), and include the full part numbers. You can't change anything; if someone asks for a change, tell them Jacob makes part changes.
+
+Question: ${question}` }], {
+      tools: ASK_TOOLS,
+      modelTier: "default",
+      signal: askAbort.signal,
+      cache: false,
+      onText: ({ text }) => { if (text) renderAnswer(text); }
+    });
+    renderAnswer(result.text || "No answer came back. Try asking again.");
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    renderAnswer(error?.code === "not_granted" ? "Asking Claude was turned off for this page. You can allow it from the page's Permissions menu." :
+      error?.code === "rate_limited" ? "Too many questions at once. Wait a minute and ask again." : `Claude couldn't answer: ${error?.message || error}`);
+  } finally {
+    $("ask-submit").disabled = false;
+  }
+}
+
+$("ask-form").addEventListener("submit", e => { e.preventDefault(); ask($("ask-input").value); });
+$("ask-examples").addEventListener("click", e => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  $("ask-input").value = b.textContent;
+  ask(b.textContent);
+});
+$("ask-answer").addEventListener("click", e => {
+  const b = e.target.closest("[data-goto]");
+  if (!b) return;
+  state.selected = b.dataset.goto;
+  state.search = ""; $("search").value = ""; state.filter = "all";
+  document.querySelectorAll("[data-filter]").forEach(x => x.setAttribute("aria-pressed", x.dataset.filter === "all"));
+  setTab("parts"); renderList(); renderDetail();
+  $("detail").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
 async function connect() {
   try {
     state.user = await window.claude?.use?.("user");
-    if (state.user) { try { state.me = await state.user.me(); } catch {} }
+    if (state.user) {
+      try { state.me = await state.user.me(); } catch {}
+      try { state.isOwner = await state.user.isOwner(); } catch { state.isOwner = false; }
+    }
     state.db = await window.claude?.use?.("db");
   } catch { state.db = null; }
   if (!state.db) { renderRequests(); renderDetail(); return; }

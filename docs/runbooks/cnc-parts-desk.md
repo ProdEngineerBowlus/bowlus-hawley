@@ -2,16 +2,21 @@
 
 A claude.ai page for the whole Bowlus Claude workspace: https://claude.ai/artifact/3hfHKVb52qSRrxvc3kQZRg
 (source: `deploy/cnc-parts-desk/cnc-parts-desk.html`). It shows every CNC part, its revisions, the VIN each
-revision applies from, and its change history, and takes change requests. Requests do not touch Hawley directly:
-Claude (a Claude Code session in this repo) reads the queue, checks each request, applies it to the `parts` schema
-(migration 055) and reports back on the page.
+revision applies from, and its change history.
+
+- **Anyone** it's shared with can ask Claude questions in plain words ("find part 34751 and tell me the current
+  version"). The page's `sample` capability answers with lookup tools over the published parts snapshot
+  (search_parts, get_part, revision_for_vin, part_history); it cannot change anything.
+- **Only Jacob (the page owner)** can submit changes. The `requests` collection's rule is read: view, write: owner,
+  and the change form only shows for the owner. Requests do not touch Hawley directly: Claude (a Claude Code session
+  in this repo) reads the queue, checks each request, applies it to the `parts` schema (migration 055) and reports
+  back on the page.
 
 ## Pieces
 
 - **Parts snapshot**: `parts.json`, published with the page. Built by
   `node scripts/hawley-db.mjs admin -- node scripts/cnc-parts-desk.mjs export <file>`.
-- **Request queue**: the page's shared `requests` collection. Anyone the page is shared with as Contributor can
-  add one; Viewers can only read. Fields: `type` (new_part, new_revision, release, edit, retire), `part_base`,
+- **Request queue**: the page's shared `requests` collection. Only the owner can add one; everyone can read. Fields: `type` (new_part, new_revision, release, edit, retire), `part_base`,
   `part_number`, `effective_from_vin`, `part_name`, `material_name`, `quantity_on_sheet`,
   `engineering_change_ref`, `change_reason`, `status` (pending, applied, rejected), `requestedBy`,
   `requestedByEmail`, `createdAt`, and after processing `result`, `processedAt`.
@@ -37,5 +42,5 @@ Claude (a Claude Code session in this repo) reads the queue, checks each request
 
 ## Sharing
 
-The page is private until shared from its Share menu: share it with the Bowlus organization. People who should send
-requests need **Contributor** (can interact); Viewers can only look.
+The page is private until shared from its Share menu: share it with the Bowlus organization as **Viewer** (enough to
+browse and ask Claude). Nobody but the owner can write changes, whatever their access level.
