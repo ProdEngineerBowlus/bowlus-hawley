@@ -7,7 +7,9 @@
 //
 // A request is {id, type, requestedByEmail, part_base?, part_number?, revision?, effective_from_vin?, part_name?,
 // material_name?, quantity_on_sheet?, notes?, change_reason, engineering_change_ref?}. Types: new_part,
-// new_revision, release, retire, edit. `apply` prints one JSON line {ok, summary} or {ok:false, error}.
+// new_revision, release, retire, edit, link_change. Any change can also record an engineering change: eco "new" creates
+// one (eco_description, eco_first_vin, asana_link; defaults from the change) and links it to the revision; eco "ECO-12"
+// links an existing one. `apply` prints one JSON line {ok, summary} or {ok:false, error}.
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
@@ -41,11 +43,52 @@ async function revisionByNumber(client, partNumber) {
   return rows[0];
 }
 
+const ecoIdOf = value => {
+  const match = /^(?:ECO-?\s*)?(\d+)$/i.exec(text(value));
+  if (!match) fail(`"${text(value)}" isn't an engineering change number like ECO-12.`);
+  return Number(match[1]);
+};
+
+async function recordEngineeringChange(client, request, change, actor) {
+  const choice = text(request.eco);
+  if (!choice || choice === "none") return "";
+  const { rows: [revision] } = await client.query("select revision_id, part_number from parts.cnc_part_revisions where part_number = $1", [change.partNumber]);
+  if (!revision) fail(`No revision ${change.partNumber} to record the change on.`);
+  let eco;
+  if (choice === "new") {
+    const description = text(request.eco_description) || text(request.change_reason);
+    const firstVin = vinOf(request.eco_first_vin) ?? change.vin ?? null;
+    ({ rows: [eco] } = await client.query(
+      `insert into parts.engineering_changes (description, notes, change_date, first_vin, new_part_number, asana_link, created_by)
+       values ($1, $2, current_date, $3, $4, $5, $6) returning eco_id, eco_number`,
+      [description, text(request.eco_notes), firstVin, change.newPart ? change.partNumber : "", text(request.asana_link), actor]
+    ));
+  } else {
+    ({ rows: [eco] } = await client.query("select eco_id, eco_number from parts.engineering_changes where eco_id = $1", [ecoIdOf(choice)]));
+    if (!eco) fail(`No engineering change ${choice} in Hawley.`);
+  }
+  await client.query(
+    "insert into parts.cnc_part_revision_changes (revision_id, eco_id, link_source) values ($1, $2, 'cnc parts desk') on conflict do nothing",
+    [revision.revision_id, eco.eco_id]
+  );
+  return ` Recorded as ${eco.eco_number}${choice === "new" ? " (new)" : ""} on ${revision.part_number}.`;
+}
+
 export async function applyRequest(client, request) {
   const reason = text(request.change_reason);
   if (!reason) fail("Every change needs a reason.");
   const actor = text(request.requestedByEmail) || "cnc parts desk";
   await client.query("select set_config('hawley.actor', $1, true)", [`${actor} (CNC Parts Desk ${text(request.id)})`]);
+  if (request.type === "link_change") {
+    const target = await revisionByNumber(client, request.part_number);
+    if (!text(request.eco) || text(request.eco) === "new" || text(request.eco) === "none") fail("Pick the engineering change to link, like ECO-12.");
+    return `Linked to ${target.part_number}.${await recordEngineeringChange(client, request, { partNumber: target.part_number }, actor)}`;
+  }
+  const change = await applyChange(client, request, reason, actor);
+  return `${change.summary}${await recordEngineeringChange(client, request, change, actor)}`;
+}
+
+async function applyChange(client, request, reason, actor) {
 
   switch (request.type) {
     case "new_part": {
@@ -62,7 +105,7 @@ export async function applyRequest(client, request) {
          values ($1, $2, 'draft', $3, $4, $5, $6, $7, $8)`,
         [base, revision, name, text(request.material_name) || null, qtyOf(request.quantity_on_sheet), reason, text(request.engineering_change_ref), actor]
       );
-      return `Created part ${base} with draft revision ${base}${revision}.`;
+      return { summary: `Created part ${base} with draft revision ${base}${revision}.`, partNumber: `${base}${revision}`, newPart: true };
     }
     case "new_revision": {
       const base = text(request.part_base).toUpperCase();
@@ -89,7 +132,7 @@ export async function applyRequest(client, request) {
           reason, text(request.engineering_change_ref), actor
         ]
       );
-      return `Created draft revision ${base}${revision}${basis.part_number ? ` from ${basis.part_number}` : ""}.`;
+      return { summary: `Created draft revision ${base}${revision}${basis.part_number ? ` from ${basis.part_number}` : ""}.`, partNumber: `${base}${revision}`, newPart: true };
     }
     case "release": {
       const target = await revisionByNumber(client, request.part_number);
@@ -111,13 +154,13 @@ export async function applyRequest(client, request) {
           where revision_id = $1`,
         [target.revision_id, vin, actor, reason]
       );
-      return `Released ${target.part_number} from VIN ${vin}${current.length ? `; ${current.map(row => row.part_number).join(", ")} superseded (still used before VIN ${vin})` : ""}.`;
+      return { summary: `Released ${target.part_number} from VIN ${vin}${current.length ? `; ${current.map(row => row.part_number).join(", ")} superseded (still used before VIN ${vin})` : ""}.`, partNumber: target.part_number, vin };
     }
     case "retire": {
       const target = await revisionByNumber(client, request.part_number);
       if (target.status === "retired") fail(`${target.part_number} is already retired.`);
       await client.query("update parts.cnc_part_revisions set status = 'retired', change_reason = $2 where revision_id = $1", [target.revision_id, reason]);
-      return `Retired ${target.part_number}.`;
+      return { summary: `Retired ${target.part_number}.`, partNumber: target.part_number };
     }
     case "edit": {
       const target = await revisionByNumber(client, request.part_number);
@@ -134,12 +177,14 @@ export async function applyRequest(client, request) {
       sets.push(`change_reason = $${values.length}`);
       if (sets.length === 1) fail("Nothing to change.");
       await client.query(`update parts.cnc_part_revisions set ${sets.join(", ")} where revision_id = $1`, values);
-      return `Updated draft ${target.part_number}.`;
+      return { summary: `Updated draft ${target.part_number}.`, partNumber: target.part_number };
     }
     default:
       fail(`Unknown request type "${request.type}".`);
   }
 }
+
+const to_regclass_ok = result => Boolean(result.rows[0]?.ok);
 
 export async function exportSnapshot(client) {
   const { rows: parts } = await client.query("select part_base, part_name, notes from parts.cnc_parts order by part_base");
@@ -156,10 +201,40 @@ export async function exportSnapshot(client) {
       where h.changed_by not like 'migration 055%'
       order by h.history_id desc limit 2000`
   );
+  const { rows: links } = await client.query("select revision_id, eco_id, link_source from parts.cnc_part_revision_changes");
+  const { rows: ecos } = await client.query(
+    `select eco_id, eco_number, description, notes, change_date::text as change_date, first_vin, first_vin_note, new_part_number, asana_link, created_by
+       from parts.engineering_changes order by eco_id`
+  );
+  const { rows: sheetIds } = await client.query("select revision_id, cnc_sheet_record_ids from parts.cnc_part_revisions where cardinality(cnc_sheet_record_ids) > 0");
+  const sheets = to_regclass_ok(await client.query("select to_regclass('hb.cnc_sheets') is not null as ok"))
+    ? (await client.query(
+        `select sheet_record_id, sheet_name, material_name, sheet_dimensions, sheet_cost::float as sheet_cost, average_price_per_part::float as average_price_per_part,
+                inventory_location, frame_class_names, model_type_names
+           from hb.cnc_sheets order by sheet_name`
+      )).rows
+    : [];
+  const sheetsByRevision = new Map(sheetIds.map(row => [row.revision_id, row.cnc_sheet_record_ids]));
+  const ecosByRevision = new Map();
+  for (const link of links) ecosByRevision.set(link.revision_id, [...(ecosByRevision.get(link.revision_id) || []), link.eco_id]);
+  const numberByRevision = new Map(revisions.map(rev => [rev.revision_id, rev.part_number]));
   const slim = row => Object.fromEntries(Object.entries(row || {}).filter(([key]) => !["cnc_sheet_record_ids", "airtable_record_ids", "created_at", "updated_at"].includes(key)));
   return {
     generatedAt: new Date().toISOString(),
-    parts: parts.map(part => ({ ...part, revisions: revisions.filter(rev => rev.part_base === part.part_base) })),
+    parts: parts.map(part => ({
+      ...part,
+      revisions: revisions.filter(rev => rev.part_base === part.part_base).map(rev => ({
+        ...rev, sheet_ids: sheetsByRevision.get(rev.revision_id) || [], eco_ids: ecosByRevision.get(rev.revision_id) || []
+      }))
+    })),
+    sheets: sheets.map(sheet => ({
+      ...sheet,
+      part_numbers: revisions.filter(rev => (sheetsByRevision.get(rev.revision_id) || []).includes(sheet.sheet_record_id) && rev.status !== "retired").map(rev => rev.part_number)
+    })),
+    engineeringChanges: ecos.map(eco => ({
+      ...eco,
+      part_numbers: links.filter(link => link.eco_id === eco.eco_id).map(link => numberByRevision.get(link.revision_id)).filter(Boolean)
+    })),
     history: history.map(row => ({ ...row, old_row: row.old_row && slim(row.old_row), new_row: row.new_row && slim(row.new_row) }))
   };
 }

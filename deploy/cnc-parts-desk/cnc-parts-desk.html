@@ -68,6 +68,7 @@ th { font: 600 11px var(--body); letter-spacing: .05em; text-transform: uppercas
 tr:last-child td { border-bottom: 0; }
 .muted { color: var(--muted); }
 .mono { font-family: var(--mono); }
+.small { font-size: 12px; white-space: nowrap; }
 .eff { font: 500 13px var(--mono); }
 .history { display: grid; gap: 8px; }
 .event { display: grid; grid-template-columns: auto 1fr; gap: 10px; font-size: 13px; }
@@ -119,7 +120,8 @@ label span.req { color: var(--bad); }
       <div class="ask-examples" id="ask-examples">
         <button class="chip" type="button">What's the current version of 34751?</button>
         <button class="chip" type="button">Which revision of 01201 does VIN 338 use?</button>
-        <button class="chip" type="button">List the bathroom floor parts and their materials</button>
+        <button class="chip" type="button">Which sheet is 34751F cut on, and what else is on it?</button>
+        <button class="chip" type="button">What engineering changes were made for VIN 306?</button>
       </div>
       <div class="answer" id="ask-answer" hidden aria-live="polite"></div>
     </div>
@@ -160,15 +162,20 @@ const TYPES = {
   release: "Release a revision",
   edit: "Edit a draft",
   retire: "Retire a revision",
-  new_part: "New part"
+  new_part: "New part",
+  link_change: "Link an engineering change"
 };
 const STATUS_TEXT = { released: "Released", draft: "Draft", superseded: "Superseded", retired: "Retired", pending: "Waiting for Claude", applied: "Applied", rejected: "Not applied" };
-const state = { isOwner: false, sample: null, generatedAt: "", parts: [], history: [], selected: "", search: "", filter: "active", rfilter: "pending", requests: [], db: null, user: null, me: null, profiles: {}, tab: "parts", draft: null };
+const state = { sheets: [], ecos: [], sheetsById: new Map(), ecosById: new Map(), isOwner: false, sample: null, generatedAt: "", parts: [], history: [], selected: "", search: "", filter: "active", rfilter: "pending", requests: [], db: null, user: null, me: null, profiles: {}, tab: "parts", draft: null };
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const when = iso => iso ? new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
 const pill = status => `<span class="pill s-${esc(status)}">${esc(STATUS_TEXT[status] || status)}</span>`;
 const vinText = vin => vin == null ? "First build" : `VIN ${vin}`;
+const ecoLabel = e => `${e.eco_number}${e.change_date ? ` · ${e.change_date}` : ""}`;
+const ecoVin = e => e.first_vin ? `VIN ${e.first_vin}` : e.first_vin_note ? e.first_vin_note : "";
+const sheetsOf = r => (r.sheet_ids || []).map(id => state.sheetsById.get(id)).filter(Boolean);
+const ecosOf = r => (r.eco_ids || []).map(id => state.ecosById.get(Number(id))).filter(Boolean);
 
 function currentRevision(part) {
   const released = part.revisions.filter(r => r.status === "released").sort((a, b) => (b.effective_from_vin ?? 0) - (a.effective_from_vin ?? 0));
@@ -221,13 +228,17 @@ function renderDetail() {
     </div>
     <div class="panel-body">
       <div class="table-wrap"><table>
-        <thead><tr><th>Part number</th><th>Status</th><th>Applies from</th><th>Material</th><th>Qty / sheet</th><th>Reason</th></tr></thead>
+        <thead><tr><th>Part number</th><th>Status</th><th>Applies from</th><th>Material</th><th>Qty / sheet</th><th>Sheets</th><th>Changes</th><th>Reason</th></tr></thead>
         <tbody>${revs.map(r => `<tr>
           <td class="pn">${esc(r.part_number)}</td><td>${pill(r.status)}</td>
           <td class="eff">${r.status === "released" || r.status === "superseded" ? esc(vinText(r.effective_from_vin)) : "<span class='muted'>—</span>"}</td>
           <td>${esc(r.material_name || "")}</td><td class="mono">${r.quantity_on_sheet ?? ""}</td>
+          <td class="mono small">${sheetsOf(r).map(sh => esc(sh.sheet_name)).join("<br>") || "<span class='muted'>—</span>"}</td>
+          <td class="mono small">${ecosOf(r).map(e => esc(e.eco_number)).join("<br>") || "<span class='muted'>—</span>"}</td>
           <td class="muted">${esc(r.change_reason)}${r.engineering_change_ref ? ` <span class="mono">(${esc(r.engineering_change_ref)})</span>` : ""}</td></tr>`).join("")}</tbody>
       </table></div>
+      ${partChanges(part)}
+      ${partSheets(part)}
       ${requestForm(part)}
       <div>
         <h2>History</h2>
@@ -235,6 +246,27 @@ function renderDetail() {
       </div>
     </div>`;
   wireForm(part);
+}
+
+function partChanges(part) {
+  const seen = new Map();
+  for (const r of part.revisions) for (const e of ecosOf(r)) seen.set(e.eco_id, { ...e, revs: [...(seen.get(e.eco_id)?.revs || []), r.part_number] });
+  if (!seen.size) return "";
+  return `<div><h2>Engineering changes</h2><div class="history">${[...seen.values()].sort((a, b) => b.eco_id - a.eco_id).map(e => `
+    <div class="event"><time>${esc(e.eco_number)}</time><div>${esc(e.description || "(no description)")}
+      <div class="hint">${esc([e.change_date, ecoVin(e) && `first: ${ecoVin(e)}`, e.new_part_number && `new part ${e.new_part_number}`, `on ${e.revs.join(", ")}`].filter(Boolean).join(" · "))}${e.asana_link ? ` · <a href="${esc(e.asana_link)}" target="_blank" rel="noopener">Asana</a>` : ""}</div>
+      ${e.notes ? `<div class="hint">${esc(e.notes)}</div>` : ""}</div></div>`).join("")}</div></div>`;
+}
+
+function partSheets(part) {
+  const current = currentRevision(part) || part.revisions.at(-1);
+  const sheets = current ? sheetsOf(current) : [];
+  if (!sheets.length) return "";
+  return `<div><h2>Cut on</h2><div class="table-wrap"><table>
+    <thead><tr><th>Sheet</th><th>Material</th><th>Size</th><th>Sheet cost</th><th>Parts on sheet</th></tr></thead>
+    <tbody>${sheets.map(sh => `<tr><td class="pn">${esc(sh.sheet_name)}</td><td>${esc(sh.material_name || "")}</td><td class="mono">${esc(sh.sheet_dimensions || "")}</td>
+      <td class="mono">${sh.sheet_cost != null ? "$" + Number(sh.sheet_cost).toFixed(2) : ""}</td><td class="mono">${sh.part_numbers.length}</td></tr>`).join("")}</tbody>
+  </table></div></div>`;
 }
 
 function requestForm(part) {
@@ -255,6 +287,16 @@ function requestForm(part) {
       <span id="w-quantity_on_sheet">${field("quantity_on_sheet", "Qty on sheet", `<input id="f-quantity_on_sheet" inputmode="decimal" value="${esc(d.quantity_on_sheet || "")}">`)}</span>
       <span id="w-engineering_change_ref">${field("engineering_change_ref", "Engineering change ref", `<input id="f-engineering_change_ref" value="${esc(d.engineering_change_ref || "")}">`)}</span>
     </div>
+    <div class="fields">
+      <span id="w-eco">${field("eco", "Record as an engineering change", `<select id="f-eco">
+        <option value="" ${!d.eco ? "selected" : ""}>No</option>
+        <option value="new" ${d.eco === "new" ? "selected" : ""}>Yes, a new engineering change</option>
+        <option value="existing" ${d.eco && d.eco !== "new" ? "selected" : ""}>Link an existing one</option></select>`)}</span>
+      <span id="w-eco_number">${field("eco_number", "Engineering change", `<input id="f-eco_number" class="mono" list="eco-options" placeholder="e.g. ECO-12" value="${esc(d.eco && d.eco !== "new" ? d.eco : "")}"><datalist id="eco-options">${state.ecos.slice(-300).reverse().map(e => `<option value="${esc(e.eco_number)}">${esc((e.description || "").slice(0, 60))}</option>`).join("")}</datalist>`)}</span>
+      <span id="w-eco_description">${field("eco_description", "Change description", `<input id="f-eco_description" placeholder="Defaults to the reason below" value="${esc(d.eco_description || "")}">`)}</span>
+      <span id="w-eco_first_vin">${field("eco_first_vin", "First VIN", `<input id="f-eco_first_vin" inputmode="numeric" placeholder="Defaults to the release VIN" value="${esc(d.eco_first_vin || "")}">`)}</span>
+      <span id="w-asana_link">${field("asana_link", "Asana link", `<input id="f-asana_link" placeholder="Optional" value="${esc(d.asana_link || "")}">`)}</span>
+    </div>
     ${field("change_reason", "Why <span class='req'>*</span>", `<textarea id="f-change_reason" placeholder="What changed and why, e.g. floor cracked at the drain cut-out; moved hole 1/2 in.">${esc(d.change_reason || "")}</textarea>`)}
     <p class="hint" id="type-hint"></p>
     <div class="actions"><button class="btn primary" type="submit" id="f-submit">Send to Claude</button><span class="msg" id="f-msg" role="status"></span></div>
@@ -266,14 +308,16 @@ const SHOW = {
   release: ["part_number", "effective_from_vin"],
   edit: ["part_number", "part_name", "material_name", "quantity_on_sheet", "engineering_change_ref"],
   retire: ["part_number"],
-  new_part: ["part_base", "part_name", "material_name", "quantity_on_sheet", "engineering_change_ref"]
+  new_part: ["part_base", "part_name", "material_name", "quantity_on_sheet", "engineering_change_ref"],
+  link_change: ["part_number"]
 };
 const HINTS = {
   new_revision: "Makes the next letter as a draft, copied from the current revision with your changes. Release it separately once it's ready.",
   release: "The revision is used from this VIN on. Earlier VINs keep the revision they had.",
   edit: "Only drafts can be edited. Released revisions stay as they were built; ask for a new revision instead.",
   retire: "Marks the revision as no longer used.",
-  new_part: "Creates a new base number with a draft revision A."
+  new_part: "Creates a new base number with a draft revision A.",
+  link_change: "Connects an engineering change that already exists to a revision, without changing the part."
 };
 
 function wireForm(part) {
@@ -282,6 +326,11 @@ function wireForm(part) {
   const sync = () => {
     const type = $("f-type").value;
     for (const key of ["part_number", "part_base", "effective_from_vin", "part_name", "material_name", "quantity_on_sheet", "engineering_change_ref"]) $(`w-${key}`).hidden = !SHOW[type].includes(key);
+    if (type === "link_change" && $("f-eco").value !== "existing") $("f-eco").value = "existing";
+    const eco = $("f-eco").value;
+    $("w-eco").hidden = type === "link_change";
+    $("w-eco_number").hidden = eco !== "existing";
+    for (const key of ["eco_description", "eco_first_vin", "asana_link"]) $(`w-${key}`).hidden = eco !== "new";
     $("type-hint").textContent = HINTS[type];
     if (type === "release") {
       const draft = part.revisions.find(r => r.status === "draft");
@@ -289,6 +338,7 @@ function wireForm(part) {
     }
   };
   $("f-type").addEventListener("change", sync);
+  $("f-eco").addEventListener("change", sync);
   $("f-part_number").addEventListener("change", e => { e.target.dataset.touched = "1"; });
   form.addEventListener("input", () => { state.draft = { ...collect(part), part_base: part.part_base }; });
   form.addEventListener("submit", async event => {
@@ -327,6 +377,13 @@ function collect(part) {
   }
   if (type !== "new_part") out.part_base = part.part_base;
   if (type === "new_part") out.part_base_new = out.part_base;
+  const eco = type === "link_change" ? "existing" : $("f-eco").value;
+  if (eco === "new") {
+    out.eco = "new";
+    for (const key of ["eco_description", "eco_first_vin", "asana_link"]) { const v = $(`f-${key}`).value.trim(); if (v) out[key] = v; }
+  } else if (eco === "existing") {
+    out.eco = $("f-eco_number").value.trim().toUpperCase();
+  }
   return out;
 }
 
@@ -347,6 +404,12 @@ function validate(r, part) {
     if (state.parts.some(p => p.part_base === r.part_base)) return `${r.part_base} already exists.`;
   }
   if (r.quantity_on_sheet && !/^\d+(\.\d+)?$/.test(r.quantity_on_sheet)) return "Qty on sheet must be a number.";
+  if (r.eco && r.eco !== "new") {
+    const id = Number((/^(?:ECO-?\s*)?(\d+)$/i.exec(r.eco) || [])[1]);
+    if (!id || !state.ecosById.has(id)) return `Pick an engineering change that exists, like ${state.ecos.at(-1)?.eco_number || "ECO-1"}.`;
+  }
+  if (r.eco === "existing" || r.eco === "") return "Pick the engineering change to link.";
+  if (r.eco_first_vin && !/^\d+$/.test(r.eco_first_vin)) return "First VIN must be a number.";
   return "";
 }
 
@@ -366,7 +429,7 @@ async function renderRequests() {
   $("request-list").innerHTML = list.map(r => {
     const who = (r.requestedBy && state.profiles[r.requestedBy]?.name) || r.requestedByEmail || "Someone";
     const target = r.type === "new_part" ? r.part_base_new || r.part_base : r.part_number || r.part_base;
-    const extras = [r.effective_from_vin && `from VIN ${r.effective_from_vin}`, r.part_name && `name “${r.part_name}”`, r.material_name && `material ${r.material_name}`, r.quantity_on_sheet && `qty ${r.quantity_on_sheet}`, r.engineering_change_ref && `ECO ${r.engineering_change_ref}`].filter(Boolean);
+    const extras = [r.effective_from_vin && `from VIN ${r.effective_from_vin}`, r.part_name && `name “${r.part_name}”`, r.material_name && `material ${r.material_name}`, r.quantity_on_sheet && `qty ${r.quantity_on_sheet}`, r.engineering_change_ref && `ref ${r.engineering_change_ref}`, r.eco === "new" && "new engineering change", r.eco && r.eco !== "new" && r.eco].filter(Boolean);
     return `<div class="req-card">
       <div class="req-top">${pill(r.status)}<span class="what">${esc(TYPES[r.type] || r.type)}</span><span class="pn">${esc(target)}</span><span class="muted">${esc(extras.join(" · "))}</span></div>
       <div>${esc(r.change_reason)}</div>
@@ -412,6 +475,10 @@ async function loadSnapshot() {
     const snap = await (await fetch("parts.json", { cache: "no-store" })).json();
     state.parts = snap.parts || [];
     state.history = snap.history || [];
+    state.sheets = snap.sheets || [];
+    state.ecos = snap.engineeringChanges || [];
+    state.sheetsById = new Map(state.sheets.map(sh => [sh.sheet_record_id, sh]));
+    state.ecosById = new Map(state.ecos.map(e => [Number(e.eco_id), e]));
     state.generatedAt = snap.generatedAt;
     const revs = state.parts.reduce((n, p) => n + p.revisions.length, 0);
     const preview = /^preview/.test(snap.source || "");
@@ -433,7 +500,9 @@ const findBase = value => {
 const revisionForVin = (part, vin) => part.revisions
   .filter(r => (r.status === "released" || r.status === "superseded") && (r.effective_from_vin ?? 0) <= vin)
   .sort((a, b) => (b.effective_from_vin ?? 0) - (a.effective_from_vin ?? 0) || b.revision.localeCompare(a.revision))[0] || null;
-const slimRev = r => ({ part_number: r.part_number, status: r.status, applies_from: r.status === "released" || r.status === "superseded" ? vinText(r.effective_from_vin) : null, part_name: r.part_name, material: r.material_name, qty_on_sheet: r.quantity_on_sheet, reason: r.change_reason, eco: r.engineering_change_ref || undefined, released_at: r.released_at, released_by: r.released_by || undefined });
+const slimEco = e => ({ number: e.eco_number, description: e.description, date: e.change_date, first_vin: ecoVin(e) || null, new_part_number: e.new_part_number || undefined, notes: e.notes || undefined, asana_link: e.asana_link || undefined, revisions: e.part_numbers });
+const slimSheet = sh => ({ sheet: sh.sheet_name, material: sh.material_name, size: sh.sheet_dimensions, sheet_cost: sh.sheet_cost, avg_price_per_part: sh.average_price_per_part, location: sh.inventory_location || undefined, parts_on_sheet: sh.part_numbers.length });
+const slimRev = r => ({ sheets: sheetsOf(r).map(sh => sh.sheet_name), engineering_changes: ecosOf(r).map(e => `${e.eco_number}: ${(e.description || "").slice(0, 120)}`), part_number: r.part_number, status: r.status, applies_from: r.status === "released" || r.status === "superseded" ? vinText(r.effective_from_vin) : null, part_name: r.part_name, material: r.material_name, qty_on_sheet: r.quantity_on_sheet, reason: r.change_reason, eco: r.engineering_change_ref || undefined, released_at: r.released_at, released_by: r.released_by || undefined });
 
 const ASK_TOOLS = [
   {
@@ -473,6 +542,33 @@ const ASK_TOOLS = [
     }
   },
   {
+    name: "find_sheet",
+    description: "Find CNC sheets (nested sheet programs) by name, material or size, e.g. '01-A032', 'Anodized 063', '48X96'. Returns each sheet with material, size, cost and the part numbers cut on it (current, non-retired revisions).",
+    inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+    execute({ query }) {
+      const words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
+      const hits = state.sheets.filter(sh => words.every(w => `${sh.sheet_name} ${sh.material_name} ${sh.sheet_dimensions}`.toLowerCase().includes(w)));
+      return { total: hits.length, sheets: hits.slice(0, 15).map(sh => ({ ...slimSheet(sh), part_numbers: sh.part_numbers.slice(0, 60) })) };
+    }
+  },
+  {
+    name: "find_engineering_changes",
+    description: "Search engineering changes (ECOs) by words in the description or notes, by part number, by ECO number (ECO-12), or by first VIN. Returns each change with its date, first VIN, new part number and the revisions it is linked to. Newest first.",
+    inputSchema: { type: "object", properties: { query: { type: "string" }, part: { type: "string" }, vin: { type: "integer" } } },
+    execute({ query, part, vin }) {
+      const words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
+      const p = part ? findBase(part) : null;
+      const pn = String(part || "").toUpperCase();
+      const hits = state.ecos.filter(e => {
+        if (words.length && !words.every(w => `${e.eco_number} ${e.description} ${e.notes} ${e.new_part_number}`.toLowerCase().includes(w))) return false;
+        if (part && !(e.part_numbers.some(n => n === pn || (p && n.startsWith(p.part_base))) || (e.new_part_number && (e.new_part_number === pn || (p && e.new_part_number.startsWith(p.part_base)))))) return false;
+        if (vin && e.first_vin !== Number(vin)) return false;
+        return true;
+      }).sort((a, b) => b.eco_id - a.eco_id);
+      return { total: hits.length, engineering_changes: hits.slice(0, 25).map(slimEco) };
+    }
+  },
+  {
     name: "part_history",
     description: "Recorded changes to a part since Hawley started tracking versions (newest first): who changed what and when.",
     inputSchema: { type: "object", properties: { part: { type: "string" } }, required: ["part"] },
@@ -507,7 +603,7 @@ async function ask(question) {
   try {
     const result = await sample([{ role: "user", content:
       `You answer questions about Bowlus CNC parts for shop staff, using only the tools (they read Hawley's CNC parts data as of ${state.generatedAt || "the last refresh"}).
-Part numbers are a base number plus a revision letter: 34751F is revision F of part 34751. The "current" revision is the released one with the latest effective VIN; superseded revisions are still used by earlier VINs; drafts are not in use yet.
+Part numbers are a base number plus a revision letter: 34751F is revision F of part 34751. Parts are cut on CNC sheets (find_sheet); engineering changes (ECO-n, find_engineering_changes) record why a part changed and the first VIN it applies to. The "current" revision is the released one with the latest effective VIN; superseded revisions are still used by earlier VINs; drafts are not in use yet.
 Always look parts up with the tools before answering; never guess. If a part isn't found, say so and suggest a search.
 Answer in plain words, short (1-4 sentences or a compact list), and include the full part numbers. You can't change anything; if someone asks for a change, tell them Jacob makes part changes.
 

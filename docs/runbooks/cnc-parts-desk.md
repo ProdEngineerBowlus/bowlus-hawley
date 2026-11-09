@@ -2,11 +2,11 @@
 
 A claude.ai page for the whole Bowlus Claude workspace: https://claude.ai/artifact/3hfHKVb52qSRrxvc3kQZRg
 (source: `deploy/cnc-parts-desk/cnc-parts-desk.html`). It shows every CNC part, its revisions, the VIN each
-revision applies from, and its change history.
+revision applies from, the CNC sheets it is cut on, its engineering changes (ECO-n), and its change history.
 
 - **Anyone** it's shared with can ask Claude questions in plain words ("find part 34751 and tell me the current
   version"). The page's `sample` capability answers with lookup tools over the published parts snapshot
-  (search_parts, get_part, revision_for_vin, part_history); it cannot change anything.
+  (search_parts, get_part, revision_for_vin, find_sheet, find_engineering_changes, part_history); it cannot change anything.
 - **Only Jacob (the page owner)** can submit changes. The `requests` collection's rule is read: view, write: owner,
   and the change form only shows for the owner. Requests do not touch Hawley directly: Claude (a Claude Code session
   in this repo) reads the queue, checks each request, applies it to the `parts` schema (migration 055) and reports
@@ -19,7 +19,7 @@ revision applies from, and its change history.
 - **Request queue**: the page's shared `requests` collection. Only the owner can add one; everyone can read. Fields: `type` (new_part, new_revision, release, edit, retire), `part_base`,
   `part_number`, `effective_from_vin`, `part_name`, `material_name`, `quantity_on_sheet`,
   `engineering_change_ref`, `change_reason`, `status` (pending, applied, rejected), `requestedBy`,
-  `requestedByEmail`, `createdAt`, and after processing `result`, `processedAt`.
+  `requestedByEmail`, `createdAt`, optional `eco` ("new" with `eco_description`, `eco_first_vin`, `asana_link`, or an existing "ECO-12"), and after processing `result`, `processedAt`. Type `link_change` links an existing engineering change without changing the part.
 - **Apply**: `node scripts/hawley-db.mjs admin -- node scripts/cnc-parts-desk.mjs apply <request.json> [--dry-run]`.
   One transaction per request; the requester's email goes into `parts.cnc_part_history.changed_by`.
 
@@ -39,6 +39,10 @@ revision applies from, and its change history.
 - Releasing needs an effective VIN later than the current released revision's; the old one becomes superseded and
   stays in effect for earlier VINs (`parts.cnc_revisions_for_vin(vin)`).
 - Only drafts can be edited. New parts start as draft revision A.
+- Engineering changes live in `parts.engineering_changes` (seeded once from the Airtable archive) and link to revisions
+  through `parts.cnc_part_revision_changes`. A new one created with a change takes the reason as its description and
+  the release VIN as its first VIN unless given.
+- Sheets come from `hb.cnc_sheets` (the Airtable CNC Sheets mirror) through each revision's `cnc_sheet_record_ids`.
 
 ## Sharing
 

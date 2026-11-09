@@ -52,6 +52,34 @@ create table if not exists parts.cnc_part_history (
 
 create index if not exists idx_parts_cnc_part_history_row on parts.cnc_part_history(table_name, row_key, changed_at);
 
+-- Engineering changes (ECOs), Hawley-owned from here on: seeded once from the archived Airtable "Engineering Changes"
+-- table, then recorded with part changes. A change can touch several revisions, and a revision can come from several
+-- changes. first_vin is the first trailer it applies to when that is a number; first_vin_note keeps Airtable's text
+-- (e.g. "Rivet ?") when it isn't.
+create table if not exists parts.engineering_changes (
+  eco_id bigserial primary key,
+  eco_number text generated always as ('ECO-' || eco_id::text) stored,
+  description text not null default '',
+  notes text not null default '',
+  change_date date,
+  first_vin integer check (first_vin > 0),
+  first_vin_note text not null default '',
+  new_part_number text not null default '',
+  asana_link text not null default '',
+  airtable_record_id text unique,
+  created_at timestamptz not null default now(),
+  created_by text not null default ''
+);
+
+create table if not exists parts.cnc_part_revision_changes (
+  revision_id bigint not null references parts.cnc_part_revisions(revision_id) on delete cascade,
+  eco_id bigint not null references parts.engineering_changes(eco_id) on delete cascade,
+  link_source text not null default '',
+  primary key (revision_id, eco_id)
+);
+
+create index if not exists idx_parts_cnc_part_revision_changes_eco on parts.cnc_part_revision_changes(eco_id);
+
 create or replace function parts.log_cnc_part_change() returns trigger language plpgsql as $$
 declare
   old_json jsonb := case when tg_op <> 'INSERT' then to_jsonb(old) end;
@@ -69,7 +97,12 @@ begin
   insert into parts.cnc_part_history (table_name, row_key, operation, changed_fields, old_row, new_row, changed_by)
   values (
     tg_table_name,
-    coalesce(new_json, old_json) ->> case tg_table_name when 'cnc_parts' then 'part_base' else 'revision_id' end,
+    case tg_table_name
+      when 'cnc_parts' then coalesce(new_json, old_json) ->> 'part_base'
+      when 'engineering_changes' then coalesce(new_json, old_json) ->> 'eco_id'
+      when 'cnc_part_revision_changes' then (coalesce(new_json, old_json) ->> 'revision_id') || ':' || (coalesce(new_json, old_json) ->> 'eco_id')
+      else coalesce(new_json, old_json) ->> 'revision_id'
+    end,
     lower(tg_op),
     coalesce(changed, '{}'),
     old_json,
@@ -93,6 +126,10 @@ drop trigger if exists cnc_parts_history on parts.cnc_parts;
 create trigger cnc_parts_history after insert or update or delete on parts.cnc_parts for each row execute function parts.log_cnc_part_change();
 drop trigger if exists cnc_part_revisions_history on parts.cnc_part_revisions;
 create trigger cnc_part_revisions_history after insert or update or delete on parts.cnc_part_revisions for each row execute function parts.log_cnc_part_change();
+drop trigger if exists engineering_changes_history on parts.engineering_changes;
+create trigger engineering_changes_history after insert or update or delete on parts.engineering_changes for each row execute function parts.log_cnc_part_change();
+drop trigger if exists cnc_part_revision_changes_history on parts.cnc_part_revision_changes;
+create trigger cnc_part_revision_changes_history after insert or update or delete on parts.cnc_part_revision_changes for each row execute function parts.log_cnc_part_change();
 
 -- The revision of every part in effect for a given VIN.
 create or replace function parts.cnc_revisions_for_vin(target_vin integer)
@@ -167,11 +204,69 @@ begin
   from seed_revisions s;
 end $$;
 
+-- One-time seed of engineering changes from the archived Airtable table (raw.airtable_records, migration 056), linked to
+-- revisions three ways: the part record's own "Engineering Changes" link, the change's "Part Number" link, and its
+-- "New Part #" text. A released revision with no effectivity takes the lowest numeric first VIN of the changes that
+-- created it (New Part #); superseded revisions keep "from the first build", so earlier VINs still resolve to them.
+do $$
+begin
+  if to_regclass('raw.airtable_records') is null or to_regclass('hb.cnc_parts_master') is null or exists (select 1 from parts.engineering_changes) then
+    return;
+  end if;
+  perform set_config('hawley.actor', 'migration 055 seed from Airtable', true);
+
+  insert into parts.engineering_changes (description, notes, change_date, first_vin, first_vin_note, new_part_number, asana_link, airtable_record_id, created_at, created_by)
+  select
+    coalesce(fields_json ->> 'Change Description', ''),
+    coalesce(fields_json ->> 'Notes', ''),
+    case when fields_json ->> 'Date' ~ '^\d{4}-\d{2}-\d{2}' then left(fields_json ->> 'Date', 10)::date end,
+    case when btrim(fields_json ->> 'First Trailer (VIN)') ~ '^\d{1,6}$' then btrim(fields_json ->> 'First Trailer (VIN)')::integer end,
+    case when btrim(coalesce(fields_json ->> 'First Trailer (VIN)', '')) ~ '^\d{1,6}$' then '' else btrim(coalesce(fields_json ->> 'First Trailer (VIN)', '')) end,
+    upper(btrim(coalesce(fields_json ->> 'New Part #', ''))),
+    coalesce(fields_json ->> 'Asana Link', ''),
+    record_id,
+    coalesce(airtable_created_at, now()),
+    'airtable import'
+  from raw.airtable_records
+  where table_name = 'Engineering Changes'
+  order by airtable_created_at nulls first, record_id;
+
+  insert into parts.cnc_part_revision_changes (revision_id, eco_id, link_source)
+  select distinct on (r.revision_id, e.eco_id) r.revision_id, e.eco_id, link.source
+    from parts.cnc_part_revisions r
+    join lateral (
+      select unnest(m.engineering_change_record_ids) as eco_record_id, 'part link' as source
+        from hb.cnc_parts_master m where m.part_record_id = any(r.airtable_record_ids)
+      union all
+      select a.record_id, 'change link'
+        from raw.airtable_records a
+       where a.table_name = 'Engineering Changes'
+         and exists (select 1 from jsonb_array_elements_text(case when jsonb_typeof(a.fields_json -> 'Part Number') = 'array' then a.fields_json -> 'Part Number' else '[]' end) p where p = any(r.airtable_record_ids))
+    ) link on true
+    join parts.engineering_changes e on e.airtable_record_id = link.eco_record_id
+  union
+  select r.revision_id, e.eco_id, 'new part number'
+    from parts.cnc_part_revisions r
+    join parts.engineering_changes e on e.new_part_number <> '' and e.new_part_number = r.part_number
+  on conflict do nothing;
+
+  update parts.cnc_part_revisions r
+     set effective_from_vin = first.vin
+    from (
+      select l.revision_id, min(e.first_vin) as vin
+        from parts.cnc_part_revision_changes l
+        join parts.engineering_changes e using (eco_id)
+       where l.link_source = 'new part number' and e.first_vin is not null
+       group by l.revision_id
+    ) first
+   where r.revision_id = first.revision_id and r.status = 'released' and r.effective_from_vin is null;
+end $$;
+
 grant usage on schema parts to bowlus_app, bowlus_sync, bowlus_readonly;
-grant select, insert, update, delete on parts.cnc_parts, parts.cnc_part_revisions to bowlus_app, bowlus_sync;
+grant select, insert, update, delete on parts.cnc_parts, parts.cnc_part_revisions, parts.engineering_changes, parts.cnc_part_revision_changes to bowlus_app, bowlus_sync;
 grant select, insert on parts.cnc_part_history to bowlus_app, bowlus_sync;
-grant usage, select on sequence parts.cnc_part_revisions_revision_id_seq, parts.cnc_part_history_history_id_seq to bowlus_app, bowlus_sync;
-grant select on parts.cnc_parts, parts.cnc_part_revisions, parts.cnc_part_history, parts.cnc_parts_current to bowlus_readonly;
+grant usage, select on sequence parts.cnc_part_revisions_revision_id_seq, parts.cnc_part_history_history_id_seq, parts.engineering_changes_eco_id_seq to bowlus_app, bowlus_sync;
+grant select on parts.cnc_parts, parts.cnc_part_revisions, parts.cnc_part_history, parts.cnc_parts_current, parts.engineering_changes, parts.cnc_part_revision_changes to bowlus_readonly;
 grant execute on function parts.cnc_revisions_for_vin(integer) to bowlus_app, bowlus_sync, bowlus_readonly;
 
 -- NocoDB (read-only for now) sees the new schema when its user exists.
@@ -179,6 +274,6 @@ do $$
 begin
   if exists (select 1 from pg_roles where rolname = 'nocodb_reader') then
     grant usage on schema parts to nocodb_reader;
-    grant select on parts.cnc_parts, parts.cnc_part_revisions, parts.cnc_part_history, parts.cnc_parts_current to nocodb_reader;
+    grant select on parts.cnc_parts, parts.cnc_part_revisions, parts.cnc_part_history, parts.cnc_parts_current, parts.engineering_changes, parts.cnc_part_revision_changes to nocodb_reader;
   end if;
 end $$;
