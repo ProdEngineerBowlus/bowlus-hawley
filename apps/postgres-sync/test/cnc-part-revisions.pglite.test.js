@@ -22,6 +22,7 @@ async function database(parts = []) {
       [id, number, name, retired, sheets]);
   }
   await db.exec(await sql("migrations/055_cnc_part_revisions.sql"));
+  await db.exec(await sql("migrations/057_part_revision_numbers.sql"));
   return db;
 }
 
@@ -146,6 +147,7 @@ async function databaseWithEcos(parts, ecos) {
     await db.query("insert into raw.airtable_records (table_id, table_name, record_id, fields_json, airtable_created_at) values ('tblEco', 'Engineering Changes', $1, $2, '2025-01-01')", [id, JSON.stringify(fields)]);
   }
   await db.exec(await sql("migrations/055_cnc_part_revisions.sql"));
+  await db.exec(await sql("migrations/057_part_revision_numbers.sql"));
   return db;
 }
 
@@ -158,11 +160,11 @@ test("engineering changes seed from the Airtable archive, link to revisions and 
       ["eco3", { "Change Description": "Bracket radius", "Part Number": ["p3"], "New Part #": "40001A", "First Trailer (VIN)": "290" }]
     ]
   );
-  const ecos = await rows(db, "select eco_number, description, first_vin, first_vin_note, new_part_number, change_date::text from parts.engineering_changes order by eco_id");
-  assert.deepEqual(ecos.map(e => [e.eco_number, e.first_vin, e.first_vin_note, e.new_part_number]), [["ECO-1", 306, "", "28317B"], ["ECO-2", null, "Rivet ?", ""], ["ECO-3", 290, "", "40001A"]]);
-  const links = await rows(db, `select r.part_number, e.eco_number, l.link_source from parts.cnc_part_revision_changes l
+  const ecos = await rows(db, "select change_number, description, first_vin, first_vin_note, new_part_number, change_date::text from parts.engineering_changes order by eco_id");
+  assert.deepEqual(ecos.map(e => [e.change_number, e.first_vin, e.first_vin_note, e.new_part_number]), [["PR-1", 306, "", "28317B"], ["PR-2", null, "Rivet ?", ""], ["PR-3", 290, "", "40001A"]]);
+  const links = await rows(db, `select r.part_number, e.change_number, l.link_source from parts.cnc_part_revision_changes l
                                  join parts.cnc_part_revisions r using (revision_id) join parts.engineering_changes e using (eco_id) order by 1, 2`);
-  assert.deepEqual(links.map(l => `${l.part_number} ${l.eco_number}`), ["28317B ECO-1", "28317B ECO-2", "40001A ECO-3"]);
+  assert.deepEqual(links.map(l => `${l.part_number} ${l.change_number}`), ["28317B PR-1", "28317B PR-2", "40001A PR-3"]);
   const eff = await rows(db, "select part_number, status, effective_from_vin from parts.cnc_part_revisions order by part_number");
   assert.deepEqual(eff.map(r => [r.part_number, r.status, r.effective_from_vin]), [["28317A", "superseded", null], ["28317B", "released", 306], ["40001A", "released", 290]]);
   assert.deepEqual((await rows(db, "select part_number from parts.cnc_revisions_for_vin(305) where part_base = '28317'")).map(r => r.part_number), ["28317A"]);
@@ -176,16 +178,16 @@ test("the desk records a new engineering change with a change, or links an exist
     try { const out = await applyRequest(db, { id: "r9", requestedByEmail: "jacob@bowlus.com", change_reason: "Drain cut-out moved", ...request }); await db.exec("commit"); return out; }
     catch (error) { await db.exec("rollback"); throw error; }
   };
-  assert.match(await run({ type: "new_revision", part_base: "01201", eco: "new" }), /Created draft revision 01201B.*Recorded as ECO-2 \(new\) on 01201B/);
-  assert.match(await run({ type: "release", part_number: "01201B", effective_from_vin: 340, eco: "ECO-2" }), /Recorded as ECO-2 on 01201B/);
-  assert.match(await run({ type: "link_change", part_number: "01201A", eco: "1" }), /Linked to 01201A\. Recorded as ECO-1/);
-  await assert.rejects(run({ type: "link_change", part_number: "01201A", eco: "ECO-99" }), /No engineering change ECO-99/);
+  assert.match(await run({ type: "new_revision", part_base: "01201", eco: "new" }), /Created draft revision 01201B.*Recorded as PR-2 \(new\) on 01201B/);
+  assert.match(await run({ type: "release", part_number: "01201B", effective_from_vin: 340, eco: "PR-2" }), /Recorded as PR-2 on 01201B/);
+  assert.match(await run({ type: "link_change", part_number: "01201A", eco: "1" }), /Linked to 01201A\. Recorded as PR-1/);
+  await assert.rejects(run({ type: "link_change", part_number: "01201A", eco: "PR-99" }), /No Part Revision PR-99/);
   const eco = (await rows(db, "select description, new_part_number, created_by from parts.engineering_changes where eco_id = 2"))[0];
   assert.deepEqual(eco, { description: "Drain cut-out moved", new_part_number: "01201B", created_by: "jacob@bowlus.com" });
 
   const snap = await exportSnapshot(db);
   const b = snap.parts[0].revisions.find(r => r.part_number === "01201B");
   assert.deepEqual(b.eco_ids.map(Number), [2]);
-  assert.deepEqual(snap.engineeringChanges.find(e => e.eco_number === "ECO-2").part_numbers, ["01201B"]);
+  assert.deepEqual(snap.engineeringChanges.find(e => e.change_number === "PR-2").part_numbers, ["01201B"]);
   assert.deepEqual(snap.sheets, []);
 });
