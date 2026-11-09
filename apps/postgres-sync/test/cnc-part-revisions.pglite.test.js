@@ -90,3 +90,46 @@ test("revision letters stay unique per part and statuses are checked", async () 
   await assert.rejects(db.query("insert into parts.cnc_part_revisions (part_base, revision, status) values ('01201', 'C', 'approved')"), /check/i);
   await assert.rejects(db.query("insert into parts.cnc_part_revisions (part_base, revision) values ('99999', 'A')"), /foreign key/i);
 });
+
+test("CNC Parts Desk requests: new revision, release from a VIN, edit rules, retire, and the requester in history", async () => {
+  const { applyRequest, exportSnapshot } = await import("../../../scripts/cnc-parts-desk.mjs");
+  const db = await database([["rec1", "01201A", "Bathroom Floor", false, ["sheetX"]]]);
+  const run = async request => {
+    await db.exec("begin");
+    try {
+      const summary = await applyRequest(db, { id: "r1", requestedByEmail: "erick@bowlus.com", change_reason: "test", ...request });
+      await db.exec("commit");
+      return summary;
+    } catch (error) {
+      await db.exec("rollback");
+      throw error;
+    }
+  };
+
+  assert.match(await run({ type: "new_revision", part_base: "01201", change_reason: "Thicker floor" }), /draft revision 01201B from 01201A/);
+  const draft = (await rows(db, "select status, part_name, cnc_sheet_record_ids from parts.cnc_part_revisions where part_number = '01201B'"))[0];
+  assert.deepEqual(draft, { status: "draft", part_name: "Bathroom Floor", cnc_sheet_record_ids: ["sheetX"] });
+
+  assert.match(await run({ type: "edit", part_number: "01201B", material_name: "Flooring 1/2" }), /Updated draft/);
+  await assert.rejects(run({ type: "edit", part_number: "01201A", material_name: "x" }), /Released revisions don't change/);
+  await assert.rejects(run({ type: "release", part_number: "01201B" }), /needs the VIN/);
+  await assert.rejects(run({ type: "new_revision", part_base: "01201", change_reason: "" }), /needs a reason/);
+
+  assert.match(await run({ type: "release", part_number: "01201B", effective_from_vin: 340 }), /Released 01201B from VIN 340; 01201A superseded/);
+  assert.deepEqual((await rows(db, "select part_number from parts.cnc_revisions_for_vin(339)")).map(r => r.part_number), ["01201A"]);
+  assert.deepEqual((await rows(db, "select part_number from parts.cnc_revisions_for_vin(340)")).map(r => r.part_number), ["01201B"]);
+  await run({ type: "new_revision", part_base: "01201" });
+  await assert.rejects(run({ type: "release", part_number: "01201C", effective_from_vin: 340 }), /pick a later VIN/);
+
+  assert.match(await run({ type: "new_part", part_base: "77001", part_name: "Test Bracket" }), /Created part 77001 with draft revision 77001A/);
+  await assert.rejects(run({ type: "new_part", part_base: "77001", part_name: "Again" }), /already exists/);
+  assert.match(await run({ type: "retire", part_number: "77001A" }), /Retired 77001A/);
+
+  const actors = (await rows(db, "select distinct changed_by from parts.cnc_part_history where changed_by not like 'migration%'")).map(r => r.changed_by);
+  assert.deepEqual(actors, ["erick@bowlus.com (CNC Parts Desk r1)"]);
+
+  const snapshot = await exportSnapshot(db);
+  const part = snapshot.parts.find(p => p.part_base === "01201");
+  assert.deepEqual(part.revisions.map(r => [r.part_number, r.status, r.effective_from_vin]), [["01201A", "superseded", null], ["01201B", "released", 340], ["01201C", "draft", null]]);
+  assert.ok(snapshot.history.length >= 8 && snapshot.history.every(h => !h.changed_by.startsWith("migration")));
+});
