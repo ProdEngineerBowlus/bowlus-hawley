@@ -1,0 +1,46 @@
+# DigitalOcean App Platform spec for NocoDB, the Airtable-style grid over Hawley Postgres.
+# A separate app from bowlus-hawley so a NocoDB upgrade or restart never touches the worker page.
+#
+#   doctl apps create --spec deploy/nocodb/app.yaml
+#
+# Secrets are placeholders here. Fill them from doctl into a temporary copy at create time (or set them
+# as encrypted variables in the App Platform UI). Never commit values.
+# See docs/runbooks/nocodb.md.
+name: bowlus-nocodb
+region: sfo
+services:
+  - name: nocodb
+    image:
+      registry_type: DOCKER_HUB
+      registry: nocodb
+      repository: nocodb
+      # Pinned; upgrade deliberately (see runbook). Releases: github.com/nocodb/nocodb/releases
+      tag: 2026.09.1
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-1gb
+    health_check:
+      http_path: /api/v1/health
+    envs:
+      # NocoDB's own metadata database (users, bases, views). Knex JSON so SSL works with
+      # DigitalOcean managed Postgres. Host/port/password from the cluster's nocodb_meta user.
+      - key: NC_DB_JSON
+        type: SECRET
+        scope: RUN_TIME
+        value: '{"client":"pg","connection":{"host":"CHANGE_ME","port":25060,"user":"nocodb_meta","password":"CHANGE_ME","database":"nocodb_meta","ssl":{"rejectUnauthorized":false}}}'
+      - key: NC_AUTH_JWT_SECRET
+        type: SECRET
+        scope: RUN_TIME
+        value: CHANGE_ME
+      - key: NC_SITE_URL
+        scope: RUN_TIME
+        value: ${APP_URL}
+      # No admin bootstrap variables: the first person to sign up becomes the super admin, so sign
+      # up right after the first deploy. After that, signup is invite-only (below).
+      # Only invited Bowlus people can get in.
+      - key: NC_INVITE_ONLY_SIGNUP
+        scope: RUN_TIME
+        value: "true"
+      - key: NC_DISABLE_TELE
+        scope: RUN_TIME
+        value: "true"
