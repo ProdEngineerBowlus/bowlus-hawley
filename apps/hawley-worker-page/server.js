@@ -12300,81 +12300,6 @@ function mergeLineInputs(lines, inputs, field) {
   });
 }
 
-// Airtable reference refresh (Admin > Airtable). Runs here because only the deployed app holds the Airtable key.
-// "Check" is a dry run: fetch every non-app-owned table and report what changed, writing nothing. "Refresh" mirrors only
-// the CNC tables (parts are still iterated in Airtable) plus every table Hawley doesn't model yet into
-// raw.airtable_records, then rebuilds HB so hb.cnc_parts_master/cnc_sheets pick it up. Work Force, Task Instances and
-// Worker Daily Task Actuals are never pulled: the app owns that data now (pull-airtable.js refuses them).
-const AIRTABLE_REFRESH_TABLES = ["CNC Parts Master", "CNC Sheets"];
-const airtableRefreshState = { running: false, mode: "", startedAt: null, finishedAt: null, actor: "", lastCheck: null, error: "" };
-
-function runAirtablePull(args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [path.join(repoRoot, "apps", "postgres-sync", "src", "pull-airtable.js"), ...args], {
-      cwd: repoRoot,
-      env: process.env,
-      windowsHide: true
-    });
-    let output = "";
-    const capture = chunk => { output = `${output}${String(chunk || "")}`.slice(-200000); };
-    child.stdout?.on("data", capture);
-    child.stderr?.on("data", capture);
-    child.once("error", reject);
-    child.once("exit", code => {
-      const line = output.split("\n").reverse().find(row => row.startsWith("HAWLEY_PULL_SUMMARY "));
-      let summary = null;
-      try { summary = line ? JSON.parse(line.slice("HAWLEY_PULL_SUMMARY ".length)) : null; } catch {}
-      if (code === 0 && summary) resolve(summary);
-      else reject(new Error(summary?.errorMessage || `Airtable pull exited ${code}: ${output.trim().slice(-1000)}`));
-    });
-  });
-}
-
-function startAirtableRefresh({ apply, actorEmail }) {
-  if (!process.env.AIRTABLE_PAT || !process.env.AIRTABLE_BASE) throw actionError("Airtable isn't configured on this server.", 409);
-  if (airtableRefreshState.running) throw actionError(`A ${airtableRefreshState.mode} is already running.`, 409);
-  Object.assign(airtableRefreshState, { running: true, mode: apply ? "refresh" : "check", startedAt: new Date().toISOString(), finishedAt: null, actor: actorEmail, error: "" });
-  console.log("[hawley-airtable-refresh]", JSON.stringify({ action: "start", mode: airtableRefreshState.mode, actor: actorEmail }));
-  const job = apply
-    ? runAirtablePull(["--tables", AIRTABLE_REFRESH_TABLES.join(","), "--extra"]).then(async summary => {
-        await runAdminProjectDownstreamRebuild();
-        return summary;
-      })
-    : runAirtablePull(["--extra", "--dry-run"]).then(summary => { airtableRefreshState.lastCheck = { ...summary, at: new Date().toISOString() }; return summary; });
-  job
-    .then(summary => console.log("[hawley-airtable-refresh]", JSON.stringify({ action: "done", mode: airtableRefreshState.mode, recordsRead: summary.recordsRead, recordsWritten: summary.recordsWritten })))
-    .catch(error => {
-      airtableRefreshState.error = error.message || String(error);
-      console.error("[hawley-airtable-refresh]", JSON.stringify({ action: "failed", mode: airtableRefreshState.mode, error: airtableRefreshState.error }));
-    })
-    .finally(() => {
-      airtableRefreshState.running = false;
-      airtableRefreshState.finishedAt = new Date().toISOString();
-    });
-}
-
-async function handleAdminAirtableRefresh(req) {
-  const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
-  requireAdminActor(actor);
-  if (req.method === "POST") {
-    const body = await readJsonBody(req);
-    startAirtableRefresh({ apply: body.apply === true, actorEmail: actor?.email || "" });
-  }
-  const runs = (await writePool.query(
-    `select id, job_name, status, started_at, ended_at, summary
-       from sync.run_log
-      where job_name in ('pull_airtable', 'pull_airtable_reference')
-      order by id desc limit 5`
-  )).rows;
-  return {
-    configured: Boolean(process.env.AIRTABLE_PAT && process.env.AIRTABLE_BASE),
-    refreshTables: AIRTABLE_REFRESH_TABLES,
-    appOwnedTables: ["Work Force", "Task Instances Rev1", "Worker Daily Task Actuals"],
-    state: airtableRefreshState,
-    runs
-  };
-}
-
 async function handleAdminHandoffs(req, url) {
   const actor = APP_AUTH_ACTIVE ? await requireAuthActor(req) : null;
   requireAdminActor(actor);
@@ -14918,11 +14843,6 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/admin/handoffs" && req.method === "GET") {
       sendJson(res, 200, await handleAdminHandoffs(req, url));
-      return;
-    }
-
-    if (url.pathname === "/api/admin/airtable-refresh" && (req.method === "GET" || req.method === "POST")) {
-      sendJson(res, 200, await handleAdminAirtableRefresh(req));
       return;
     }
 

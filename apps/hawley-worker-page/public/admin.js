@@ -665,7 +665,6 @@
           <button class="nav-tab ${state.activeView === "templates" ? "active" : ""}" type="button" data-view="templates">Templates</button>
           <button class="nav-tab ${state.activeView === "releases" ? "active" : ""}" type="button" data-view="releases">Releases</button>
           <button class="nav-tab ${state.activeView === "handoffs" ? "active" : ""}" type="button" data-view="handoffs">Handoffs</button>
-          <button class="nav-tab ${state.activeView === "airtable" ? "active" : ""}" type="button" data-view="airtable">Airtable</button>
           <button class="nav-tab ${state.activeView === "project" ? "active" : ""}" type="button" data-view="project" title="Full-copy project creation. Still needed for VINs outside the release pilot until the new system is approved.">Project Creator (old)</button>
         </nav>
         <div class="top-actions">
@@ -2098,69 +2097,6 @@
     }
   }
 
-  // Airtable reference refresh: check what changed in Airtable, refresh the CNC tables and copy in tables Hawley
-  // doesn't model yet. Tables the app owns (Work Force, Task Instances, daily actuals) are never pulled.
-  let airtablePollTimer = 0;
-  async function loadAirtable() {
-    try {
-      state.airtable = await fetchJson("/api/admin/airtable-refresh");
-    } catch (error) {
-      state.airtableMessage = error.message || "Could not load the Airtable status.";
-    }
-    window.clearTimeout(airtablePollTimer);
-    if (state.airtable?.state?.running) airtablePollTimer = window.setTimeout(() => { if (state.activeView === "airtable") loadAirtable(); }, 5000);
-    render();
-  }
-
-  function airtableDiffRows(tables, extra) {
-    return Object.entries(tables || {}).map(([name, d]) => `
-      <tr>
-        <td><strong>${escapeHtml(name)}</strong>${extra ? '<div class="muted">New to Hawley</div>' : ""}</td>
-        <td>${escapeHtml(formatNumber(d.airtable))}</td>
-        <td>${escapeHtml(formatNumber(d.hawley))}</td>
-        <td>${d.added ? `<strong>${escapeHtml(formatNumber(d.added))}</strong>` : "0"}</td>
-        <td>${d.changed ? `<strong>${escapeHtml(formatNumber(d.changed))}</strong>` : "0"}</td>
-        <td>${d.removed ? `<strong>${escapeHtml(formatNumber(d.removed))}</strong>` : "0"}</td>
-      </tr>`).join("");
-  }
-
-  function renderAirtable() {
-    const data = state.airtable;
-    const message = state.airtableMessage ? `<div class="notice" style="margin-top: 12px;">${escapeHtml(state.airtableMessage)}</div>` : "";
-    if (!data) return `<section class="panel"><div class="panel-body">Loading…${message}</div></section>`;
-    const run = data.state || {};
-    const busy = run.running ? `<span class="pill">${escapeHtml(run.mode === "refresh" ? "Refreshing…" : "Checking…")}</span>` : "";
-    const check = run.lastCheck;
-    const lastRun = (data.runs || [])[0];
-    const lastRunText = lastRun ? `Last write: ${lastRun.job_name === "pull_airtable_reference" ? "CNC + new tables" : "full pull"}, ${lastRun.status}, ${new Date(lastRun.ended_at || lastRun.started_at).toLocaleString()}.` : "No pulls recorded.";
-    return `
-      <section class="panel">
-        <div class="panel-header"><h3 class="panel-title">Airtable mirror</h3>${busy}</div>
-        <div class="panel-body">
-          <p class="muted">Hawley keeps a copy of some Airtable tables. <strong>Check for changes</strong> compares Airtable with Hawley's copy and writes nothing. <strong>Refresh</strong> updates only ${escapeHtml(data.refreshTables.join(" and "))}, copies in every Airtable table Hawley doesn't have yet (such as Engineering Changes), then rebuilds Hawley's CNC data. ${escapeHtml(data.appOwnedTables.join(", "))} are never pulled: Hawley's own tracking owns that data now.</p>
-          <p class="muted">${escapeHtml(lastRunText)}</p>
-          ${data.configured ? "" : '<div class="notice risk">Airtable isn\'t configured on this server.</div>'}
-          ${run.error ? `<div class="notice risk">${escapeHtml(`The last ${run.mode} failed: ${run.error}`)}</div>` : ""}
-          <div class="inline-actions">
-            <button class="btn" type="button" data-action="airtable-check" ${run.running || !data.configured ? "disabled" : ""}>Check for changes</button>
-            <button class="btn primary" type="button" data-action="airtable-refresh" ${run.running || !data.configured ? "disabled" : ""}>Refresh CNC + new tables</button>
-          </div>
-          ${message}
-        </div>
-      </section>
-      ${check ? `
-      <section class="panel">
-        <div class="panel-header"><h3 class="panel-title">What changed in Airtable</h3><span class="pill">${escapeHtml(`Checked ${new Date(check.at).toLocaleString()}`)}</span></div>
-        <div class="panel-body table-wrap">
-          <table class="table">
-            <thead><tr><th>Table</th><th>In Airtable</th><th>In Hawley</th><th>New</th><th>Changed</th><th>Removed</th></tr></thead>
-            <tbody>${airtableDiffRows(check.tables, false)}${airtableDiffRows(check.extraTables, true)}</tbody>
-          </table>
-          <p class="muted">Only CNC Parts Master, CNC Sheets and the tables new to Hawley are written by Refresh. The rest are shown so you can see how far Hawley's copy has drifted.</p>
-        </div>
-      </section>` : ""}`;
-  }
-
   const HANDOFF_STATUS_TEXT = { open: "Open", packing: "Packing", delivered: "Delivered", received: "Received", short: "Short" };
   const HANDOFF_ISSUE_TEXT = { "": "", missing: "Missing", damaged: "Damaged", wrong: "Wrong part", remake: "Remake", taken: "Taken off cart" };
   const qtyText = value => (value === null || value === undefined ? "" : formatNumber(Number(value)));
@@ -2774,7 +2710,7 @@
       <div class="admin-shell">
         ${renderTopbar()}
         <main class="admin-main">
-          ${state.activeView === "project" ? renderProjectCreator() : state.activeView === "cycles" ? renderCyclePlanner() : state.activeView === "production" ? renderProductionTable() : state.activeView === "task-times" ? renderTaskTimes() : state.activeView === "task-mapping" ? renderTaskMapping() : state.activeView === "templates" ? renderTemplates() : state.activeView === "releases" ? renderReleases() : state.activeView === "handoffs" ? renderHandoffs() : state.activeView === "airtable" ? renderAirtable() : renderDashboard()}
+          ${state.activeView === "project" ? renderProjectCreator() : state.activeView === "cycles" ? renderCyclePlanner() : state.activeView === "production" ? renderProductionTable() : state.activeView === "task-times" ? renderTaskTimes() : state.activeView === "task-mapping" ? renderTaskMapping() : state.activeView === "templates" ? renderTemplates() : state.activeView === "releases" ? renderReleases() : state.activeView === "handoffs" ? renderHandoffs() : renderDashboard()}
         </main>
       </div>
     `;
@@ -2801,7 +2737,7 @@
   root.addEventListener("click", async event => {
     const viewButton = event.target.closest("[data-view]");
     if (viewButton) {
-      state.activeView = ["project", "cycles", "production", "task-times", "task-mapping", "templates", "releases", "handoffs", "airtable"].includes(viewButton.dataset.view) ? viewButton.dataset.view : "dashboard";
+      state.activeView = ["project", "cycles", "production", "task-times", "task-mapping", "templates", "releases", "handoffs"].includes(viewButton.dataset.view) ? viewButton.dataset.view : "dashboard";
       render();
       if (state.activeView === "cycles") {
         if (!state.cyclePlanner) await loadCyclePlanner();
@@ -2817,8 +2753,6 @@
         if (!state.releases) await loadReleases();
       } else if (state.activeView === "handoffs") {
         if (!state.handoffs) await loadHandoffs();
-      } else if (state.activeView === "airtable") {
-        if (!state.airtable) await loadAirtable();
       } else if (state.activeView === "project" && !state.project && !state.projectLoading) {
         try {
           await loadProjectCreator();
@@ -2988,16 +2922,6 @@
         state.handoffsMessage = error.message || "Could not save the handoff type.";
       }
       await loadHandoffs();
-    } else if (action === "airtable-check" || action === "airtable-refresh") {
-      const apply = action === "airtable-refresh";
-      if (apply && !window.confirm("Refresh CNC Parts Master and CNC Sheets from Airtable, copy in the tables Hawley doesn't have yet, and rebuild Hawley's CNC data?")) return;
-      try {
-        state.airtable = await postJson("/api/admin/airtable-refresh", { apply });
-        state.airtableMessage = apply ? "Refreshing. This takes a minute or two." : "Checking Airtable. This takes a minute.";
-      } catch (error) {
-        state.airtableMessage = error.message || "Could not start.";
-      }
-      await loadAirtable();
     } else if (action === "handoff-create") {
       const value = name => root.querySelector(`[data-handoff-new="${name}"]`)?.value || "";
       await handoffAction("/api/admin/handoffs/create", { typeKey: value("type"), cycleLabel: value("cycle"), phase: value("phase"), vin: value("vin"), lines: value("lines") }, "Handoff created.");
