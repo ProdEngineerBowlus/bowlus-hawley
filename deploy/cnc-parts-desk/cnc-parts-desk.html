@@ -1,0 +1,671 @@
+<title>CNC Parts Desk</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: a parts register on the left, the selected part's revision sheet on the right; requests as a second tab. */
+:root {
+  --bg: #f3f5f8; --panel: #ffffff; --ink: #18202b; --muted: #5c6878; --line: #d9dee6; --soft: #eef1f6;
+  --accent: #2448b8; --accent-ink: #ffffff; --accent-soft: #e6ecfb;
+  --ok: #1d7a46; --ok-soft: #e3f3ea; --warn: #9a5b00; --warn-soft: #fbf0dc; --bad: #b3261e; --bad-soft: #fbe6e4; --idle: #66717f; --idle-soft: #eceff3;
+  --display: "Barlow Condensed", "Arial Narrow", Arial, sans-serif;
+  --body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #11151b; --panel: #181e26; --ink: #e5e9ef; --muted: #98a3b3; --line: #2b3440; --soft: #1f2630;
+  --accent: #86a3ff; --accent-ink: #0d1430; --accent-soft: #1e2a4d;
+  --ok: #6fd39b; --ok-soft: #173326; --warn: #f0b860; --warn-soft: #3a2b12; --bad: #ff9389; --bad-soft: #3c1b19; --idle: #a3adba; --idle-soft: #252c36;
+  color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #11151b; --panel: #181e26; --ink: #e5e9ef; --muted: #98a3b3; --line: #2b3440; --soft: #1f2630;
+  --accent: #86a3ff; --accent-ink: #0d1430; --accent-soft: #1e2a4d;
+  --ok: #6fd39b; --ok-soft: #173326; --warn: #f0b860; --warn-soft: #3a2b12; --bad: #ff9389; --bad-soft: #3c1b19; --idle: #a3adba; --idle-soft: #252c36;
+  color-scheme: dark }
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.5 var(--body); }
+.wrap { max-width: 1240px; margin: 0 auto; padding-block: 20px 40px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 16px; }
+header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px; }
+h1 { font: 700 30px/1 var(--display); letter-spacing: .02em; text-transform: uppercase; margin: 0; text-wrap: balance; }
+h2 { font: 600 20px/1.1 var(--display); letter-spacing: .03em; text-transform: uppercase; margin: 0; }
+.sub { color: var(--muted); margin: 4px 0 0; max-width: 70ch; }
+.tabs { display: flex; gap: 4px; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 3px; }
+.tabs button { border: 0; background: transparent; color: var(--muted); font: 600 13px var(--body); padding: 6px 14px; border-radius: 6px; cursor: pointer; }
+.tabs button[aria-selected="true"] { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / .08); }
+.count { font: 500 12px var(--mono); color: var(--muted); margin-left: 4px; }
+.notice { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 10px 14px; color: var(--muted); }
+.notice strong { color: var(--ink); }
+.grid { display: grid; grid-template-columns: minmax(260px, 340px) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 820px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
+.panel-head { padding: 12px 14px; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
+.panel-body { padding: 14px; display: grid; gap: 14px; min-width: 0; }
+input, select, textarea { font: 14px var(--body); color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; width: 100%; }
+textarea { min-height: 64px; resize: vertical; }
+input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible, .part:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.filters { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { border: 1px solid var(--line); background: var(--panel); color: var(--muted); border-radius: 999px; padding: 3px 10px; font: 500 12px var(--body); cursor: pointer; }
+.chip[aria-pressed="true"] { background: var(--accent-soft); color: var(--ink); border-color: var(--accent); }
+.list { max-height: 68vh; overflow-y: auto; }
+@media (max-width: 820px) { .list { max-height: 40vh; } }
+.part { display: grid; grid-template-columns: auto 1fr auto; gap: 2px 10px; align-items: baseline; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: inherit; padding: 9px 14px; cursor: pointer; font: inherit; }
+.part:hover { background: var(--soft); }
+.part[aria-current="true"] { background: var(--accent-soft); }
+.pn { font: 600 13px var(--mono); letter-spacing: .02em; }
+.pname { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.pill { display: inline-flex; align-items: center; font: 600 11px var(--body); letter-spacing: .04em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.s-released, .s-applied { background: var(--ok-soft); color: var(--ok); }
+.s-draft, .s-pending { background: var(--warn-soft); color: var(--warn); }
+.s-superseded { background: var(--idle-soft); color: var(--idle); }
+.s-retired, .s-rejected { background: var(--bad-soft); color: var(--bad); }
+.detail-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+.detail-title .pn { font-size: 22px; }
+.detail-title .name { font: 600 22px/1.1 var(--display); letter-spacing: .02em; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 600 11px var(--body); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); background: var(--soft); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+.muted { color: var(--muted); }
+.mono { font-family: var(--mono); }
+.small { font-size: 12px; white-space: nowrap; }
+.eff { font: 500 13px var(--mono); }
+.history { display: grid; gap: 8px; }
+.event { display: grid; grid-template-columns: auto 1fr; gap: 10px; font-size: 13px; }
+.event time { font: 12px var(--mono); color: var(--muted); white-space: nowrap; }
+.btn { border: 1px solid var(--line); background: var(--panel); color: var(--ink); font: 600 13px var(--body); padding: 7px 14px; border-radius: 6px; cursor: pointer; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn:disabled { opacity: .55; cursor: not-allowed; }
+form.request { display: grid; gap: 12px; }
+.fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+label { display: grid; gap: 4px; font: 600 12px var(--body); color: var(--muted); }
+label span.req { color: var(--bad); }
+.hint { font: 400 12px var(--body); color: var(--muted); }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.msg { font-size: 13px; }
+.msg.ok { color: var(--ok); } .msg.bad { color: var(--bad); }
+.req-card { display: grid; gap: 6px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.req-top { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.req-top .what { font-weight: 600; }
+.req-result { font-size: 13px; padding: 6px 10px; border-radius: 6px; background: var(--soft); }
+.empty { padding: 28px 14px; color: var(--muted); text-align: center; }
+.ask-row { display: flex; gap: 8px; }
+.ask-row input { flex: 1; min-width: 0; font-size: 15px; padding: 9px 11px; }
+.ask-examples { display: flex; flex-wrap: wrap; gap: 6px; }
+.answer { border-left: 3px solid var(--accent); background: var(--soft); border-radius: 0 8px 8px 0; padding: 10px 14px; white-space: pre-wrap; max-width: 80ch; overflow-wrap: anywhere; }
+.answer .pn-link { font: 600 13px var(--mono); color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+@media (prefers-reduced-motion: no-preference) { .part, .chip, .btn { transition: background-color .12s, border-color .12s; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>CNC Parts Desk</h1>
+      <p class="sub">Every CNC part, its revisions and which VIN each one starts at. Ask Claude anything about the parts in plain words. Changes are made by Jacob and applied to Hawley by Claude, with the history kept.</p>
+    </div>
+    <div class="tabs" role="tablist" aria-label="Views">
+      <button id="tab-parts" role="tab" aria-selected="true" type="button">Parts<span class="count" id="count-parts"></span></button>
+      <button id="tab-requests" role="tab" aria-selected="false" type="button">Changes<span class="count" id="count-requests"></span></button>
+    </div>
+  </header>
+
+  <form class="panel ask" id="ask-form" novalidate>
+    <div class="panel-body">
+      <label for="ask-input">Ask about a part
+        <div class="ask-row">
+          <input id="ask-input" autocomplete="off" placeholder="e.g. Find part 34751 and tell me the current version">
+          <button class="btn primary" type="submit" id="ask-submit">Ask</button>
+        </div>
+      </label>
+      <div class="ask-examples" id="ask-examples">
+        <button class="chip" type="button">What's the current version of 34751?</button>
+        <button class="chip" type="button">Which revision of 01201 does VIN 338 use?</button>
+        <button class="chip" type="button">Which sheet is 34751F cut on, and what else is on it?</button>
+        <button class="chip" type="button">What engineering changes were made for VIN 306?</button>
+      </div>
+      <div class="answer" id="ask-answer" hidden aria-live="polite"></div>
+    </div>
+  </form>
+
+  <div class="notice" id="snapshot-note">Loading parts…</div>
+
+  <section id="view-parts" class="grid">
+    <div class="panel">
+      <div class="panel-head">
+        <label for="search">Find a part<input id="search" type="search" placeholder="Part number or name, e.g. 01201 or floor" autocomplete="off"></label>
+        <div class="filters" role="group" aria-label="Show">
+          <button class="chip" type="button" data-filter="active" aria-pressed="true">Active</button>
+          <button class="chip" type="button" data-filter="draft" aria-pressed="false">Has draft</button>
+          <button class="chip" type="button" data-filter="all" aria-pressed="false">All</button>
+        </div>
+      </div>
+      <div class="list" id="part-list" aria-label="Parts"></div>
+    </div>
+    <div class="panel" id="detail"><div class="empty">Pick a part on the left.</div></div>
+  </section>
+
+  <section id="view-requests" class="panel" hidden>
+    <div class="panel-head">
+      <div class="filters" role="group" aria-label="Requests to show">
+        <button class="chip" type="button" data-rfilter="pending" aria-pressed="true">Waiting</button>
+        <button class="chip" type="button" data-rfilter="mine" aria-pressed="false">Mine</button>
+        <button class="chip" type="button" data-rfilter="all" aria-pressed="false">All</button>
+      </div>
+    </div>
+    <div id="request-list"><div class="empty">Loading requests…</div></div>
+  </section>
+</div>
+
+<script>
+const TYPES = {
+  new_revision: "New revision",
+  release: "Release a revision",
+  edit: "Edit a draft",
+  retire: "Retire a revision",
+  new_part: "New part",
+  link_change: "Link an engineering change"
+};
+const STATUS_TEXT = { released: "Released", draft: "Draft", superseded: "Superseded", retired: "Retired", pending: "Waiting for Claude", applied: "Applied", rejected: "Not applied" };
+const state = { sheets: [], ecos: [], sheetsById: new Map(), ecosById: new Map(), isOwner: false, sample: null, generatedAt: "", parts: [], history: [], selected: "", search: "", filter: "active", rfilter: "pending", requests: [], db: null, user: null, me: null, profiles: {}, tab: "parts", draft: null };
+const $ = id => document.getElementById(id);
+const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const when = iso => iso ? new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
+const pill = status => `<span class="pill s-${esc(status)}">${esc(STATUS_TEXT[status] || status)}</span>`;
+const vinText = vin => vin == null ? "First build" : `VIN ${vin}`;
+const ecoLabel = e => `${e.eco_number}${e.change_date ? ` · ${e.change_date}` : ""}`;
+const ecoVin = e => e.first_vin ? `VIN ${e.first_vin}` : e.first_vin_note ? e.first_vin_note : "";
+const sheetsOf = r => (r.sheet_ids || []).map(id => state.sheetsById.get(id)).filter(Boolean);
+const ecosOf = r => (r.eco_ids || []).map(id => state.ecosById.get(Number(id))).filter(Boolean);
+
+function currentRevision(part) {
+  const released = part.revisions.filter(r => r.status === "released").sort((a, b) => (b.effective_from_vin ?? 0) - (a.effective_from_vin ?? 0));
+  return released[0] || null;
+}
+
+function partMatches(part) {
+  const q = state.search.trim().toLowerCase();
+  if (q && !(part.part_base.toLowerCase().includes(q) || (part.part_name || "").toLowerCase().includes(q) || part.revisions.some(r => r.part_number.toLowerCase().includes(q)))) return false;
+  if (state.filter === "active") return part.revisions.some(r => r.status !== "retired");
+  if (state.filter === "draft") return part.revisions.some(r => r.status === "draft");
+  return true;
+}
+
+function renderList() {
+  const shown = state.parts.filter(partMatches);
+  $("count-parts").textContent = state.parts.length ? state.parts.length.toLocaleString() : "";
+  $("part-list").innerHTML = shown.slice(0, 400).map(part => {
+    const current = currentRevision(part);
+    const label = current ? current.part_number : part.revisions.at(-1)?.part_number || part.part_base;
+    const status = current ? "released" : part.revisions.some(r => r.status === "draft") ? "draft" : "retired";
+    return `<button class="part" type="button" data-part="${esc(part.part_base)}" aria-current="${part.part_base === state.selected}">
+      <span class="pn">${esc(label)}</span><span class="pname">${esc(part.part_name)}</span>${status === "released" ? "" : pill(status)}</button>`;
+  }).join("") || `<div class="empty">No parts match “${esc(state.search)}”.</div>`;
+  if (shown.length > 400) $("part-list").insertAdjacentHTML("beforeend", `<div class="empty">Showing 400 of ${shown.length}. Narrow the search.</div>`);
+}
+
+function historyFor(base) {
+  return state.history.filter(h => h.part_base === base).slice(0, 30);
+}
+
+function describeEvent(h) {
+  const pn = h.part_number || h.part_base;
+  if (h.operation === "insert") return h.table_name === "cnc_parts" ? `Part ${esc(h.part_base)} created` : `${esc(pn)} created as ${esc(h.new_row?.status || "draft")}`;
+  if (h.operation === "delete") return `${esc(pn)} removed`;
+  if (h.changed_fields?.includes("status")) return `${esc(pn)}: ${esc(h.old_row?.status)} → ${esc(h.new_row?.status)}${h.new_row?.effective_from_vin ? ` from VIN ${esc(h.new_row.effective_from_vin)}` : ""}`;
+  return `${esc(pn)}: changed ${esc((h.changed_fields || []).join(", "))}`;
+}
+
+function renderDetail() {
+  const part = state.parts.find(p => p.part_base === state.selected);
+  if (!part) { $("detail").innerHTML = `<div class="empty">Pick a part on the left.</div>`; return; }
+  const revs = [...part.revisions].sort((a, b) => b.revision.localeCompare(a.revision));
+  const events = historyFor(part.part_base);
+  const pending = state.requests.filter(r => r.status === "pending" && (r.part_base === part.part_base || (r.part_number || "").startsWith(part.part_base)));
+  $("detail").innerHTML = `
+    <div class="panel-head">
+      <div class="detail-title"><span class="pn">${esc(part.part_base)}</span><span class="name">${esc(part.part_name)}</span></div>
+      ${pending.length ? `<div class="hint">${pending.length} request${pending.length > 1 ? "s" : ""} waiting for this part. See Requests.</div>` : ""}
+    </div>
+    <div class="panel-body">
+      <div class="table-wrap"><table>
+        <thead><tr><th>Part number</th><th>Status</th><th>Applies from</th><th>Material</th><th>Qty / sheet</th><th>Sheets</th><th>Changes</th><th>Reason</th></tr></thead>
+        <tbody>${revs.map(r => `<tr>
+          <td class="pn">${esc(r.part_number)}</td><td>${pill(r.status)}</td>
+          <td class="eff">${r.status === "released" || r.status === "superseded" ? esc(vinText(r.effective_from_vin)) : "<span class='muted'>—</span>"}</td>
+          <td>${esc(r.material_name || "")}</td><td class="mono">${r.quantity_on_sheet ?? ""}</td>
+          <td class="mono small">${sheetsOf(r).map(sh => esc(sh.sheet_name)).join("<br>") || "<span class='muted'>—</span>"}</td>
+          <td class="mono small">${ecosOf(r).map(e => esc(e.eco_number)).join("<br>") || "<span class='muted'>—</span>"}</td>
+          <td class="muted">${esc(r.change_reason)}${r.engineering_change_ref ? ` <span class="mono">(${esc(r.engineering_change_ref)})</span>` : ""}</td></tr>`).join("")}</tbody>
+      </table></div>
+      ${partChanges(part)}
+      ${partSheets(part)}
+      ${requestForm(part)}
+      <div>
+        <h2>History</h2>
+        <div class="history">${events.map(h => `<div class="event"><time>${esc(when(h.changed_at))}</time><div>${describeEvent(h)}<div class="hint">${esc(h.changed_by)}</div></div></div>`).join("") || `<p class="muted">No changes since the import from Airtable.</p>`}</div>
+      </div>
+    </div>`;
+  wireForm(part);
+}
+
+function partChanges(part) {
+  const seen = new Map();
+  for (const r of part.revisions) for (const e of ecosOf(r)) seen.set(e.eco_id, { ...e, revs: [...(seen.get(e.eco_id)?.revs || []), r.part_number] });
+  if (!seen.size) return "";
+  return `<div><h2>Engineering changes</h2><div class="history">${[...seen.values()].sort((a, b) => b.eco_id - a.eco_id).map(e => `
+    <div class="event"><time>${esc(e.eco_number)}</time><div>${esc(e.description || "(no description)")}
+      <div class="hint">${esc([e.change_date, ecoVin(e) && `first: ${ecoVin(e)}`, e.new_part_number && `new part ${e.new_part_number}`, `on ${e.revs.join(", ")}`].filter(Boolean).join(" · "))}${e.asana_link ? ` · <a href="${esc(e.asana_link)}" target="_blank" rel="noopener">Asana</a>` : ""}</div>
+      ${e.notes ? `<div class="hint">${esc(e.notes)}</div>` : ""}</div></div>`).join("")}</div></div>`;
+}
+
+function partSheets(part) {
+  const current = currentRevision(part) || part.revisions.at(-1);
+  const sheets = current ? sheetsOf(current) : [];
+  if (!sheets.length) return "";
+  return `<div><h2>Cut on</h2><div class="table-wrap"><table>
+    <thead><tr><th>Sheet</th><th>Material</th><th>Size</th><th>Sheet cost</th><th>Parts on sheet</th></tr></thead>
+    <tbody>${sheets.map(sh => `<tr><td class="pn">${esc(sh.sheet_name)}</td><td>${esc(sh.material_name || "")}</td><td class="mono">${esc(sh.sheet_dimensions || "")}</td>
+      <td class="mono">${sh.sheet_cost != null ? "$" + Number(sh.sheet_cost).toFixed(2) : ""}</td><td class="mono">${sh.part_numbers.length}</td></tr>`).join("")}</tbody>
+  </table></div></div>`;
+}
+
+function requestForm(part) {
+  if (!state.isOwner) return `<div class="notice">Changes to parts are made by Jacob. To look something up, use “Ask about a part” at the top.</div>`;
+  if (!state.db) return `<div class="notice">Changes can't be sent from this view. Reload the page signed in to the Bowlus Claude workspace.</div>`;
+  const d = state.draft && state.draft.part_base === part.part_base ? state.draft : { part_base: part.part_base, type: "new_revision" };
+  const revOptions = part.revisions.map(r => `<option value="${esc(r.part_number)}" ${d.part_number === r.part_number ? "selected" : ""}>${esc(r.part_number)} (${esc(STATUS_TEXT[r.status])})</option>`).join("");
+  const field = (key, label, html) => `<label for="f-${key}">${label}${html}</label>`;
+  return `<form class="request" id="request-form" novalidate>
+    <h2>Ask for a change</h2>
+    <div class="fields">
+      ${field("type", "What change", `<select id="f-type">${Object.entries(TYPES).map(([k, v]) => `<option value="${k}" ${d.type === k ? "selected" : ""}>${v}</option>`).join("")}</select>`)}
+      <span id="w-part_number">${field("part_number", "Revision", `<select id="f-part_number">${revOptions}</select>`)}</span>
+      <span id="w-part_base">${field("part_base", "New part base number <span class='req'>*</span>", `<input id="f-part_base" class="mono" placeholder="e.g. 77001" value="${esc(d.type === "new_part" ? d.part_base_new || "" : "")}">`)}</span>
+      <span id="w-effective_from_vin">${field("effective_from_vin", "Applies from VIN <span class='req'>*</span>", `<input id="f-effective_from_vin" inputmode="numeric" placeholder="e.g. 340" value="${esc(d.effective_from_vin || "")}">`)}</span>
+      <span id="w-part_name">${field("part_name", "Part name", `<input id="f-part_name" value="${esc(d.part_name || "")}">`)}</span>
+      <span id="w-material_name">${field("material_name", "Material", `<input id="f-material_name" value="${esc(d.material_name || "")}">`)}</span>
+      <span id="w-quantity_on_sheet">${field("quantity_on_sheet", "Qty on sheet", `<input id="f-quantity_on_sheet" inputmode="decimal" value="${esc(d.quantity_on_sheet || "")}">`)}</span>
+      <span id="w-engineering_change_ref">${field("engineering_change_ref", "Engineering change ref", `<input id="f-engineering_change_ref" value="${esc(d.engineering_change_ref || "")}">`)}</span>
+    </div>
+    <div class="fields">
+      <span id="w-eco">${field("eco", "Record as an engineering change", `<select id="f-eco">
+        <option value="" ${!d.eco ? "selected" : ""}>No</option>
+        <option value="new" ${d.eco === "new" ? "selected" : ""}>Yes, a new engineering change</option>
+        <option value="existing" ${d.eco && d.eco !== "new" ? "selected" : ""}>Link an existing one</option></select>`)}</span>
+      <span id="w-eco_number">${field("eco_number", "Engineering change", `<input id="f-eco_number" class="mono" list="eco-options" placeholder="e.g. ECO-12" value="${esc(d.eco && d.eco !== "new" ? d.eco : "")}"><datalist id="eco-options">${state.ecos.slice(-300).reverse().map(e => `<option value="${esc(e.eco_number)}">${esc((e.description || "").slice(0, 60))}</option>`).join("")}</datalist>`)}</span>
+      <span id="w-eco_description">${field("eco_description", "Change description", `<input id="f-eco_description" placeholder="Defaults to the reason below" value="${esc(d.eco_description || "")}">`)}</span>
+      <span id="w-eco_first_vin">${field("eco_first_vin", "First VIN", `<input id="f-eco_first_vin" inputmode="numeric" placeholder="Defaults to the release VIN" value="${esc(d.eco_first_vin || "")}">`)}</span>
+      <span id="w-asana_link">${field("asana_link", "Asana link", `<input id="f-asana_link" placeholder="Optional" value="${esc(d.asana_link || "")}">`)}</span>
+    </div>
+    ${field("change_reason", "Why <span class='req'>*</span>", `<textarea id="f-change_reason" placeholder="What changed and why, e.g. floor cracked at the drain cut-out; moved hole 1/2 in.">${esc(d.change_reason || "")}</textarea>`)}
+    <p class="hint" id="type-hint"></p>
+    <div class="actions"><button class="btn primary" type="submit" id="f-submit">Send to Claude</button><span class="msg" id="f-msg" role="status"></span></div>
+  </form>`;
+}
+
+const SHOW = {
+  new_revision: ["part_name", "material_name", "quantity_on_sheet", "engineering_change_ref"],
+  release: ["part_number", "effective_from_vin"],
+  edit: ["part_number", "part_name", "material_name", "quantity_on_sheet", "engineering_change_ref"],
+  retire: ["part_number"],
+  new_part: ["part_base", "part_name", "material_name", "quantity_on_sheet", "engineering_change_ref"],
+  link_change: ["part_number"]
+};
+const HINTS = {
+  new_revision: "Makes the next letter as a draft, copied from the current revision with your changes. Release it separately once it's ready.",
+  release: "The revision is used from this VIN on. Earlier VINs keep the revision they had.",
+  edit: "Only drafts can be edited. Released revisions stay as they were built; ask for a new revision instead.",
+  retire: "Marks the revision as no longer used.",
+  new_part: "Creates a new base number with a draft revision A.",
+  link_change: "Connects an engineering change that already exists to a revision, without changing the part."
+};
+
+function wireForm(part) {
+  const form = $("request-form");
+  if (!form) return;
+  const sync = () => {
+    const type = $("f-type").value;
+    for (const key of ["part_number", "part_base", "effective_from_vin", "part_name", "material_name", "quantity_on_sheet", "engineering_change_ref"]) $(`w-${key}`).hidden = !SHOW[type].includes(key);
+    if (type === "link_change" && $("f-eco").value !== "existing") $("f-eco").value = "existing";
+    const eco = $("f-eco").value;
+    $("w-eco").hidden = type === "link_change";
+    $("w-eco_number").hidden = eco !== "existing";
+    for (const key of ["eco_description", "eco_first_vin", "asana_link"]) $(`w-${key}`).hidden = eco !== "new";
+    $("type-hint").textContent = HINTS[type];
+    if (type === "release") {
+      const draft = part.revisions.find(r => r.status === "draft");
+      if (draft && !$("f-part_number").dataset.touched) $("f-part_number").value = draft.part_number;
+    }
+  };
+  $("f-type").addEventListener("change", sync);
+  $("f-eco").addEventListener("change", sync);
+  $("f-part_number").addEventListener("change", e => { e.target.dataset.touched = "1"; });
+  form.addEventListener("input", () => { state.draft = { ...collect(part), part_base: part.part_base }; });
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    const request = collect(part);
+    const problem = validate(request, part);
+    if (problem) { setMsg(problem, "bad"); return; }
+    $("f-submit").disabled = true;
+    setMsg("Sending…", "");
+    try {
+      await state.db.collection("requests").add({
+        ...request,
+        status: "pending",
+        requestedBy: state.me?.id || null,
+        requestedByEmail: state.me?.email || null,
+        createdAt: new Date().toISOString()
+      });
+      state.draft = null;
+      setMsg("Sent. Claude will check it and apply it; watch for it under Requests.", "ok");
+      form.reset(); sync();
+    } catch (error) {
+      setMsg(error?.code === "not_granted" ? "Your access to this page is view-only, so you can't send requests. Ask Jacob for Contributor access." : `Couldn't send: ${error?.message || error}`, "bad");
+    } finally {
+      $("f-submit").disabled = false;
+    }
+  });
+  sync();
+}
+
+function collect(part) {
+  const type = $("f-type").value;
+  const out = { type, change_reason: $("f-change_reason").value.trim() };
+  for (const key of SHOW[type]) {
+    const value = $(`f-${key}`).value.trim();
+    if (value) out[key] = key === "part_base" ? value.toUpperCase() : value;
+  }
+  if (type !== "new_part") out.part_base = part.part_base;
+  if (type === "new_part") out.part_base_new = out.part_base;
+  const eco = type === "link_change" ? "existing" : $("f-eco").value;
+  if (eco === "new") {
+    out.eco = "new";
+    for (const key of ["eco_description", "eco_first_vin", "asana_link"]) { const v = $(`f-${key}`).value.trim(); if (v) out[key] = v; }
+  } else if (eco === "existing") {
+    out.eco = $("f-eco_number").value.trim().toUpperCase();
+  }
+  return out;
+}
+
+function validate(r, part) {
+  if (!r.change_reason) return "Say why. Every change needs a reason.";
+  if (r.type === "release") {
+    if (!/^\d+$/.test(r.effective_from_vin || "")) return "Enter the VIN this revision applies from, as a number.";
+    const rev = part.revisions.find(x => x.part_number === r.part_number);
+    if (rev && !["draft", "superseded"].includes(rev.status)) return `${rev.part_number} is ${STATUS_TEXT[rev.status].toLowerCase()}; pick a draft to release.`;
+  }
+  if (r.type === "edit") {
+    const rev = part.revisions.find(x => x.part_number === r.part_number);
+    if (rev && rev.status !== "draft") return `${rev.part_number} is ${STATUS_TEXT[rev.status].toLowerCase()}. Only drafts can be edited; ask for a new revision instead.`;
+  }
+  if (r.type === "new_part") {
+    if (!/^[A-Z0-9-]+$/.test(r.part_base || "")) return "Enter the new base number (letters, digits or dashes).";
+    if (!r.part_name) return "Give the new part a name.";
+    if (state.parts.some(p => p.part_base === r.part_base)) return `${r.part_base} already exists.`;
+  }
+  if (r.quantity_on_sheet && !/^\d+(\.\d+)?$/.test(r.quantity_on_sheet)) return "Qty on sheet must be a number.";
+  if (r.eco && r.eco !== "new") {
+    const id = Number((/^(?:ECO-?\s*)?(\d+)$/i.exec(r.eco) || [])[1]);
+    if (!id || !state.ecosById.has(id)) return `Pick an engineering change that exists, like ${state.ecos.at(-1)?.eco_number || "ECO-1"}.`;
+  }
+  if (r.eco === "existing" || r.eco === "") return "Pick the engineering change to link.";
+  if (r.eco_first_vin && !/^\d+$/.test(r.eco_first_vin)) return "First VIN must be a number.";
+  return "";
+}
+
+function setMsg(text, kind) { const el = $("f-msg"); if (el) { el.textContent = text; el.className = `msg ${kind}`; } }
+
+async function renderRequests() {
+  const list = state.requests.filter(r => state.rfilter === "all" || (state.rfilter === "pending" ? r.status === "pending" : r.requestedBy && r.requestedBy === state.me?.id));
+  const waiting = state.requests.filter(r => r.status === "pending").length;
+  $("count-requests").textContent = waiting ? `${waiting} waiting` : "";
+  if (!state.db) { $("request-list").innerHTML = `<div class="empty">Requests show here when you open the page signed in to the Bowlus Claude workspace.</div>`; return; }
+  if (!list.length) {
+    $("request-list").innerHTML = `<div class="empty">${state.rfilter === "pending" ? (state.isOwner ? "Nothing waiting. Pick a part and use “Ask for a change” to send one." : "Nothing waiting.") : "No changes yet."}</div>`;
+    return;
+  }
+  const ids = [...new Set(list.map(r => r.requestedBy).filter(Boolean))];
+  if (state.user && ids.length) { try { state.profiles = { ...state.profiles, ...(await state.user.profiles(ids)) }; } catch {} }
+  $("request-list").innerHTML = list.map(r => {
+    const who = (r.requestedBy && state.profiles[r.requestedBy]?.name) || r.requestedByEmail || "Someone";
+    const target = r.type === "new_part" ? r.part_base_new || r.part_base : r.part_number || r.part_base;
+    const extras = [r.effective_from_vin && `from VIN ${r.effective_from_vin}`, r.part_name && `name “${r.part_name}”`, r.material_name && `material ${r.material_name}`, r.quantity_on_sheet && `qty ${r.quantity_on_sheet}`, r.engineering_change_ref && `ref ${r.engineering_change_ref}`, r.eco === "new" && "new engineering change", r.eco && r.eco !== "new" && r.eco].filter(Boolean);
+    return `<div class="req-card">
+      <div class="req-top">${pill(r.status)}<span class="what">${esc(TYPES[r.type] || r.type)}</span><span class="pn">${esc(target)}</span><span class="muted">${esc(extras.join(" · "))}</span></div>
+      <div>${esc(r.change_reason)}</div>
+      <div class="hint">${esc(who)} · ${esc(when(r.createdAt))}${r.processedAt ? ` · handled ${esc(when(r.processedAt))}` : ""}</div>
+      ${r.result ? `<div class="req-result">${esc(r.result)}</div>` : ""}
+    </div>`;
+  }).join("");
+}
+
+function setTab(tab) {
+  state.tab = tab;
+  $("tab-parts").setAttribute("aria-selected", tab === "parts");
+  $("tab-requests").setAttribute("aria-selected", tab === "requests");
+  $("view-parts").hidden = tab !== "parts";
+  $("view-requests").hidden = tab !== "requests";
+  if (location.hash !== `#${tab}`) history.replaceState(null, "", tab === "parts" ? location.pathname + location.search : "#requests");
+}
+
+$("tab-parts").addEventListener("click", () => setTab("parts"));
+$("tab-requests").addEventListener("click", () => setTab("requests"));
+window.addEventListener("hashchange", () => setTab(location.hash === "#requests" ? "requests" : "parts"));
+$("search").addEventListener("input", e => { state.search = e.target.value; renderList(); });
+document.querySelectorAll("[data-filter]").forEach(b => b.addEventListener("click", () => {
+  state.filter = b.dataset.filter;
+  document.querySelectorAll("[data-filter]").forEach(x => x.setAttribute("aria-pressed", x === b));
+  renderList();
+}));
+document.querySelectorAll("[data-rfilter]").forEach(b => b.addEventListener("click", () => {
+  state.rfilter = b.dataset.rfilter;
+  document.querySelectorAll("[data-rfilter]").forEach(x => x.setAttribute("aria-pressed", x === b));
+  renderRequests();
+}));
+$("part-list").addEventListener("click", e => {
+  const button = e.target.closest("[data-part]");
+  if (!button) return;
+  state.selected = button.dataset.part;
+  renderList(); renderDetail();
+  if (window.matchMedia("(max-width: 820px)").matches) $("detail").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+async function loadSnapshot() {
+  try {
+    const snap = await (await fetch("parts.json", { cache: "no-store" })).json();
+    state.parts = snap.parts || [];
+    state.history = snap.history || [];
+    state.sheets = snap.sheets || [];
+    state.ecos = snap.engineeringChanges || [];
+    state.sheetsById = new Map(state.sheets.map(sh => [sh.sheet_record_id, sh]));
+    state.ecosById = new Map(state.ecos.map(e => [Number(e.eco_id), e]));
+    state.generatedAt = snap.generatedAt;
+    const revs = state.parts.reduce((n, p) => n + p.revisions.length, 0);
+    const preview = /^preview/.test(snap.source || "");
+    $("snapshot-note").innerHTML = `<strong>${state.parts.length.toLocaleString()} parts, ${revs.toLocaleString()} revisions</strong> as of ${esc(when(snap.generatedAt))}. ${preview ? "Preview built from the Airtable parts list; it becomes live Hawley data once the parts tables are deployed." : "Refreshed by Claude each time it applies requests."}`;
+    if (!state.selected && state.parts.length) state.selected = state.parts.find(p => p.part_base === "01201")?.part_base || state.parts[0].part_base;
+    renderList(); renderDetail();
+  } catch (error) {
+    $("snapshot-note").textContent = "The parts list didn't load. Reload the page; if it keeps failing, tell Jacob.";
+  }
+}
+
+// --- Ask Claude: natural-language questions answered with lookups over the parts data on this page ---
+const findBase = value => {
+  const q = String(value || "").trim().toUpperCase();
+  return state.parts.find(p => p.part_base.toUpperCase() === q)
+    || state.parts.find(p => p.revisions.some(r => r.part_number.toUpperCase() === q))
+    || state.parts.find(p => /^[0-9]+[A-Z]$/.test(q) && p.part_base === q.slice(0, -1));
+};
+const revisionForVin = (part, vin) => part.revisions
+  .filter(r => (r.status === "released" || r.status === "superseded") && (r.effective_from_vin ?? 0) <= vin)
+  .sort((a, b) => (b.effective_from_vin ?? 0) - (a.effective_from_vin ?? 0) || b.revision.localeCompare(a.revision))[0] || null;
+const slimEco = e => ({ number: e.eco_number, description: e.description, date: e.change_date, first_vin: ecoVin(e) || null, new_part_number: e.new_part_number || undefined, notes: e.notes || undefined, asana_link: e.asana_link || undefined, revisions: e.part_numbers });
+const slimSheet = sh => ({ sheet: sh.sheet_name, material: sh.material_name, size: sh.sheet_dimensions, sheet_cost: sh.sheet_cost, avg_price_per_part: sh.average_price_per_part, location: sh.inventory_location || undefined, parts_on_sheet: sh.part_numbers.length });
+const slimRev = r => ({ sheets: sheetsOf(r).map(sh => sh.sheet_name), engineering_changes: ecosOf(r).map(e => `${e.eco_number}: ${(e.description || "").slice(0, 120)}`), part_number: r.part_number, status: r.status, applies_from: r.status === "released" || r.status === "superseded" ? vinText(r.effective_from_vin) : null, part_name: r.part_name, material: r.material_name, qty_on_sheet: r.quantity_on_sheet, reason: r.change_reason, eco: r.engineering_change_ref || undefined, released_at: r.released_at, released_by: r.released_by || undefined });
+
+const ASK_TOOLS = [
+  {
+    name: "search_parts",
+    description: "Search CNC parts by part number, base number or words in the name. Returns up to 25 matches with their current revision.",
+    inputSchema: { type: "object", properties: { query: { type: "string" }, include_retired: { type: "boolean" } }, required: ["query"] },
+    execute({ query, include_retired }) {
+      const words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
+      const hits = state.parts.filter(p => {
+        if (!include_retired && !p.revisions.some(r => r.status !== "retired")) return false;
+        const hay = `${p.part_base} ${p.part_name} ${p.revisions.map(r => `${r.part_number} ${r.material_name || ""}`).join(" ")}`.toLowerCase();
+        return words.every(w => hay.includes(w));
+      });
+      return { total: hits.length, parts: hits.slice(0, 25).map(p => ({ part_base: p.part_base, part_name: p.part_name, current: currentRevision(p)?.part_number || null, revisions: p.revisions.length })) };
+    }
+  },
+  {
+    name: "get_part",
+    description: "Full detail of one part: every revision with status, the VIN it applies from, material, quantity on sheet and reason. Accepts a base number (34751) or a full part number (34751F).",
+    inputSchema: { type: "object", properties: { part: { type: "string" } }, required: ["part"] },
+    execute({ part }) {
+      const p = findBase(part);
+      if (!p) return { found: false, note: `No part ${part}. Try search_parts.` };
+      const current = currentRevision(p);
+      return { found: true, part_base: p.part_base, part_name: p.part_name, current: current?.part_number || null, revisions: p.revisions.map(slimRev) };
+    }
+  },
+  {
+    name: "revision_for_vin",
+    description: "Which revision of a part a given VIN uses.",
+    inputSchema: { type: "object", properties: { part: { type: "string" }, vin: { type: "integer" } }, required: ["part", "vin"] },
+    execute({ part, vin }) {
+      const p = findBase(part);
+      if (!p) return { found: false };
+      const r = revisionForVin(p, Number(vin));
+      return { found: true, part_base: p.part_base, vin: Number(vin), revision: r ? slimRev(r) : null };
+    }
+  },
+  {
+    name: "find_sheet",
+    description: "Find CNC sheets (nested sheet programs) by name, material or size, e.g. '01-A032', 'Anodized 063', '48X96'. Returns each sheet with material, size, cost and the part numbers cut on it (current, non-retired revisions).",
+    inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+    execute({ query }) {
+      const words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
+      const hits = state.sheets.filter(sh => words.every(w => `${sh.sheet_name} ${sh.material_name} ${sh.sheet_dimensions}`.toLowerCase().includes(w)));
+      return { total: hits.length, sheets: hits.slice(0, 15).map(sh => ({ ...slimSheet(sh), part_numbers: sh.part_numbers.slice(0, 60) })) };
+    }
+  },
+  {
+    name: "find_engineering_changes",
+    description: "Search engineering changes (ECOs) by words in the description or notes, by part number, by ECO number (ECO-12), or by first VIN. Returns each change with its date, first VIN, new part number and the revisions it is linked to. Newest first.",
+    inputSchema: { type: "object", properties: { query: { type: "string" }, part: { type: "string" }, vin: { type: "integer" } } },
+    execute({ query, part, vin }) {
+      const words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
+      const p = part ? findBase(part) : null;
+      const pn = String(part || "").toUpperCase();
+      const hits = state.ecos.filter(e => {
+        if (words.length && !words.every(w => `${e.eco_number} ${e.description} ${e.notes} ${e.new_part_number}`.toLowerCase().includes(w))) return false;
+        if (part && !(e.part_numbers.some(n => n === pn || (p && n.startsWith(p.part_base))) || (e.new_part_number && (e.new_part_number === pn || (p && e.new_part_number.startsWith(p.part_base)))))) return false;
+        if (vin && e.first_vin !== Number(vin)) return false;
+        return true;
+      }).sort((a, b) => b.eco_id - a.eco_id);
+      return { total: hits.length, engineering_changes: hits.slice(0, 25).map(slimEco) };
+    }
+  },
+  {
+    name: "part_history",
+    description: "Recorded changes to a part since Hawley started tracking versions (newest first): who changed what and when.",
+    inputSchema: { type: "object", properties: { part: { type: "string" } }, required: ["part"] },
+    execute({ part }) {
+      const p = findBase(part);
+      if (!p) return { found: false };
+      return { found: true, part_base: p.part_base, changes: historyFor(p.part_base).map(h => ({ when: h.changed_at, by: h.changed_by, what: describeEvent(h).replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'") })) };
+    }
+  }
+];
+
+function renderAnswer(text) {
+  const el = $("ask-answer");
+  el.hidden = false;
+  const known = new Set(state.parts.flatMap(p => [p.part_base, ...p.revisions.map(r => r.part_number)]));
+  el.innerHTML = esc(text).replace(/\b([0-9]{4,6}[A-Z]?)\b/g, m => {
+    const p = known.has(m) ? findBase(m) : null;
+    return p ? `<button type="button" class="pn-link" data-goto="${esc(p.part_base)}">${m}</button>` : m;
+  });
+}
+
+let askAbort = null;
+async function ask(question) {
+  question = question.trim();
+  if (!question) return;
+  const sample = state.sample || (state.sample = await window.claude?.use?.("sample"));
+  if (!sample) { renderAnswer("Asking Claude isn't available in this view. Open the page signed in to the Bowlus Claude workspace."); return; }
+  askAbort?.abort();
+  askAbort = new AbortController();
+  $("ask-submit").disabled = true;
+  renderAnswer("Looking it up…");
+  try {
+    const result = await sample([{ role: "user", content:
+      `You answer questions about Bowlus CNC parts for shop staff, using only the tools (they read Hawley's CNC parts data as of ${state.generatedAt || "the last refresh"}).
+Part numbers are a base number plus a revision letter: 34751F is revision F of part 34751. Parts are cut on CNC sheets (find_sheet); engineering changes (ECO-n, find_engineering_changes) record why a part changed and the first VIN it applies to. The "current" revision is the released one with the latest effective VIN; superseded revisions are still used by earlier VINs; drafts are not in use yet.
+Always look parts up with the tools before answering; never guess. If a part isn't found, say so and suggest a search.
+Answer in plain words, short (1-4 sentences or a compact list), and include the full part numbers. You can't change anything; if someone asks for a change, tell them Jacob makes part changes.
+
+Question: ${question}` }], {
+      tools: ASK_TOOLS,
+      modelTier: "default",
+      signal: askAbort.signal,
+      cache: false,
+      onText: ({ text }) => { if (text) renderAnswer(text); }
+    });
+    renderAnswer(result.text || "No answer came back. Try asking again.");
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    renderAnswer(error?.code === "not_granted" ? "Asking Claude was turned off for this page. You can allow it from the page's Permissions menu." :
+      error?.code === "rate_limited" ? "Too many questions at once. Wait a minute and ask again." : `Claude couldn't answer: ${error?.message || error}`);
+  } finally {
+    $("ask-submit").disabled = false;
+  }
+}
+
+$("ask-form").addEventListener("submit", e => { e.preventDefault(); ask($("ask-input").value); });
+$("ask-examples").addEventListener("click", e => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  $("ask-input").value = b.textContent;
+  ask(b.textContent);
+});
+$("ask-answer").addEventListener("click", e => {
+  const b = e.target.closest("[data-goto]");
+  if (!b) return;
+  state.selected = b.dataset.goto;
+  state.search = ""; $("search").value = ""; state.filter = "all";
+  document.querySelectorAll("[data-filter]").forEach(x => x.setAttribute("aria-pressed", x.dataset.filter === "all"));
+  setTab("parts"); renderList(); renderDetail();
+  $("detail").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+async function connect() {
+  try {
+    state.user = await window.claude?.use?.("user");
+    if (state.user) {
+      try { state.me = await state.user.me(); } catch {}
+      try { state.isOwner = await state.user.isOwner(); } catch { state.isOwner = false; }
+    }
+    state.db = await window.claude?.use?.("db");
+  } catch { state.db = null; }
+  if (!state.db) { renderRequests(); renderDetail(); return; }
+  const timer = setTimeout(() => { if (!state.requests.length) $("request-list").innerHTML = `<div class="empty">Requests are taking a while to load. They'll appear here when the connection catches up.</div>`; }, 10000);
+  state.db.collection("requests").orderBy("createdAt", "desc").limit(300).onSnapshot(snap => {
+    clearTimeout(timer);
+    state.requests = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    renderRequests();
+    // Don't redraw the form under someone who is typing in it.
+    if (state.tab === "parts" && !$("request-form")?.contains(document.activeElement)) renderDetail();
+  }, () => {
+    clearTimeout(timer);
+    $("request-list").innerHTML = `<div class="empty">Requests can't be shown right now. Reload the page to try again.</div>`;
+  });
+  renderDetail();
+}
+
+setTab(location.hash === "#requests" ? "requests" : "parts");
+loadSnapshot();
+connect();
+</script>

@@ -1,9 +1,11 @@
 # Hawley Database Schema Map
 
-Last updated: 2026-07-29
+Last updated: 2026-11-09
 
 This file describes the Postgres shape defined by `db/migrations` and `db/views`.
-It is the working map for expanding Hawley's shop-floor context.
+It is the working map for expanding Hawley's shop-floor context. For every table, view and column as
+they exist in production, see the generated `docs/hawley-database-map.md`
+(`node scripts/hawley-db.mjs map docs/hawley-database-map.md`).
 
 ## Design Layers
 
@@ -248,6 +250,24 @@ Use this pattern when adding more shop context:
 4. Expose app-friendly joins and rollups in `reporting.*`.
 5. Track sync jobs, cursors, and writeback queues in `sync.*`.
 6. Keep user-facing UI off `raw.*` unless the data has no modeled equivalent yet.
+
+## CNC Parts: How They Link (as of 2026-11-09)
+
+- `raw.airtable_cnc_parts_master` → `hb.cnc_parts_master`: 1,057 Airtable records, 946 distinct part
+  numbers, 93 retired. Last refreshed from Airtable on 2026-10-29. `hb` is rebuilt on every HB build,
+  so nothing Hawley-owned (like version history) can live there.
+- Part numbers mostly encode a revision letter on a base number (764 match `<digits><letter>`,
+  e.g. `01201A`, `01201B`). The other 293 use other patterns (e.g. `DT1A`).
+- The same part number can appear on several Airtable records (`DT1A` × 6, `01203A` × 2), each with
+  its own sub-component. A part number is not a unique key; `part_record_id` is.
+- Airtable lineage hints, only in `fields_json`: `Part Master` (64 flagged), `Part Heritage`
+  (466, e.g. "Previously Base"), `Engineering Changes` (80 parts linked to Airtable change
+  records, which Hawley doesn't mirror), plus `Production ID` and `Cart ID` (e.g. `VC - 01201A`).
+- Links: parts → sheets through `cnc_sheet_record_ids` (923 parts). `hb.cnc_sheets` has 141 sheets.
+  The task bridges `hb.task_template_part_links`, `hb.task_template_cnc_sheet_links` and
+  `hb.task_template_materials` are currently **empty**, and `task_record_ids` is empty on every part.
+- Machine side: `hb.cnc_program_runtime_profiles` (G-code runtimes) and `core.cnc_machine_runs`
+  (observed cuts) key on Asana task/program, not on part.
 
 ## Current Gaps To Model Next
 
