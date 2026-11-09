@@ -78,8 +78,16 @@ After that, signup is invite-only.
 In NocoDB: create a base (e.g. `Hawley`) > **Connect External Data Source** > PostgreSQL:
 
 - host / port: the cluster's, database `bowlus_ops`, user `nocodb_reader`
-- SSL: required
+- SSL: on, SSL mode **Required**, with the cluster's CA certificate uploaded
+  (`doctl databases get-ca <db>`, base64-decoded, or "Download CA certificate" in the
+  control panel). Without the CA the test fails with "self-signed certificate in
+  certificate chain".
 - schema: one per data source (`hb`, `reporting`, ...), adding only what people need
+
+If the test says "Connection to internal hosts is not allowed", the app is missing
+`NC_ALLOW_LOCAL_EXTERNAL_DBS=true`. Inside App Platform the cluster host resolves to a
+private VPC address, which NocoDB's SSRF guard blocks by default. The spec sets it. Only
+invited users with Creator rights can add data sources, and `nocodb_reader` is read-only.
 
 Turn off "Allow schema changes" and "Allow data edits" on the source; the database user
 enforces read-only either way.

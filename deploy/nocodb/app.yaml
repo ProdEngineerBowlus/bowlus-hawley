@@ -41,6 +41,11 @@ services:
       - key: NC_INVITE_ONLY_SIGNUP
         scope: RUN_TIME
         value: "true"
+      # Inside App Platform the managed Postgres host resolves to a private VPC address, which
+      # NocoDB's SSRF guard rejects ("Connection to internal hosts is not allowed") without this.
+      - key: NC_ALLOW_LOCAL_EXTERNAL_DBS
+        scope: RUN_TIME
+        value: "true"
       - key: NC_DISABLE_TELE
         scope: RUN_TIME
         value: "true"
