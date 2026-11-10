@@ -39,6 +39,8 @@ revision applies from, the CNC sheets it is cut on, its Part Revision records (P
 - Releasing needs an effective VIN later than the current released revision's; the old one becomes superseded and
   stays in effect for earlier VINs (`parts.cnc_revisions_for_vin(vin)`).
 - Only drafts can be edited. New parts start as draft revision A.
+- "Correct a mistake" (`correct`) is the exception: it fixes a wrong part number (`new_part_number`), name, material,
+  qty or VIN on any revision in place, without making a new revision. The history trigger keeps the old values.
 - Part Revision records (PR-n, migration 057) live in `parts.engineering_changes` (seeded once from the Airtable archive) and link to revisions
   through `parts.cnc_part_revision_changes`. A new one created with a change takes the reason as its description and
   the release VIN as its first VIN unless given.

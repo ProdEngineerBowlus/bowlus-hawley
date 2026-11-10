@@ -7,7 +7,8 @@
 //
 // A request is {id, type, requestedByEmail, part_base?, part_number?, revision?, effective_from_vin?, part_name?,
 // material_name?, quantity_on_sheet?, notes?, change_reason, engineering_change_ref?}. Types: new_part,
-// new_revision, release, retire, edit, link_change. Any change can also record a Part Revision (PR-n, the everyday
+// new_revision, release, retire, edit, correct, link_change ("correct" fixes a wrong value or part number on any revision
+// in place, with new_part_number for a rename). Any change can also record a Part Revision (PR-n, the everyday
 // CAD/part change record; not a formal ECO): eco "new" creates one (eco_description, eco_first_vin, asana_link; defaults
 // from the change) and links it to the revision; eco "PR-12" links an existing one. `apply` prints one JSON line {ok, summary} or {ok:false, error}.
 import { readFileSync, writeFileSync } from "node:fs";
@@ -178,6 +179,49 @@ async function applyChange(client, request, reason, actor) {
       if (sets.length === 1) fail("Nothing to change.");
       await client.query(`update parts.cnc_part_revisions set ${sets.join(", ")} where revision_id = $1`, values);
       return { summary: `Updated draft ${target.part_number}.`, partNumber: target.part_number };
+    }
+    case "correct": {
+      // A direct fix of a wrong value on any revision, released or not (a typo, a wrong suffix). It doesn't make a new
+      // revision; the history trigger keeps the old values.
+      const target = await revisionByNumber(client, request.part_number);
+      const done = [];
+      const sets = [];
+      const values = [target.revision_id];
+      for (const field of ["part_name", "material_name", "quantity_on_sheet", "effective_from_vin"]) {
+        if (!(field in request) || text(request[field]) === "") continue;
+        const value = field === "effective_from_vin" ? vinOf(request[field]) : field === "quantity_on_sheet" ? qtyOf(request[field]) : text(request[field]);
+        values.push(value);
+        sets.push(`${field} = $${values.length}`);
+        done.push(field.replace(/_/g, " "));
+      }
+      if (sets.length) await client.query(`update parts.cnc_part_revisions set ${sets.join(", ")} where revision_id = $1`, values);
+
+      let partNumber = target.part_number;
+      const wanted = text(request.new_part_number).toUpperCase();
+      if (wanted && wanted !== target.part_number) {
+        if (!/^[A-Z0-9-]+$/.test(wanted)) fail(`"${wanted}" isn't a part number (letters, digits or dashes).`);
+        const { rows: taken } = await client.query("select 1 from parts.cnc_part_revisions where part_number = $1", [wanted]);
+        if (taken.length) fail(`${wanted} already exists.`);
+        const { rows: [{ n: siblings }] } = await client.query("select count(*)::int as n from parts.cnc_part_revisions where part_base = $1", [target.part_base]);
+        if (target.revision && /^[A-Z]$/.test(wanted.slice(-1)) && wanted.slice(0, -1) === target.part_base) {
+          // Same base, different letter: 01201B -> 01201C.
+          await client.query("update parts.cnc_part_revisions set revision = $2 where revision_id = $1", [target.revision_id, wanted.slice(-1)]);
+        } else if (siblings === 1) {
+          // The only revision on its base (e.g. 24601BE, imported as a whole number): rename the base; it cascades.
+          const { rows: clash } = await client.query("select 1 from parts.cnc_parts where part_base = $1", [wanted]);
+          if (clash.length) fail(`Part ${wanted} already exists.`);
+          await client.query("update parts.cnc_parts set part_base = $2 where part_base = $1", [target.part_base, wanted]);
+          if (target.revision) await client.query("update parts.cnc_part_revisions set revision = '' where revision_id = $1", [target.revision_id]);
+        } else {
+          // One of several revisions: move it to its own part number.
+          await client.query("insert into parts.cnc_parts (part_base, part_name) values ($1, $2) on conflict (part_base) do nothing", [wanted, target.part_name]);
+          await client.query("update parts.cnc_part_revisions set part_base = $2, revision = '' where revision_id = $1", [target.revision_id, wanted]);
+        }
+        partNumber = wanted;
+        done.unshift(`part number ${target.part_number} → ${wanted}`);
+      }
+      if (!done.length) fail("Nothing to correct. Enter the new part number or the values to fix.");
+      return { summary: `Corrected ${partNumber}: ${done.join(", ")}.`, partNumber };
     }
     default:
       fail(`Unknown request type "${request.type}".`);
