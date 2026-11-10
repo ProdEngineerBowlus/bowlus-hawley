@@ -135,6 +135,26 @@ test("CNC Parts Desk requests: new revision, release from a VIN, edit rules, ret
   assert.ok(snapshot.history.length >= 8 && snapshot.history.every(h => !h.changed_by.startsWith("migration")));
 });
 
+test("the desk corrects a wrong part number or value directly, on released revisions too", async () => {
+  const { applyRequest } = await import("../../../scripts/cnc-parts-desk.mjs");
+  const db = await database([["r1", "24601BE", "Middle A Panel Port"], ["r2", "01201A", "Floor"], ["r3", "01201B", "Floor"]]);
+  const run = async request => {
+    await db.exec("begin");
+    try { const out = await applyRequest(db, { id: "c1", requestedByEmail: "jacob@bowlus.com", change_reason: "Typo", ...request }); await db.exec("commit"); return out; }
+    catch (error) { await db.exec("rollback"); throw error; }
+  };
+  assert.match(await run({ type: "correct", part_number: "24601BE", new_part_number: "24601bg" }), /Corrected 24601BG: part number 24601BE → 24601BG/);
+  assert.deepEqual(await rows(db, "select part_base, revision, status from parts.cnc_part_revisions where part_number = '24601BG'"), [{ part_base: "24601BG", revision: "", status: "released" }]);
+  assert.equal((await rows(db, "select count(*)::int n from parts.cnc_parts where part_base = '24601BE'"))[0].n, 0);
+
+  assert.match(await run({ type: "correct", part_number: "01201B", new_part_number: "01201D", material_name: "2024" }), /01201B → 01201D, material name/);
+  await assert.rejects(run({ type: "correct", part_number: "01201D", new_part_number: "01201A" }), /already exists/);
+  await assert.rejects(run({ type: "correct", part_number: "01201D" }), /Nothing to correct/);
+  assert.match(await run({ type: "correct", part_number: "01201A", new_part_number: "01201X9" }), /01201A → 01201X9/);
+  assert.deepEqual((await rows(db, "select part_number from parts.cnc_part_revisions order by 1")).map(r => r.part_number), ["01201D", "01201X9", "24601BG"]);
+  assert.ok((await rows(db, "select 1 from parts.cnc_part_history where changed_by like 'jacob@bowlus.com (CNC Parts Desk c1)'")).length >= 3);
+});
+
 async function databaseWithEcos(parts, ecos) {
   const db = new PGlite();
   await db.exec("create role bowlus_app; create role bowlus_sync; create role bowlus_readonly; create schema hb; create schema raw; create schema reporting;");

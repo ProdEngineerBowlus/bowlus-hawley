@@ -159,6 +159,7 @@ label span.req { color: var(--bad); }
 <script>
 const TYPES = {
   new_revision: "New revision",
+  correct: "Correct a mistake",
   release: "Release a revision",
   edit: "Edit a draft",
   retire: "Retire a revision",
@@ -280,8 +281,9 @@ function requestForm(part) {
     <div class="fields">
       ${field("type", "What change", `<select id="f-type">${Object.entries(TYPES).map(([k, v]) => `<option value="${k}" ${d.type === k ? "selected" : ""}>${v}</option>`).join("")}</select>`)}
       <span id="w-part_number">${field("part_number", "Revision", `<select id="f-part_number">${revOptions}</select>`)}</span>
+      <span id="w-new_part_number">${field("new_part_number", "Correct part number to", `<input id="f-new_part_number" class="mono" placeholder="Leave blank to keep it" value="${esc(d.new_part_number || "")}">`)}</span>
       <span id="w-part_base">${field("part_base", "New part base number <span class='req'>*</span>", `<input id="f-part_base" class="mono" placeholder="e.g. 77001" value="${esc(d.type === "new_part" ? d.part_base_new || "" : "")}">`)}</span>
-      <span id="w-effective_from_vin">${field("effective_from_vin", "Applies from VIN <span class='req'>*</span>", `<input id="f-effective_from_vin" inputmode="numeric" placeholder="e.g. 340" value="${esc(d.effective_from_vin || "")}">`)}</span>
+      <span id="w-effective_from_vin">${field("effective_from_vin", "Applies from VIN <span class='req' id='vin-req'>*</span>", `<input id="f-effective_from_vin" inputmode="numeric" placeholder="e.g. 340" value="${esc(d.effective_from_vin || "")}">`)}</span>
       <span id="w-part_name">${field("part_name", "Part name", `<input id="f-part_name" value="${esc(d.part_name || "")}">`)}</span>
       <span id="w-material_name">${field("material_name", "Material", `<input id="f-material_name" value="${esc(d.material_name || "")}">`)}</span>
       <span id="w-quantity_on_sheet">${field("quantity_on_sheet", "Qty on sheet", `<input id="f-quantity_on_sheet" inputmode="decimal" value="${esc(d.quantity_on_sheet || "")}">`)}</span>
@@ -306,6 +308,7 @@ function requestForm(part) {
 const SHOW = {
   new_revision: ["part_name", "material_name", "quantity_on_sheet", "engineering_change_ref"],
   release: ["part_number", "effective_from_vin"],
+  correct: ["part_number", "new_part_number", "part_name", "material_name", "quantity_on_sheet", "effective_from_vin"],
   edit: ["part_number", "part_name", "material_name", "quantity_on_sheet", "engineering_change_ref"],
   retire: ["part_number"],
   new_part: ["part_base", "part_name", "material_name", "quantity_on_sheet", "engineering_change_ref"],
@@ -313,6 +316,7 @@ const SHOW = {
 };
 const HINTS = {
   new_revision: "Makes the next letter as a draft, copied from the current revision with your changes. Release it separately once it's ready.",
+  correct: "Fixes a wrong value on the revision as it is, released or not: no new revision is made. Fill in only what's wrong; the old values stay in the history.",
   release: "The revision is used from this VIN on. Earlier VINs keep the revision they had.",
   edit: "Only drafts can be edited. Released revisions stay as they were built; ask for a new revision instead.",
   retire: "Marks the revision as no longer used.",
@@ -325,13 +329,14 @@ function wireForm(part) {
   if (!form) return;
   const sync = () => {
     const type = $("f-type").value;
-    for (const key of ["part_number", "part_base", "effective_from_vin", "part_name", "material_name", "quantity_on_sheet", "engineering_change_ref"]) $(`w-${key}`).hidden = !SHOW[type].includes(key);
+    for (const key of ["part_number", "new_part_number", "part_base", "effective_from_vin", "part_name", "material_name", "quantity_on_sheet", "engineering_change_ref"]) $(`w-${key}`).hidden = !SHOW[type].includes(key);
     if (type === "link_change" && $("f-eco").value !== "existing") $("f-eco").value = "existing";
     const eco = $("f-eco").value;
     $("w-eco").hidden = type === "link_change";
     $("w-change_number").hidden = eco !== "existing";
     for (const key of ["eco_description", "eco_first_vin", "asana_link"]) $(`w-${key}`).hidden = eco !== "new";
     $("type-hint").textContent = HINTS[type];
+    $("vin-req").hidden = type === "correct";
     if (type === "release") {
       const draft = part.revisions.find(r => r.status === "draft");
       if (draft && !$("f-part_number").dataset.touched) $("f-part_number").value = draft.part_number;
@@ -373,7 +378,7 @@ function collect(part) {
   const out = { type, change_reason: $("f-change_reason").value.trim() };
   for (const key of SHOW[type]) {
     const value = $(`f-${key}`).value.trim();
-    if (value) out[key] = key === "part_base" ? value.toUpperCase() : value;
+    if (value) out[key] = key === "part_base" || key === "new_part_number" ? value.toUpperCase() : value;
   }
   if (type !== "new_part") out.part_base = part.part_base;
   if (type === "new_part") out.part_base_new = out.part_base;
@@ -393,6 +398,12 @@ function validate(r, part) {
     if (!/^\d+$/.test(r.effective_from_vin || "")) return "Enter the VIN this revision applies from, as a number.";
     const rev = part.revisions.find(x => x.part_number === r.part_number);
     if (rev && !["draft", "superseded"].includes(rev.status)) return `${rev.part_number} is ${STATUS_TEXT[rev.status].toLowerCase()}; pick a draft to release.`;
+  }
+  if (r.type === "correct") {
+    if (!["new_part_number", "part_name", "material_name", "quantity_on_sheet", "effective_from_vin"].some(k => r[k])) return "Fill in the value that's wrong: the right part number, name, material, qty or VIN.";
+    if (r.new_part_number && !/^[A-Z0-9-]+$/.test(r.new_part_number)) return "The part number can only have letters, digits or dashes.";
+    if (r.new_part_number && state.parts.some(p => p.revisions.some(x => x.part_number === r.new_part_number))) return `${r.new_part_number} already exists.`;
+    if (r.effective_from_vin && !/^d+$/.test(r.effective_from_vin)) return "VIN must be a number.";
   }
   if (r.type === "edit") {
     const rev = part.revisions.find(x => x.part_number === r.part_number);
@@ -429,7 +440,7 @@ async function renderRequests() {
   $("request-list").innerHTML = list.map(r => {
     const who = (r.requestedBy && state.profiles[r.requestedBy]?.name) || r.requestedByEmail || "Someone";
     const target = r.type === "new_part" ? r.part_base_new || r.part_base : r.part_number || r.part_base;
-    const extras = [r.effective_from_vin && `from VIN ${r.effective_from_vin}`, r.part_name && `name “${r.part_name}”`, r.material_name && `material ${r.material_name}`, r.quantity_on_sheet && `qty ${r.quantity_on_sheet}`, r.engineering_change_ref && `ref ${r.engineering_change_ref}`, r.eco === "new" && "new PR", r.eco && r.eco !== "new" && r.eco].filter(Boolean);
+    const extras = [r.new_part_number && `→ ${r.new_part_number}`, r.effective_from_vin && `from VIN ${r.effective_from_vin}`, r.part_name && `name “${r.part_name}”`, r.material_name && `material ${r.material_name}`, r.quantity_on_sheet && `qty ${r.quantity_on_sheet}`, r.engineering_change_ref && `ref ${r.engineering_change_ref}`, r.eco === "new" && "new PR", r.eco && r.eco !== "new" && r.eco].filter(Boolean);
     return `<div class="req-card">
       <div class="req-top">${pill(r.status)}<span class="what">${esc(TYPES[r.type] || r.type)}</span><span class="pn">${esc(target)}</span><span class="muted">${esc(extras.join(" · "))}</span></div>
       <div>${esc(r.change_reason)}</div>
