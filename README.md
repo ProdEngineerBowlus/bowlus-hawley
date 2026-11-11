@@ -2,6 +2,10 @@
 
 Historical Analytics & Workflow Logic Engine.
 
+For read-only visual exploration of the DigitalOcean database, see the
+[DBeaver setup and browsing guide](docs/runbooks/dbeaver-digitalocean.md) and
+[starter SQL queries](tools/reporting/hawley-dbeaver-starter.sql).
+
 Hawley is the local production engineering brain for Bowlus shop operations. It
 is named after Hawley Bowlus, the aircraft designer and original Bowlus inventor.
 
