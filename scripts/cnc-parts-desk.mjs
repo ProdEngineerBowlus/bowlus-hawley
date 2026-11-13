@@ -283,8 +283,26 @@ export async function exportSnapshot(client) {
   };
 }
 
+// The snapshot narrowed to some part bases, so the page can refresh what a change touched without a republish.
+// `missing` lists bases that no longer exist (renamed by a correction).
+export async function exportParts(client, bases) {
+  const wanted = new Set(bases.map(base => text(base).toUpperCase()).filter(Boolean));
+  const snapshot = await exportSnapshot(client);
+  const parts = snapshot.parts.filter(part => wanted.has(part.part_base.toUpperCase()));
+  const found = new Set(parts.map(part => part.part_base.toUpperCase()));
+  const revisionIds = new Set(parts.flatMap(part => part.revisions.map(rev => String(rev.revision_id))));
+  return {
+    generatedAt: snapshot.generatedAt,
+    parts,
+    missing: [...wanted].filter(base => !found.has(base)),
+    history: snapshot.history.filter(row => wanted.has(String(row.part_base || "").toUpperCase())),
+    engineeringChanges: snapshot.engineeringChanges.filter(eco => parts.some(part => part.revisions.some(rev => (rev.eco_ids || []).map(String).includes(String(eco.eco_id))))),
+    revisionIds: [...revisionIds]
+  };
+}
+
 async function main() {
-  const [mode, file, flag] = process.argv.slice(2);
+  const [mode, file, flag, ...more] = process.argv.slice(2);
   const client = new pg.Client(getDatabaseConfig({ useSyncUrl: true }));
   await client.connect();
   try {
@@ -292,6 +310,9 @@ async function main() {
       const snapshot = await exportSnapshot(client);
       writeFileSync(file, JSON.stringify(snapshot));
       console.log(JSON.stringify({ ok: true, parts: snapshot.parts.length, history: snapshot.history.length, file }));
+    } else if (mode === "parts" && file && flag) {
+      writeFileSync(file, JSON.stringify(await exportParts(client, [flag, ...more])));
+      console.log(JSON.stringify({ ok: true, file }));
     } else if (mode === "apply" && file) {
       const request = JSON.parse(readFileSync(file, "utf8"));
       await client.query("begin");
@@ -305,7 +326,7 @@ async function main() {
         console.log(JSON.stringify({ ok: false, error: error.message }));
       }
     } else {
-      console.error("Usage: cnc-parts-desk.mjs export <out.json> | apply <request.json> [--dry-run]");
+      console.error("Usage: cnc-parts-desk.mjs export <out.json> | parts <out.json> <base…> | apply <request.json> [--dry-run]");
       process.exitCode = 1;
     }
   } finally {

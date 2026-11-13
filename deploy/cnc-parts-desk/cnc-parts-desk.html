@@ -55,7 +55,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 .pname { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .pill { display: inline-flex; align-items: center; font: 600 11px var(--body); letter-spacing: .04em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
 .s-released, .s-applied { background: var(--ok-soft); color: var(--ok); }
-.s-draft, .s-pending { background: var(--warn-soft); color: var(--warn); }
+.s-draft, .s-pending, .s-needs_claude { background: var(--warn-soft); color: var(--warn); }
+.row-btn { margin-top: 6px; font-size: 12px; padding: 3px 8px; }
 .s-superseded { background: var(--idle-soft); color: var(--idle); }
 .s-retired, .s-rejected { background: var(--bad-soft); color: var(--bad); }
 .detail-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
@@ -101,7 +102,7 @@ label span.req { color: var(--bad); }
   <header>
     <div>
       <h1>CNC Parts Desk</h1>
-      <p class="sub">Every CNC part, its revisions and which VIN each one starts at. Ask Claude anything about the parts in plain words. Changes are made by Jacob and applied to Hawley by Claude, with the history kept.</p>
+      <p class="sub">Every CNC part, its revisions and which VIN each one starts at. Ask Claude anything about the parts in plain words. Changes are made by Jacob and go into Hawley as soon as they're sent, with the history kept.</p>
     </div>
     <div class="tabs" role="tablist" aria-label="Views">
       <button id="tab-parts" role="tab" aria-selected="true" type="button">Parts<span class="count" id="count-parts"></span></button>
@@ -164,10 +165,12 @@ const TYPES = {
   edit: "Edit a draft",
   retire: "Retire a revision",
   new_part: "New part",
-  link_change: "Link a Part Revision record"
+  link_change: "Link a Part Revision record",
+  follow_up: "Flag for Claude"
 };
-const STATUS_TEXT = { released: "Released", draft: "Draft", superseded: "Superseded", retired: "Retired", pending: "Waiting for Claude", applied: "Applied", rejected: "Not applied" };
-const state = { sheets: [], ecos: [], sheetsById: new Map(), ecosById: new Map(), isOwner: false, sample: null, generatedAt: "", parts: [], history: [], selected: "", search: "", filter: "active", rfilter: "pending", requests: [], db: null, user: null, me: null, profiles: {}, tab: "parts", draft: null };
+const DESK = "host:cnc-parts-desk";
+const STATUS_TEXT = { released: "Released", draft: "Draft", superseded: "Superseded", retired: "Retired", pending: "Waiting for Claude", needs_claude: "Needs Claude", applied: "Applied", rejected: "Not applied" };
+const state = { sheets: [], ecos: [], sheetsById: new Map(), ecosById: new Map(), isOwner: false, sample: null, generatedAt: "", parts: [], history: [], selected: "", search: "", filter: "active", rfilter: "pending", requests: [], db: null, mcp: null, user: null, me: null, profiles: {}, tab: "parts", draft: null };
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const when = iso => iso ? new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
@@ -221,7 +224,7 @@ function renderDetail() {
   if (!part) { $("detail").innerHTML = `<div class="empty">Pick a part on the left.</div>`; return; }
   const revs = [...part.revisions].sort((a, b) => b.revision.localeCompare(a.revision));
   const events = historyFor(part.part_base);
-  const pending = state.requests.filter(r => r.status === "pending" && (r.part_base === part.part_base || (r.part_number || "").startsWith(part.part_base)));
+  const pending = state.requests.filter(r => ["pending", "needs_claude"].includes(r.status) && (r.part_base === part.part_base || (r.part_number || "").startsWith(part.part_base)));
   $("detail").innerHTML = `
     <div class="panel-head">
       <div class="detail-title"><span class="pn">${esc(part.part_base)}</span><span class="name">${esc(part.part_name)}</span></div>
@@ -231,7 +234,7 @@ function renderDetail() {
       <div class="table-wrap"><table>
         <thead><tr><th>Part number</th><th>Status</th><th>Applies from</th><th>Material</th><th>Qty / sheet</th><th>Sheets</th><th>Changes</th><th>Reason</th></tr></thead>
         <tbody>${revs.map(r => `<tr>
-          <td class="pn">${esc(r.part_number)}</td><td>${pill(r.status)}</td>
+          <td class="pn">${esc(r.part_number)}</td><td>${pill(r.status)}${r.status === "draft" && state.isOwner && state.db ? `<br><button class="btn row-btn" type="button" data-flag="${esc(r.part_number)}">Flag for Claude</button>` : ""}</td>
           <td class="eff">${r.status === "released" || r.status === "superseded" ? esc(vinText(r.effective_from_vin)) : "<span class='muted'>—</span>"}</td>
           <td>${esc(r.material_name || "")}</td><td class="mono">${r.quantity_on_sheet ?? ""}</td>
           <td class="mono small">${sheetsOf(r).map(sh => esc(sh.sheet_name)).join("<br>") || "<span class='muted'>—</span>"}</td>
@@ -247,6 +250,14 @@ function renderDetail() {
       </div>
     </div>`;
   wireForm(part);
+  $("detail").querySelectorAll("[data-flag]").forEach(b => b.addEventListener("click", () => {
+    $("f-type").value = "follow_up";
+    $("f-part_number").value = b.dataset.flag;
+    $("f-part_number").dataset.touched = "1";
+    $("f-type").dispatchEvent(new Event("change"));
+    $("f-change_reason").focus();
+    $("request-form").scrollIntoView({ behavior: "smooth", block: "center" });
+  }));
 }
 
 function partChanges(part) {
@@ -312,7 +323,8 @@ const SHOW = {
   edit: ["part_number", "part_name", "material_name", "quantity_on_sheet", "engineering_change_ref"],
   retire: ["part_number"],
   new_part: ["part_base", "part_name", "material_name", "quantity_on_sheet", "engineering_change_ref"],
-  link_change: ["part_number"]
+  link_change: ["part_number"],
+  follow_up: ["part_number"]
 };
 const HINTS = {
   new_revision: "Makes the next letter as a draft, copied from the current revision with your changes. Release it separately once it's ready.",
@@ -321,7 +333,8 @@ const HINTS = {
   edit: "Only drafts can be edited. Released revisions stay as they were built; ask for a new revision instead.",
   retire: "Marks the revision as no longer used.",
   new_part: "Creates a new base number with a draft revision A.",
-  link_change: "Connects an existing Part Revision record (PR) to a revision, without changing the part."
+  link_change: "Connects an existing Part Revision record (PR) to a revision, without changing the part.",
+  follow_up: "For a draft that can't go further yet (missing VIN, waiting on a check). Say what's missing under Why; Claude follows up with you."
 };
 
 function wireForm(part) {
@@ -332,7 +345,8 @@ function wireForm(part) {
     for (const key of ["part_number", "new_part_number", "part_base", "effective_from_vin", "part_name", "material_name", "quantity_on_sheet", "engineering_change_ref"]) $(`w-${key}`).hidden = !SHOW[type].includes(key);
     if (type === "link_change" && $("f-eco").value !== "existing") $("f-eco").value = "existing";
     const eco = $("f-eco").value;
-    $("w-eco").hidden = type === "link_change";
+    $("w-eco").hidden = type === "link_change" || type === "follow_up";
+    if (type === "follow_up" && $("f-eco").value) $("f-eco").value = "";
     $("w-change_number").hidden = eco !== "existing";
     for (const key of ["eco_description", "eco_first_vin", "asana_link"]) $(`w-${key}`).hidden = eco !== "new";
     $("type-hint").textContent = HINTS[type];
@@ -354,16 +368,18 @@ function wireForm(part) {
     $("f-submit").disabled = true;
     setMsg("Sending…", "");
     try {
-      await state.db.collection("requests").add({
+      const followUp = request.type === "follow_up";
+      const ref = await state.db.collection("requests").add({
         ...request,
-        status: "pending",
+        status: followUp ? "needs_claude" : "pending",
         requestedBy: state.me?.id || null,
         requestedByEmail: state.me?.email || null,
         createdAt: new Date().toISOString()
       });
       state.draft = null;
-      setMsg("Sent. Claude will check it and apply it; watch for it under Requests.", "ok");
       form.reset(); sync();
+      if (followUp) setMsg("Flagged. Claude will follow up with you on it.", "ok");
+      else await applyNow(ref, request, part);
     } catch (error) {
       setMsg(error?.code === "not_granted" ? "Your access to this page is view-only, so you can't send requests. Ask Jacob for Contributor access." : `Couldn't send: ${error?.message || error}`, "bad");
     } finally {
@@ -371,6 +387,58 @@ function wireForm(part) {
     }
   });
   sync();
+}
+
+// Applies a just-sent request through the desk connector on Jacob's PC (Claude desktop app). Without it the request
+// stays queued for Claude. A failed check flags the request for Claude instead of dropping it.
+async function applyNow(ref, request, part) {
+  const queued = why => setMsg(`Sent to the queue: ${why} Claude will apply it.`, "ok");
+  if (!state.mcp) { queued("instant apply works only in the Claude desktop app on Jacob's PC."); return; }
+  setMsg("Applying to Hawley…", "");
+  let payload;
+  try {
+    const result = await state.mcp.callTool(DESK, "apply_change", { request: { id: ref.id, ...request, requestedByEmail: state.me?.email || undefined } });
+    payload = result.payload || {};
+  } catch (error) {
+    const code = error?.code;
+    if (code === "cancelled") { queued("you didn't allow the apply."); return; }
+    if (["server_not_connected", "not_in_manifest", "not_granted", "capability_disabled", "capability_removed", "approval_required", "blocked_by_policy"].includes(code)) { queued("the desk connector isn't available here."); return; }
+    if (code === "tool_error") payload = { ok: false, error: error.message };
+    else {
+      // server_unavailable / upstream_error: it may or may not have run.
+      await ref.update({ status: "needs_claude", result: "Couldn't confirm whether this was applied. Claude will check Hawley before doing anything.", processedAt: new Date().toISOString() }).catch(() => {});
+      setMsg("Couldn't confirm it went through. Flagged for Claude to check.", "bad");
+      return;
+    }
+  }
+  if (payload.ok) {
+    await ref.update({ status: "applied", result: payload.summary, processedAt: new Date().toISOString() }).catch(() => {});
+    setMsg(`Done: ${payload.summary}`, "ok");
+    await refreshParts([part.part_base, request.part_base_new, request.new_part_number, request.new_part_number && request.new_part_number.slice(0, -1)]);
+  } else {
+    await ref.update({ status: "needs_claude", result: `Not applied: ${payload.error || "the check failed"} Flagged for Claude to follow up.`, processedAt: new Date().toISOString() }).catch(() => {});
+    setMsg(`Not applied: ${payload.error || "the check failed"} Flagged for Claude.`, "bad");
+  }
+}
+
+async function refreshParts(bases) {
+  bases = [...new Set(bases.filter(Boolean).map(b => String(b).toUpperCase()))];
+  try {
+    const slice = (await state.mcp.callTool(DESK, "refresh_parts", { bases }, { cache: false })).payload;
+    if (!slice?.parts) return;
+    const gone = new Set([...(slice.missing || []), ...slice.parts.map(p => p.part_base.toUpperCase())]);
+    state.parts = [...state.parts.filter(p => !gone.has(p.part_base.toUpperCase())), ...slice.parts].sort((a, b) => a.part_base.localeCompare(b.part_base));
+    const asked = new Set(bases);
+    state.history = [...slice.history, ...state.history.filter(h => !asked.has(String(h.part_base || "").toUpperCase()))].sort((a, b) => Number(b.history_id) - Number(a.history_id));
+    const ecos = new Map(state.ecos.map(e => [Number(e.eco_id), e]));
+    for (const e of slice.engineeringChanges || []) ecos.set(Number(e.eco_id), e);
+    state.ecos = [...ecos.values()].sort((a, b) => Number(a.eco_id) - Number(b.eco_id));
+    state.ecosById = new Map(state.ecos.map(e => [Number(e.eco_id), e]));
+    if (!state.parts.some(p => p.part_base === state.selected)) state.selected = slice.parts[0]?.part_base || state.selected;
+    renderList(); renderDetail();
+  } catch {
+    // The change is in Hawley; the list catches up at Claude's next refresh.
+  }
 }
 
 function collect(part) {
@@ -382,7 +450,7 @@ function collect(part) {
   }
   if (type !== "new_part") out.part_base = part.part_base;
   if (type === "new_part") out.part_base_new = out.part_base;
-  const eco = type === "link_change" ? "existing" : $("f-eco").value;
+  const eco = type === "link_change" ? "existing" : type === "follow_up" ? "" : $("f-eco").value;
   if (eco === "new") {
     out.eco = "new";
     for (const key of ["eco_description", "eco_first_vin", "asana_link"]) { const v = $(`f-${key}`).value.trim(); if (v) out[key] = v; }
@@ -427,8 +495,8 @@ function validate(r, part) {
 function setMsg(text, kind) { const el = $("f-msg"); if (el) { el.textContent = text; el.className = `msg ${kind}`; } }
 
 async function renderRequests() {
-  const list = state.requests.filter(r => state.rfilter === "all" || (state.rfilter === "pending" ? r.status === "pending" : r.requestedBy && r.requestedBy === state.me?.id));
-  const waiting = state.requests.filter(r => r.status === "pending").length;
+  const list = state.requests.filter(r => state.rfilter === "all" || (state.rfilter === "pending" ? ["pending", "needs_claude"].includes(r.status) : r.requestedBy && r.requestedBy === state.me?.id));
+  const waiting = state.requests.filter(r => ["pending", "needs_claude"].includes(r.status)).length;
   $("count-requests").textContent = waiting ? `${waiting} waiting` : "";
   if (!state.db) { $("request-list").innerHTML = `<div class="empty">Requests show here when you open the page signed in to the Bowlus Claude workspace.</div>`; return; }
   if (!list.length) {
@@ -660,6 +728,7 @@ async function connect() {
       try { state.isOwner = await state.user.isOwner(); } catch { state.isOwner = false; }
     }
     state.db = await window.claude?.use?.("db");
+    if (state.isOwner) { try { state.mcp = await window.claude?.use?.("mcp"); } catch { state.mcp = null; } }
   } catch { state.db = null; }
   if (!state.db) { renderRequests(); renderDetail(); return; }
   const timer = setTimeout(() => { if (!state.requests.length) $("request-list").innerHTML = `<div class="empty">Requests are taking a while to load. They'll appear here when the connection catches up.</div>`; }, 10000);
