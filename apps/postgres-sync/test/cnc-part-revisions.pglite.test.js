@@ -153,6 +153,13 @@ test("the desk corrects a wrong part number or value directly, on released revis
   assert.match(await run({ type: "correct", part_number: "01201A", new_part_number: "01201X9" }), /01201A → 01201X9/);
   assert.deepEqual((await rows(db, "select part_number from parts.cnc_part_revisions order by 1")).map(r => r.part_number), ["01201D", "01201X9", "24601BG"]);
   assert.ok((await rows(db, "select 1 from parts.cnc_part_history where changed_by like 'jacob@bowlus.com (CNC Parts Desk c1)'")).length >= 3);
+
+  // The page refreshes just the parts a change touched; a renamed base comes back as missing.
+  const { exportParts } = await import("../../../scripts/cnc-parts-desk.mjs");
+  const slice = await exportParts(db, ["24601be", "24601BG", "01201"]);
+  assert.deepEqual(slice.parts.map(p => p.part_base), ["01201", "24601BG"]);
+  assert.deepEqual(slice.missing, ["24601BE"]);
+  assert.ok(slice.history.length && slice.history.every(h => ["01201", "24601BG", "24601BE"].includes(h.part_base)));
 });
 
 async function databaseWithEcos(parts, ecos) {
